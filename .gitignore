@@ -6,6 +6,9 @@ __pycache__/
 # Extracted polyglot books (regenerable via scripts/extract_polyglot_books.py)
 sft/make_data/polyglot_opening_books/*.bin
 
+# Syzygy tablebase data (940MB, downloaded via scripts/download_tablebases.py)
+sft/make_data/data/
+
 # Output data (generated, not source)
 E:/chess_sft_data/
 
