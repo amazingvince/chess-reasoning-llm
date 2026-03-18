@@ -143,17 +143,56 @@ def answer_endgame_wdl(wdl: int) -> str:
     return _WDL_LABELS.get(wdl, f"WDL value: {wdl}")
 
 
+def answer_opening_name(fen: str, name: str, eco: str) -> str:
+    """Data quality check for opening identification examples."""
+    if not name or not eco:
+        return ""
+    # Verify FEN is parseable
+    chess.Board(fen)
+    return f"{name} (ECO: {eco})"
+
+
+def answer_best_move_exists(fen: str, best_move: str) -> str:
+    """Verify best_move is legal in fen."""
+    board = chess.Board(fen)
+    move = chess.Move.from_uci(best_move)
+    if move not in board.legal_moves:
+        raise ValueError(f"best_move {best_move!r} is not legal in FEN")
+    return best_move
+
+
+def answer_mate_choice(
+    fen: str, move_a: str, move_b: str, better_move: str,
+) -> str:
+    """Verify both moves legal and better_move is one of them."""
+    board = chess.Board(fen)
+    ma = chess.Move.from_uci(move_a)
+    mb = chess.Move.from_uci(move_b)
+    if ma not in board.legal_moves:
+        raise ValueError(f"move_a {move_a!r} is not legal in FEN")
+    if mb not in board.legal_moves:
+        raise ValueError(f"move_b {move_b!r} is not legal in FEN")
+    if better_move not in (move_a, move_b):
+        raise ValueError(
+            f"better_move {better_move!r} is not one of {move_a!r}, {move_b!r}"
+        )
+    return better_move
+
+
 # ---------------------------------------------------------------------------
 # Split-to-task mapping
 # ---------------------------------------------------------------------------
 
 SPLIT_CHECKS: dict[str, list] = {
-    "perception": [answer_legal_moves, answer_check_detection],
-    "rules": [answer_legal_moves, answer_check_detection],
+    "perception": [answer_legal_moves, answer_material_balance, answer_check_detection],
+    "rules": [answer_legal_moves, answer_check_detection, answer_captures],
     "tactics": [answer_captures],
-    "evaluation": [answer_position_eval],
+    "evaluation": [answer_position_eval, answer_material_balance, answer_pawn_structure],
+    "openings": [answer_opening_name],
     "endgames": [answer_endgame_classification, answer_endgame_wdl],
-    "chess960": [answer_legal_moves],
+    "planning": [answer_best_move_exists],
+    "chess960": [answer_legal_moves, answer_check_detection],
+    "mate": [answer_mate_choice],
 }
 
 
@@ -174,8 +213,15 @@ class EvalResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _run_check(fn, example: dict) -> tuple[bool, str]:
-    """Run a single answer function on an example. Returns (ok, error_msg)."""
+_SKIP = "skip"
+
+
+def _run_check(fn, example: dict) -> tuple[bool | str, str]:
+    """Run a single answer function on an example.
+
+    Returns ``(True, "")`` on pass, ``(False, error_msg)`` on fail,
+    or ``("skip", "")`` when required fields are missing.
+    """
     fen = example.get("fen", "")
 
     try:
@@ -183,18 +229,38 @@ def _run_check(fn, example: dict) -> tuple[bool, str]:
             cp = example.get("cp")
             mate = example.get("mate")
             if cp is None and mate is None:
-                return True, ""  # skip — no eval data
+                return _SKIP, ""
             result = fn(cp, mate)
         elif fn is answer_endgame_wdl:
             wdl = example.get("wdl")
             if wdl is None:
-                return True, ""
+                return _SKIP, ""
             result = fn(wdl)
         elif fn is answer_endgame_classification:
             result = fn(fen, example.get("material"))
+        elif fn is answer_opening_name:
+            name = example.get("name", "")
+            eco = example.get("eco", "")
+            if not name or not eco:
+                return _SKIP, ""
+            result = fn(fen, name, eco)
+        elif fn is answer_best_move_exists:
+            best_move = (example.get("best_move")
+                         or example.get("solution_first_move")
+                         or "")
+            if not best_move:
+                return _SKIP, ""
+            result = fn(fen, best_move)
+        elif fn is answer_mate_choice:
+            move_a = example.get("move_a", "")
+            move_b = example.get("move_b", "")
+            better = example.get("better_move", "")
+            if not (move_a and move_b and better):
+                return _SKIP, ""
+            result = fn(fen, move_a, move_b, better)
         else:
             if not fen:
-                return True, ""
+                return _SKIP, ""
             result = fn(fen)
 
         # Basic sanity: result is non-empty
@@ -221,17 +287,25 @@ def evaluate_split(split_name: str, examples: list[dict]) -> EvalResult:
         return result
 
     for ex in examples:
-        ex_ok = True
+        n_skip = 0
+        n_pass = 0
+        n_fail = 0
         for fn in checks:
-            ok, err = _run_check(fn, ex)
-            if not ok:
-                ex_ok = False
+            status, err = _run_check(fn, ex)
+            if status is _SKIP:
+                n_skip += 1
+            elif status:
+                n_pass += 1
+            else:
+                n_fail += 1
                 if len(result.errors) < 20:
                     result.errors.append(err)
-                break
-        if ex_ok:
+        if n_fail > 0:
+            result.failed += 1
+        elif n_pass > 0:
             result.passed += 1
         else:
-            result.failed += 1
+            # All checks skipped — no applicable check ran
+            result.skipped += 1
 
     return result

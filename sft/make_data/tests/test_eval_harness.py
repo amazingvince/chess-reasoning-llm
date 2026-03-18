@@ -136,3 +136,86 @@ def test_evaluate_split_jsonl_roundtrip(tmp_path):
 
     result = evaluate_split("perception", loaded)
     assert result.passed == 2
+
+
+# ── New answer functions ──────────────────────────────────────────────
+
+
+def test_answer_opening_name_valid():
+    from validation.eval_harness import answer_opening_name
+
+    result = answer_opening_name(STARTING_FEN, "Sicilian Defense", "B20")
+    assert result == "Sicilian Defense (ECO: B20)"
+
+
+def test_answer_best_move_exists_valid():
+    from validation.eval_harness import answer_best_move_exists
+
+    result = answer_best_move_exists(STARTING_FEN, "e2e4")
+    assert result == "e2e4"
+
+
+def test_answer_best_move_exists_illegal():
+    from validation.eval_harness import answer_best_move_exists
+
+    with pytest.raises(ValueError, match="not legal"):
+        answer_best_move_exists(STARTING_FEN, "e1e5")
+
+
+def test_answer_mate_choice_valid():
+    from validation.eval_harness import answer_mate_choice
+
+    result = answer_mate_choice(STARTING_FEN, "e2e4", "d2d4", "e2e4")
+    assert result == "e2e4"
+
+
+def test_answer_mate_choice_invalid_better():
+    from validation.eval_harness import answer_mate_choice
+
+    with pytest.raises(ValueError, match="not one of"):
+        answer_mate_choice(STARTING_FEN, "e2e4", "d2d4", "a2a3")
+
+
+# ── Split coverage ────────────────────────────────────────────────────
+
+
+def test_all_nine_splits_have_checks():
+    """All 9 splits now have entries in SPLIT_CHECKS."""
+    from validation.eval_harness import SPLIT_CHECKS
+
+    expected = {
+        "perception", "rules", "tactics", "evaluation",
+        "openings", "endgames", "planning", "chess960", "mate",
+    }
+    assert set(SPLIT_CHECKS.keys()) == expected
+
+
+def test_perception_vs_rules_different_checks():
+    """Perception and rules splits should have different check functions."""
+    from validation.eval_harness import SPLIT_CHECKS
+
+    perc = set(fn.__name__ for fn in SPLIT_CHECKS["perception"])
+    rules = set(fn.__name__ for fn in SPLIT_CHECKS["rules"])
+    assert perc != rules
+
+
+def test_evaluate_planning_with_best_move_passes():
+    """A planning row with best_move passes the check."""
+    from validation.eval_harness import evaluate_split
+
+    examples = [{"fen": STARTING_FEN, "best_move": "e2e4"}]
+    result = evaluate_split("planning", examples)
+    assert result.total == 1
+    assert result.passed == 1
+    assert result.skipped == 0
+
+
+def test_evaluate_planning_no_move_at_all_is_skipped():
+    """A planning row with no move fields at all is skipped, not passed."""
+    from validation.eval_harness import evaluate_split
+
+    examples = [{"fen": STARTING_FEN}]
+    result = evaluate_split("planning", examples)
+    assert result.total == 1
+    assert result.skipped == 1
+    assert result.passed == 0

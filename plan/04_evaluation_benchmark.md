@@ -36,7 +36,7 @@ with any eval example.
 | **Evaluation** | Stockfish-evaluated positions | 1,500 | Material balance, eval bucket accuracy (5 buckets), pawn structure features |
 | **Openings** | Lichess openings (held-out ECOs) | 500 | Opening name accuracy, continuation quality (Stockfish rank) |
 | **Endgames** | Syzygy-backed positions | 1,500 | WDL accuracy, best move (DTZ-optimal), endgame type classification |
-| **Planning** | Lichess puzzles + game positions | 2,000 | Puzzle pass@1, pass@8, ACPL, format compliance, legal move rate |
+| **Planning** | Lichess puzzles + engine-evaluated positions | 2,000 | Puzzle pass@1, pass@8, ACPL, format compliance, legal move rate |
 | **Chess960** | Chess960 positions only | 500 | Legal move gen, castling rule accuracy |
 | **MATE** | MATE dataset (held-out) | 1,000 | Binary choice accuracy (with/without explanations) |
 | **Total** | | **13,000** | |

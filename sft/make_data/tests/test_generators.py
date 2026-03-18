@@ -24,6 +24,29 @@ AFTER_E4_D5 = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 # ── Tier 1: PieceCounting ────────────────────────────────────────────
 
 
+def test_piece_identification_square_board_template(monkeypatch):
+    """PieceIdentification can render board-based square prompts."""
+    from generators import tier1_perception
+
+    monkeypatch.setitem(
+        tier1_perception.TEMPLATES,
+        "1.3_piece_identification",
+        ["Board:\n{board}\nWhat piece is on {square}?"],
+    )
+
+    gen = tier1_perception.PieceIdentification(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(1),
+    )
+    ex = list(gen.generate())[0]
+    user_prompt = ex["messages"][1]["content"]
+
+    assert "Board:" in user_prompt
+    assert "8 r n b q k b n r" in user_prompt
+    assert "FEN:" not in user_prompt
+    assert "{" not in user_prompt
+
+
 def test_piece_counting_color_template(monkeypatch):
     """Force 'How many pieces does {color}' -> answer mentions only that color."""
     from generators.tier1_perception import PieceCounting
@@ -86,6 +109,27 @@ def test_piece_counting_minor_pieces_template(monkeypatch):
     assert "minor piece(s)" in answer
     assert "knight(s)" in answer
     assert "bishop(s)" in answer
+
+
+def test_piece_counting_board_template(monkeypatch):
+    """Board-based counting prompts render the derived ASCII board."""
+    from generators.tier1_perception import PieceCounting
+
+    tpl = "Board:\n{board}\nHow many pieces does {color} have?"
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    gen = PieceCounting(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+    ex = list(gen.generate())[0]
+    user_prompt = ex["messages"][1]["content"]
+
+    assert "Board:" in user_prompt
+    assert "8 r n b q k b n r" in user_prompt
+    assert "{" not in user_prompt
 
 
 def test_piece_counting_example_structure(monkeypatch):
@@ -159,6 +203,36 @@ def test_legal_move_gen_correct_moves(monkeypatch):
     board = chess.Board(STARTING_FEN)
     expected = sorted(m.uci() for m in board.legal_moves)
     assert answer.strip().split() == expected
+
+
+def test_legal_move_gen_board_state_template(monkeypatch):
+    """Board/state placeholders render for legal-move prompts."""
+    from generators.tier2_rules import LegalMoveGen
+
+    tpl = (
+        "Board:\n{board}\n"
+        "Side to move: {side_to_move}\n"
+        "Castling rights: {castling_rights}\n"
+        "En passant: {en_passant_square}\n"
+        "List all legal moves."
+    )
+    monkeypatch.setattr(
+        "generators.tier2_rules.select_template", lambda tid, rng: tpl
+    )
+
+    gen = LegalMoveGen(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+    ex = list(gen.generate())[0]
+    user_prompt = ex["messages"][1]["content"]
+
+    assert "Board:" in user_prompt
+    assert "8 r n b q k b n r" in user_prompt
+    assert "Side to move: white" in user_prompt
+    assert "Castling rights: KQkq" in user_prompt
+    assert "En passant: none" in user_prompt
+    assert "{" not in user_prompt
 
 
 # ── Tier 2: SpecialRules ─────────────────────────────────────────────

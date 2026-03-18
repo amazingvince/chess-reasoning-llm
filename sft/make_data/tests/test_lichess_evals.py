@@ -62,7 +62,64 @@ def test_flush_batch_keeps_highest_depth(tmp_path):
     conn.close()
 
 
+def test_flush_batch_same_depth_higher_knodes_replaces(tmp_path):
+    """Same depth, higher knodes — _flush_batch replaces the stored row."""
+    db_path = tmp_path / "dedup.db"
+    conn = _init_dedup_db(db_path)
+
+    batch1 = [(STARTING_FEN, "e2e4", "e2e4 e7e5", 20, 100, 30, None)]
+    _flush_batch(conn, batch1)
+
+    batch2 = [(STARTING_FEN, "d2d4", "d2d4 d7d5", 20, 200, 35, None)]
+    _flush_batch(conn, batch2)
+
+    row = conn.execute(
+        "SELECT depth, knodes, best_move FROM evals WHERE fen = ?", (STARTING_FEN,)
+    ).fetchone()
+    assert row[0] == 20
+    assert row[1] == 200
+    assert row[2] == "d2d4"
+    conn.close()
+
+
 # ── stream_evals dedup ───────────────────────────────────────────────
+
+
+def test_stream_dedup_cross_run_same_depth_prefers_higher_knodes(monkeypatch, tmp_path):
+    """Cross-run: DB has depth 20 / knodes 100, stream has depth 20 / knodes 200.
+
+    The streamed row must replace the DB row — not be silently skipped.
+    """
+    from sources import lichess_evals
+
+    # Pre-populate DB with the lower-knodes row
+    db_path = tmp_path / "dedup.db"
+    conn = _init_dedup_db(db_path)
+    _flush_batch(conn, [(STARTING_FEN, "e2e4", "e2e4 e7e5", 20, 100, 30, None)])
+    conn.close()
+
+    # Stream a higher-knodes row at the same depth
+    rows = [
+        {
+            "fen": STARTING_FEN, "depth": 20,
+            "line": "d2d4 d7d5", "cp": 35, "mate": None, "knodes": 200,
+        },
+    ]
+    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
+
+    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    assert len(results) == 1
+    assert results[0]["knodes"] == 200
+    assert results[0]["best_move"] == "d2d4"
+
+    # DB should also be updated
+    conn2 = _init_dedup_db(db_path)
+    row = conn2.execute(
+        "SELECT knodes, best_move FROM evals WHERE fen = ?", (STARTING_FEN,)
+    ).fetchone()
+    assert row[0] == 200
+    assert row[1] == "d2d4"
+    conn2.close()
 
 
 def test_stream_dedup_skips_lower_depth(monkeypatch, tmp_path):
@@ -113,6 +170,30 @@ def test_stream_dedup_lower_then_higher_yields_only_higher(monkeypatch, tmp_path
     results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
     assert len(results) == 1
     assert results[0]["depth"] == 25
+    assert results[0]["best_move"] == "d2d4"
+
+
+def test_stream_dedup_same_depth_prefers_higher_knodes(monkeypatch, tmp_path):
+    """Same FEN at same depth — knodes tie-breaks, higher knodes wins."""
+    from sources import lichess_evals
+
+    rows = [
+        {
+            "fen": STARTING_FEN, "depth": 20,
+            "line": "e2e4 e7e5", "cp": 30, "mate": None, "knodes": 100,
+        },
+        {
+            "fen": STARTING_FEN, "depth": 20,
+            "line": "d2d4 d7d5", "cp": 35, "mate": None, "knodes": 200,
+        },
+    ]
+
+    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
+
+    db_path = tmp_path / "dedup.db"
+    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    assert len(results) == 1
+    assert results[0]["knodes"] == 200
     assert results[0]["best_move"] == "d2d4"
 
 

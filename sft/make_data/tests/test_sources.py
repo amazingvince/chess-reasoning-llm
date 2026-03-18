@@ -8,52 +8,51 @@ import pytest
 from conftest import STARTING_FEN
 
 
-# ── mate_dataset: _to_uci ──────────────────────────────────────────
+# ── mate_dataset: _validate_uci ────────────────────────────────────
 
 
-def test_to_uci_san_e4():
-    from sources.mate_dataset import _to_uci
-
-    board = chess.Board(STARTING_FEN)
-    assert _to_uci(board, "e4") == "e2e4"
-
-
-def test_to_uci_passthrough_uci():
-    from sources.mate_dataset import _to_uci
+def test_validate_uci_legal():
+    from sources.mate_dataset import _validate_uci
 
     board = chess.Board(STARTING_FEN)
-    assert _to_uci(board, "e2e4") == "e2e4"
+    m = _validate_uci(board, "e2e4")
+    assert m is not None
+    assert m.uci() == "e2e4"
 
 
-def test_to_uci_invalid():
-    from sources.mate_dataset import _to_uci
-
-    board = chess.Board(STARTING_FEN)
-    assert _to_uci(board, "xyz") == ""
-
-
-def test_to_uci_empty():
-    from sources.mate_dataset import _to_uci
+def test_validate_uci_illegal():
+    from sources.mate_dataset import _validate_uci
 
     board = chess.Board(STARTING_FEN)
-    assert _to_uci(board, "") == ""
+    assert _validate_uci(board, "e1e5") is None
+
+
+def test_validate_uci_invalid_str():
+    from sources.mate_dataset import _validate_uci
+
+    board = chess.Board(STARTING_FEN)
+    assert _validate_uci(board, "xyz") is None
+
+
+def test_validate_uci_empty():
+    from sources.mate_dataset import _validate_uci
+
+    board = chess.Board(STARTING_FEN)
+    assert _validate_uci(board, "") is None
 
 
 # ── mate_dataset: _process_row ──────────────────────────────────────
 
 
-def test_process_row_valid_san():
+def test_process_row_valid():
     from sources.mate_dataset import _process_row
 
     row = {
-        "fen": STARTING_FEN,
-        "move_a": "e4",
-        "move_b": "d4",
-        "better_move": "A",
-        "strategy": "",
-        "tactic": "",
+        "input": f'The FEN of the given chess board is "{STARTING_FEN}". '
+                 'Which move is better? MoveA:e2e4 MoveB:d2d4 ',
+        "output": "MoveA:e2e4",
     }
-    result = _process_row(row, "all")
+    result = _process_row(row)
     assert result is not None
     assert result["move_a"] == "e2e4"
     assert result["move_b"] == "d2d4"
@@ -64,39 +63,35 @@ def test_process_row_invalid_fen():
     from sources.mate_dataset import _process_row
 
     row = {
-        "fen": "not-a-valid-fen",
-        "move_a": "e4",
-        "move_b": "d4",
-        "better_move": "A",
+        "input": 'The FEN of the given chess board is "not-a-valid-fen". '
+                 'Which move is better? MoveA:e2e4 MoveB:d2d4 ',
+        "output": "MoveA:e2e4",
     }
-    assert _process_row(row, "all") is None
+    assert _process_row(row) is None
 
 
-def test_process_row_subset_filter():
+def test_process_row_move_b_chosen():
     from sources.mate_dataset import _process_row
 
     row = {
-        "fen": STARTING_FEN,
-        "move_a": "e4",
-        "move_b": "d4",
-        "better_move": "A",
-        "strategy": "",
-        "tactic": "",
+        "input": f'The FEN of the given chess board is "{STARTING_FEN}". '
+                 'Which move is better? MoveA:e2e4 MoveB:d2d4 ',
+        "output": "MoveB:d2d4",
     }
-    # Subset "S" requires strategy — this row has none
-    assert _process_row(row, "S") is None
+    result = _process_row(row)
+    assert result is not None
+    assert result["better_move"] == "d2d4"
 
 
 def test_process_row_better_move_label_a():
     from sources.mate_dataset import _process_row
 
     row = {
-        "fen": STARTING_FEN,
-        "move_a": "e2e4",
-        "move_b": "d2d4",
-        "better_move": "A",
+        "input": f'The FEN of the given chess board is "{STARTING_FEN}". '
+                 'Which move is better? MoveA:e2e4 MoveB:d2d4 ',
+        "output": "MoveA:e2e4",
     }
-    result = _process_row(row, "all")
+    result = _process_row(row)
     assert result is not None
     assert result["better_move"] == "e2e4"
 

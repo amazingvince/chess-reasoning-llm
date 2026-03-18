@@ -89,3 +89,57 @@ def test_intra_split_dedup(monkeypatch):
     fens = [ex["fen"] for ex in splits["planning"]]
     assert len(fens) == len(set(fens)), f"Intra-split duplicates: {fens}"
     assert len(fens) == 5  # only 5 unique FENs available
+
+
+# ── partition_eco_codes ──────────────────────────────────────────────
+
+
+def test_partition_eco_no_overlap():
+    """Eval and train openings share no ECO codes."""
+    openings = [
+        {"fen": f"pos_{i}", "eco": f"B{i:02d}"} for i in range(20)
+    ]
+    from pool.eval_split import partition_eco_codes
+
+    eval_o, train_o = partition_eco_codes(openings, holdout_fraction=0.25, seed=42)
+    eval_ecos = {r["eco"] for r in eval_o}
+    train_ecos = {r["eco"] for r in train_o}
+    assert eval_ecos & train_ecos == set()
+
+
+def test_partition_eco_deterministic():
+    """Same seed produces same partition."""
+    openings = [
+        {"fen": f"pos_{i}", "eco": f"C{i:02d}"} for i in range(30)
+    ]
+    from pool.eval_split import partition_eco_codes
+
+    e1, t1 = partition_eco_codes(openings, seed=99)
+    e2, t2 = partition_eco_codes(openings, seed=99)
+    assert [r["eco"] for r in e1] == [r["eco"] for r in e2]
+
+
+def test_partition_eco_all_assigned():
+    """Every opening goes to either eval or train."""
+    openings = [
+        {"fen": f"pos_{i}", "eco": f"A{i:02d}"} for i in range(15)
+    ]
+    from pool.eval_split import partition_eco_codes
+
+    eval_o, train_o = partition_eco_codes(openings, seed=42)
+    assert len(eval_o) + len(train_o) == len(openings)
+
+
+def test_partition_eco_fraction_respected():
+    """Holdout fraction roughly respected (within 1 ECO of target)."""
+    openings = [
+        {"fen": f"pos_{i}", "eco": f"D{i:02d}"} for i in range(100)
+    ]
+    from pool.eval_split import partition_eco_codes
+
+    eval_o, train_o = partition_eco_codes(
+        openings, holdout_fraction=0.15, seed=42,
+    )
+    # 100 unique ECOs * 0.15 = 15 eval ECOs
+    eval_ecos = {r["eco"] for r in eval_o}
+    assert 14 <= len(eval_ecos) <= 16

@@ -35,6 +35,7 @@ POOL_DIR = OUTPUT_DIR / "pool"
 EVAL_SPLITS_DIR = OUTPUT_DIR / "eval_splits"
 ANNOTATIONS_DIR = OUTPUT_DIR / "annotations"
 TIER_OUTPUT_DIR = OUTPUT_DIR / "output"
+BENCHMARK_DIR = OUTPUT_DIR / "benchmark"
 
 # ---------------------------------------------------------------------------
 # HuggingFace dataset IDs
@@ -73,10 +74,10 @@ VOLUMES: dict[str, int] = {
     "4.1_material_balance": 50_000,
     "4.2_position_evaluation": 60_000,
     "4.3_pawn_structure": 40_000,
-    # Tier 5 — Openings (~10K; capped by ~3,630 Lichess openings)
-    "5.1_opening_identification": 3_600,
-    "5.2_opening_continuation": 3_600,
-    "5.3_opening_principles": 3_600,
+    # Tier 5 — Openings (~9K; capped by ~3,090 train openings after 15% ECO holdout)
+    "5.1_opening_identification": 3_000,
+    "5.2_opening_continuation": 3_000,
+    "5.3_opening_principles": 3_000,
     # Tier 6 — Endgames (~140K)
     "6.1_endgame_classification": 30_000,
     "6.2_endgame_wdl": 40_000,

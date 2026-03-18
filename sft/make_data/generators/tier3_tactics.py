@@ -183,10 +183,22 @@ class AttackedDefended(TaskGenerator):
             if not parts:
                 parts.append(f"Square {square_name} is not attacked by either side.")
 
+            # Defense: if a piece is on the square, note its defenders
+            if piece:
+                defenders = board.attackers(piece.color, sq)
+                if defenders:
+                    d_pieces = [
+                        f"{_PIECE_NAMES[board.piece_at(s).piece_type]} on {chess.square_name(s)}"
+                        for s in defenders if board.piece_at(s)
+                    ]
+                    color_name = "white" if piece.color == chess.WHITE else "black"
+                    parts.append(f"Defended by {color_name} ({len(d_pieces)}): {', '.join(d_pieces)}.")
+                else:
+                    parts.append(f"The {piece_name} on {square_name} is not defended.")
+
             answer = " ".join(parts)
-            color = self.rng.choice(["white", "black"])
             raw = {"fen": fen, "square": square_name, "piece": piece_name,
-                   "color": color, "is_chess960": is_960}
+                   "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)

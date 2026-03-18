@@ -151,10 +151,10 @@ forward into SDPO.
 | T2: Rules | Legal moves, special rules | ~370K | 23% |
 | T3: Tactics | Captures, threats, patterns | ~260K | 16% |
 | T4: Evaluation | Material, position, pawns | ~150K | 9% |
-| T5: Openings | Names, plans, continuations | ~75K | 5% |
+| T5: Openings | Names, plans, continuations | ~9K | 1% |
 | T6: Endgames | Classification, technique | ~140K | 9% |
 | T7: Planning | Best move, puzzles, analysis | ~170K | 11% |
-| **Total** | | **~1.6M** | 100% |
+| **Total** | | **~1.5M** | 100% |
 
 ---
 

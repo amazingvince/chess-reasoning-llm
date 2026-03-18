@@ -123,3 +123,59 @@ def load_blocklist(path: str) -> frozenset[str]:
             if line:
                 fens.add(line)
     return frozenset(fens)
+
+
+def partition_eco_codes(
+    openings: list[dict],
+    holdout_fraction: float = 0.15,
+    seed: int = MASTER_SEED,
+) -> tuple[list[dict], list[dict]]:
+    """Split openings by ECO code so same-family positions stay together.
+
+    All positions sharing an ECO code go to the same partition, preventing
+    opening-family leakage between eval and train sets.
+
+    Parameters
+    ----------
+    openings : list[dict]
+        Each dict must have an ``"eco"`` key (e.g. ``"B90"``).
+    holdout_fraction : float
+        Fraction of *unique ECO codes* held out for eval (default 15%).
+    seed : int
+        Seed for reproducible shuffling.
+
+    Returns
+    -------
+    (eval_openings, train_openings)
+    """
+    rng = Random(seed)
+
+    # Collect unique ECO codes
+    eco_to_rows: dict[str, list[dict]] = {}
+    for row in openings:
+        eco = row.get("eco", "")
+        if not eco:
+            continue
+        eco_to_rows.setdefault(eco, []).append(row)
+
+    ecos = sorted(eco_to_rows.keys())
+    rng.shuffle(ecos)
+
+    n_holdout = max(1, int(len(ecos) * holdout_fraction))
+    eval_ecos = set(ecos[:n_holdout])
+
+    eval_openings: list[dict] = []
+    train_openings: list[dict] = []
+    for eco in ecos:
+        rows = eco_to_rows[eco]
+        if eco in eval_ecos:
+            eval_openings.extend(rows)
+        else:
+            train_openings.extend(rows)
+
+    logger.info(
+        "ECO partition: %d eval ECOs (%d rows), %d train ECOs (%d rows)",
+        len(eval_ecos), len(eval_openings),
+        len(ecos) - len(eval_ecos), len(train_openings),
+    )
+    return eval_openings, train_openings

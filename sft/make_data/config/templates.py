@@ -1,13 +1,17 @@
 """
 Prompt templates for all 28 SFT tasks.
 
-Each task has 5-10 templates. Generators call select_template(task_id, rng)
-to pick one at random. Templates use {fen}, {square}, {color}, {piece},
-{move}, {moves}, {eco}, {name}, {material}, {side}, {n_moves} etc.
+Each task has multiple prompt variants. Generators call
+select_template(task_id, rng) to pick one at random. Templates may use
+{fen}, {board}, {side_to_move}, {castling_rights},
+{en_passant_square}, {square}, {color}, {piece}, {move}, {moves},
+{eco}, {name}, {material}, {side}, {n_moves}, etc.
 """
 
 from __future__ import annotations
+
 from random import Random
+
 
 TEMPLATES: dict[str, list[str]] = {
     # ---- Tier 1: Perception ----
@@ -19,6 +23,8 @@ TEMPLATES: dict[str, list[str]] = {
         "What does this position look like?\n{fen}",
         "Here is a FEN string: {fen}\nLay out the board in ASCII.",
         "Draw the board state for: {fen}",
+        "Take this FEN and draw the position as a board:\n{fen}",
+        "Convert the position below from FEN into a board diagram:\n{fen}",
     ],
     "1.2_board_to_fen": [
         "Here is the current board:\n{board}\nWrite the FEN for this position.",
@@ -27,6 +33,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nProduce the FEN string.",
         "Look at this board:\n{board}\nExpress it as a FEN string.",
         "{board}\nWhat FEN represents this position?",
+        "Board position:\n{board}\nReturn the complete FEN.",
+        "Read this ASCII board and give the FEN:\n{board}",
     ],
     "1.3_piece_identification": [
         "FEN: {fen}\nWhat piece is on {square}?",
@@ -37,6 +45,8 @@ TEMPLATES: dict[str, list[str]] = {
         "In this position, list the squares occupied by {color} {piece}s.\nFEN: {fen}",
         "FEN: {fen}\nName every {color} piece and its square.",
         "What pieces does {color} have in this position?\nFEN: {fen}",
+        "Board:\n{board}\nWhat piece is on {square}?",
+        "Board:\n{board}\nWhere are the {color} {piece}s?",
     ],
     "1.4_piece_counting": [
         "FEN: {fen}\nHow many pieces does {color} have?",
@@ -46,6 +56,8 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nCount all pieces and pawns for each side.",
         "What is the material balance in this position?\nFEN: {fen}",
         "FEN: {fen}\nHow many minor pieces does {color} have?",
+        "Board:\n{board}\nHow many pieces does {color} have?",
+        "Board:\n{board}\nCount the {piece}s on the board.",
     ],
     "1.5_state_tracking": [
         "Starting FEN: {fen}\nAfter the moves {moves}, what is the resulting position?",
@@ -54,6 +66,7 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nThe following moves are played: {moves}\nShow the resulting FEN.",
         "Given FEN: {fen}\nAfter {n_moves} move(s): {moves}\nWhat position do we reach?",
         "Start: {fen}\nPlay: {moves}\nResult FEN?",
+        "Initial board:\n{board}\nInitial FEN: {fen}\nApply {moves} and give the resulting FEN.",
     ],
 
     # ---- Tier 2: Rules ----
@@ -65,6 +78,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nWhat moves can the side to move play?",
         "List every legal move available.\nFEN: {fen}",
         "FEN: {fen}\nWhat are all possible moves here?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nList all legal moves.",
+        "Using this board and full state:\n{board}\nFEN: {fen}\nEnumerate every legal move.",
     ],
     "2.2_piece_specific_moves": [
         "FEN: {fen}\nWhat legal moves does the piece on {square} have?",
@@ -73,6 +88,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nWhat are the legal moves from {square}?",
         "Position: {fen}\nShow every legal move originating from {square}.",
         "FEN: {fen}\nWhere can the {piece} on {square} go?",
+        "Board:\n{board}\nFEN: {fen}\nWhat legal moves does the piece on {square} have?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nList the legal moves from {square}.",
     ],
     "2.3_move_legality_check": [
         "FEN: {fen}\nIs the move {move} legal?",
@@ -81,6 +98,7 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nCheck whether {move} is a valid move.",
         "Position: {fen}\nMove: {move}\nIs this move legal?",
         "Can {move} be played in this position?\nFEN: {fen}",
+        "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nIs {move} legal?",
     ],
     "2.4_check_detection": [
         "FEN: {fen}\nIs the king in check?",
@@ -89,6 +107,7 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nIs this check, checkmate, stalemate, or a normal position?",
         "Position: {fen}\nWhat is the status of the position?",
         "FEN: {fen}\nIs the side to move in check?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nWhat is the status of this position?",
     ],
     "2.5_special_rules": [
         "FEN: {fen}\nCan the side to move castle? If so, which side(s)?",
@@ -97,6 +116,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nList any special moves available (castling, en passant, promotion).",
         "FEN: {fen}\nWhat promotion options are available for the pawn on {square}?",
         "Position: {fen}\nIdentify any special rules that apply here.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nWhat special rules apply here?",
+        "Board:\n{board}\nFEN: {fen}\nWhat promotion options are available for the pawn on {square}?",
     ],
 
     # ---- Tier 3: Tactics ----
@@ -107,6 +128,7 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nWhich pieces can be captured right now?",
         "Given FEN: {fen}\nList all possible captures in UCI notation.",
         "Position: {fen}\nFind every capture move.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nEn passant: {en_passant_square}\nList all capture moves.",
     ],
     "3.2_threats": [
         "FEN: {fen}\nWhat pieces are {color} threatening?",
@@ -115,14 +137,18 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nList the threats the side to move creates.",
         "Position: {fen}\nWhat are the immediate threats in this position?",
         "FEN: {fen}\nIdentify all pieces that are being attacked by {color}.",
+        "Board:\n{board}\nWhat pieces are {color} threatening?",
+        "Board:\n{board}\nWhich {color} pieces are under attack?",
     ],
     "3.3_attacked_defended": [
-        "FEN: {fen}\nIs the square {square} attacked by {color}?",
+        "FEN: {fen}\nWhich pieces attack and defend {square}?",
         "In position {fen}, which pieces attack square {square}?",
-        "FEN: {fen}\nIs the {piece} on {square} defended?",
-        "Given FEN: {fen}\nList all {color} pieces attacking {square}.",
         "FEN: {fen}\nIs {square} attacked, defended, both, or neither?",
         "Position: {fen}\nHow many times is {square} attacked and defended?",
+        "FEN: {fen}\nAnalyze the attackers and defenders of {square}.",
+        "Given FEN: {fen}\nList all pieces attacking or defending {square}.",
+        "Board:\n{board}\nWhich pieces attack and defend {square}?",
+        "Board:\n{board}\nIs {square} attacked, defended, both, or neither?",
     ],
     "3.4_tactical_patterns": [
         "FEN: {fen}\nFind the best tactical move.",
@@ -131,6 +157,7 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nIdentify the tactical pattern and the winning move.",
         "Position: {fen}\nThere is a tactical opportunity here. What is it?",
         "FEN: {fen}\nWhat is the strongest move exploiting a tactical motif?",
+        "Board:\n{board}\nFEN: {fen}\nFind the best tactical move.",
     ],
     "3.5_hanging_pieces": [
         "FEN: {fen}\nAre there any hanging (undefended) pieces?",
@@ -139,6 +166,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nList pieces that are attacked but not defended.",
         "Position: {fen}\nFind any pieces that are en prise.",
         "FEN: {fen}\nWhich pieces are unprotected and under attack?",
+        "Board:\n{board}\nAre there any hanging pieces?",
+        "Board:\n{board}\nWhich pieces are unprotected and under attack?",
     ],
 
     # ---- Tier 4: Evaluation ----
@@ -149,6 +178,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nCalculate the material difference in pawns.",
         "Position: {fen}\nWhat is the total material for white and black?",
         "FEN: {fen}\nEvaluate the material balance using standard piece values.",
+        "Board:\n{board}\nWhat is the material balance?",
+        "Board:\n{board}\nCount the material for both sides.",
     ],
     "4.2_position_evaluation": [
         "FEN: {fen}\nEvaluate this position. Who is better?",
@@ -157,6 +188,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nProvide a positional assessment.",
         "Position: {fen}\nWho stands better and why?",
         "FEN: {fen}\nRate this position: equal, slight edge, clear advantage, winning, or decisive.",
+        "Board:\n{board}\nFEN: {fen}\nEvaluate this position.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nWho stands better?",
     ],
     "4.3_pawn_structure": [
         "FEN: {fen}\nAnalyze the pawn structure.",
@@ -165,6 +198,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nIdentify pawn structure weaknesses for both sides.",
         "Position: {fen}\nEvaluate the pawn structure features.",
         "FEN: {fen}\nList all passed pawns, isolated pawns, and doubled pawns.",
+        "Board:\n{board}\nAnalyze the pawn structure.",
+        "Board:\n{board}\nWhich pawns are doubled, isolated, or passed?",
     ],
 
     # ---- Tier 5: Openings ----
@@ -175,6 +210,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nWhat opening has been played?",
         "The moves {moves} were played. What opening is this?",
         "Position: {fen}\nIdentify the ECO code and opening name.",
+        "Board:\n{board}\nMoves played: {moves}\nWhat opening is this?",
+        "Board:\n{board}\nFEN: {fen}\nIdentify the opening name and ECO code.",
     ],
     "5.2_opening_continuation": [
         "FEN: {fen}\nWhat are the main continuation moves in this opening?",
@@ -183,6 +220,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given opening position {fen}, what are the typical next moves?",
         "Position: {fen}\nThis is the {name}. What are the main lines from here?",
         "FEN: {fen}\nList the top book moves for this position.",
+        "Board:\n{board}\nFEN: {fen}\nWhat are the main continuation moves in this opening?",
+        "Board:\n{board}\nThis is the {name}. List the top book moves.",
     ],
     "5.3_opening_principles": [
         "FEN: {fen}\nWhat are the key ideas and plans in this opening?",
@@ -190,6 +229,8 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nWhat should each side aim for in this position?",
         "Given opening {name} (FEN: {fen}), describe the typical plans for both sides.",
         "Position: {fen}\nWhat is the character of this opening position?",
+        "Board:\n{board}\nThis is the {name}. What are the key ideas and plans?",
+        "Board:\n{board}\nFEN: {fen}\nDescribe the character of this opening position.",
     ],
 
     # ---- Tier 6: Endgames ----
@@ -200,6 +241,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nWhat endgame category does this position fall into?",
         "Position: {fen}\nIdentify the endgame type.",
         "FEN: {fen}\nName the material configuration of this endgame.",
+        "Board:\n{board}\nWhat type of endgame is this?",
+        "Board:\n{board}\nClassify the material configuration.",
     ],
     "6.2_endgame_wdl": [
         "FEN: {fen}\nIs this endgame a win, draw, or loss for the side to move?",
@@ -208,6 +251,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nWhat is the theoretical result of this position?",
         "Position: {fen}\nDetermine if this endgame is won, drawn, or lost.",
         "FEN: {fen}\nWith best play from both sides, who wins?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nIs this endgame a win, draw, or loss?",
+        "Board:\n{board}\nFEN: {fen}\nWhat is the theoretical result of this endgame?",
     ],
     "6.3_endgame_best_move": [
         "FEN: {fen}\nWhat is the best move in this endgame?",
@@ -216,6 +261,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nWhat is the theoretically best move?",
         "Position: {fen}\nPlay the strongest endgame move.",
         "FEN: {fen}\nWhat is the DTZ-optimal move here?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nWhat is the best move in this endgame?",
+        "Board:\n{board}\nFEN: {fen}\nWhat is the DTZ-optimal move here?",
     ],
     "6.4_endgame_principles": [
         "FEN: {fen}\nWhat endgame principles apply here?",
@@ -223,6 +270,8 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nWhat technique should be used to win/draw this endgame?",
         "Given FEN: {fen}\nDescribe the correct plan in this endgame.",
         "Position: {fen}\nWhat endgame concepts are relevant (opposition, Lucena, Philidor, etc.)?",
+        "Board:\n{board}\nWhat endgame principles apply here?",
+        "Board:\n{board}\nDescribe the correct endgame plan.",
     ],
 
     # ---- Tier 7: Planning ----
@@ -234,14 +283,18 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nChoose the best move and explain your reasoning.",
         "FEN: {fen}\nThink step by step and find the best move.",
         "What is the optimal move here?\nFEN: {fen}",
+        "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nWhat is the best move?",
+        "Board:\n{board}\nFEN: {fen}\nChoose the best move and explain your reasoning.",
     ],
     "7.2_puzzle_solving": [
         "FEN: {fen}\nSolve this puzzle. Find the winning move.",
         "This is a chess puzzle. Find the best move.\nFEN: {fen}",
         "FEN: {fen}\nThere is a forcing sequence here. What is the first move?",
         "Given this puzzle position:\nFEN: {fen}\nFind the solution.",
-        "Puzzle — FEN: {fen}\nWhat is the key move?",
+        "Puzzle - FEN: {fen}\nWhat is the key move?",
         "FEN: {fen}\n{side} to move. Find the best continuation.",
+        "Board:\n{board}\nSide to move: {side}\nSolve this puzzle.",
+        "Board:\n{board}\nFEN: {fen}\nFind the winning move.",
     ],
     "7.3_move_consequence": [
         "FEN: {fen}\nIf {move} is played, what happens next?",
@@ -250,6 +303,8 @@ TEMPLATES: dict[str, list[str]] = {
         "Given FEN: {fen}\nAfter the move {move}, what is the likely sequence of play?",
         "Position: {fen}\nPredict the next 3-5 moves after {move}.",
         "FEN: {fen}\nWhat are the consequences of {move}? Analyze the resulting position.",
+        "Board:\n{board}\nFEN: {fen}\nIf {move} is played, what happens next?",
+        "Board:\n{board}\nSide to move: {side_to_move}\nAnalyze the consequences of {move}.",
     ],
 }
 

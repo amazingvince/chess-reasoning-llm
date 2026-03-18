@@ -18,7 +18,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config.settings import EVAL_SPLITS_DIR
+from config.settings import EVAL_SPLITS_DIR, EVAL_SPLIT_SIZES
 from validation.eval_harness import SPLIT_CHECKS, evaluate_split
 
 
@@ -50,7 +50,9 @@ def main() -> int:
         print(f"[FAIL] Split directory does not exist: {split_dir}")
         return 1
 
-    splits_to_check = [args.split] if args.split else list(SPLIT_CHECKS.keys())
+    # Default to all 9 splits (not just those with checks defined), so
+    # missing coverage is surfaced as a skip rather than silently omitted.
+    splits_to_check = [args.split] if args.split else list(EVAL_SPLIT_SIZES.keys())
     any_fail = False
 
     print(f"{'Split':<15} {'Total':>6} {'Pass':>6} {'Fail':>6} {'Skip':>6} {'Status'}")

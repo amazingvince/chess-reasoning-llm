@@ -1,6 +1,6 @@
 # make_data — Chess SFT Data Generation Pipeline
 
-Generates ~1.6M chess SFT training examples across 7 tiers (28 tasks) from 9 data sources. All examples use a consistent `messages` format with FEN positions and UCI move notation.
+Generates ~1.5M chess SFT training examples across 7 tiers (25 tasks) from 9 data sources. All examples use a consistent `messages` format with FEN positions and UCI move notation.
 
 ## Quick Start
 
@@ -27,7 +27,7 @@ python scripts/run_pipeline.py --validate-only
 make_data/
 ├── config/
 │   ├── settings.py          # Paths, volumes, depths, mix ratios, seeds
-│   ├── templates.py          # 5-10 prompt templates per task (28 tasks)
+│   ├── templates.py          # 5-10 prompt templates per task (25 tasks)
 │   └── system_prompt.py      # Single system prompt constant
 ├── sources/                   # 9 data source loaders
 │   ├── lichess_games.py       # Stream PGN, extract FEN per ply, Elo >= 2000
@@ -38,7 +38,7 @@ make_data/
 │   ├── syzygy_probing.py      # WDL/DTZ probing, endgame position sampling
 │   ├── stockfish_engine.py    # UCI wrapper for live Stockfish evaluation
 │   ├── chess960.py            # Generate all 960 starting positions + variants
-│   └── mate_dataset.py        # MATE dataset with SAN -> UCI conversion
+│   └── mate_dataset.py        # MATE dataset binary choice (zip/JSONL from HF)
 ├── pool/
 │   ├── fen_pool.py            # Unified FEN collection, dedup, tagging
 │   ├── eval_split.py          # Generate eval splits FIRST, build FEN blocklist
@@ -49,12 +49,14 @@ make_data/
 │   ├── tier2_rules.py         # Tasks 2.1-2.5 (~370K)
 │   ├── tier3_tactics.py       # Tasks 3.1-3.5 (~260K)
 │   ├── tier4_evaluation.py    # Tasks 4.1-4.3 (~150K)
-│   ├── tier5_openings.py      # Tasks 5.1-5.3 (~75K)
+│   ├── tier5_openings.py      # Tasks 5.1-5.3 (~9K)
 │   ├── tier6_endgames.py      # Tasks 6.1-6.4 (~140K)
 │   ├── tier7_planning.py      # Tasks 7.1-7.3 (~170K)
 │   └── reasoning_traces.py    # Shared <think>/<move> trace generation
 ├── validation/
 │   ├── validator.py           # 7 validation checks (FEN, moves, templates, etc.)
+│   ├── benchmark.py           # Frozen benchmark: gold answers, metrics, oracle validation
+│   ├── eval_harness.py        # Self-consistency checks on eval split data
 │   └── decontamination.py     # Eval blocklist enforcement
 ├── output/
 │   ├── writer.py              # JSONL writer with inline validation
@@ -62,9 +64,13 @@ make_data/
 ├── scripts/
 │   ├── run_pipeline.py        # Main CLI: full pipeline or single tier
 │   ├── run_eval_split.py      # Generate + freeze eval splits independently
+│   ├── run_eval_harness.py    # Run eval harness checks on eval splits
+│   ├── run_benchmark.py       # Score model predictions against frozen benchmark
+│   ├── freeze_benchmark.py    # Refreeze benchmark from existing eval splits
 │   ├── validate_outputs.py    # Post-hoc validation of generated JSONL
 │   └── download_tablebases.py # Download Syzygy tablebases
-└── polygloy_opening_books/    # Polyglot book archives (.bin, .zip, .7z)
+├── tests/                     # 251 pytest tests covering all tiers + benchmark
+└── polyglot_opening_books/    # Polyglot book archives (.bin, .zip, .7z)
 ```
 
 ### Runtime Data (not in repo)
@@ -75,10 +81,14 @@ All large/generated data lives on the E: drive:
 E:/hf_cache/                   # HuggingFace datasets cache
 E:/chess_sft_data/
 ├── pool/                      # FEN pools
-├── eval_splits/               # Frozen eval benchmark (13K examples)
+├── eval_splits/               # Raw eval split data (9 splits + blocklist)
 │   ├── blocklist.txt          # One FEN per line — training must exclude these
 │   ├── perception.jsonl
 │   ├── rules.jsonl
+│   └── ...
+├── benchmark/                 # Frozen benchmark (canonical prompts + gold answers)
+│   ├── manifest.json          # Version, seed, split sizes
+│   ├── perception.jsonl
 │   └── ...
 ├── annotations/               # Stockfish annotation cache (SQLite)
 └── output/                    # Final JSONL per tier
@@ -109,9 +119,9 @@ E:/chess_sft_data/
 | 4 | Material Balance | 4.1 | 50K | Count material difference |
 | 4 | Position Evaluation | 4.2 | 60K | Centipawn -> 5-bucket eval labels |
 | 4 | Pawn Structure | 4.3 | 40K | Doubled, isolated, passed pawns |
-| 5 | Opening ID | 5.1 | 30K | Name the opening from position/moves |
-| 5 | Opening Continuation | 5.2 | 25K | Suggest next moves via Polyglot weights |
-| 5 | Opening Principles | 5.3 | 20K | Plans and character of the position |
+| 5 | Opening ID | 5.1 | 3K | Name the opening from position/moves |
+| 5 | Opening Continuation | 5.2 | 3K | Suggest next moves via Polyglot weights |
+| 5 | Opening Principles | 5.3 | 3K | Plans and character of the position |
 | 6 | Endgame Classification | 6.1 | 30K | Categorize by material (KRK, KPK, etc.) |
 | 6 | Endgame WDL | 6.2 | 40K | Syzygy win/draw/loss evaluation |
 | 6 | Endgame Best Move | 6.3 | 40K | DTZ-optimal move from tablebases |
@@ -179,7 +189,7 @@ Tier 7 tasks use `<think>...</think>` and `<move>...</move>` tags in assistant r
 | Evaluation | 1,500 | Stockfish-evaluated positions |
 | Openings | 500 | Held-out ECO codes |
 | Endgames | 1,500 | Syzygy-backed positions |
-| Planning | 2,000 | Puzzles + game positions |
+| Planning | 2,000 | Puzzles + engine-evaluated positions |
 | Chess960 | 500 | Chess960 positions only |
 | MATE | 1,000 | MATE dataset held-out |
 | **Total** | **13,000** | |

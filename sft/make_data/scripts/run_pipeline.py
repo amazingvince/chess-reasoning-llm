@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from config.settings import (
     TIER_OUTPUT_DIR,
     POOL_DIR,
     ANNOTATIONS_DIR,
+    BENCHMARK_DIR,
     POLYGLOT_DIR,
     SYZYGY_PATH,
 )
@@ -35,8 +37,11 @@ from pool.eval_split import (
     build_blocklist,
     generate_all_eval_splits,
     load_blocklist,
+    partition_eco_codes,
     save_eval_splits,
 )
+from config.settings import MIN_DEPTH_EVAL_BENCHMARK
+from validation.benchmark import freeze_and_save
 from pool.fen_pool import FENPool
 from pool.annotator import BatchAnnotator
 from output.writer import JSONLWriter
@@ -170,20 +175,29 @@ def load_sources(volume_override: int | None = None) -> dict:
     from sources.polyglot_books import load_book, get_weighted_moves
 
     import chess
-    book_moves: dict[str, list] = {}
+    book_moves: dict[str, dict[str, int]] = {}  # fen -> {uci: total_weight}
     polyglot_dir = Path(POLYGLOT_DIR)
     if polyglot_dir.exists():
         for bin_file in polyglot_dir.glob("*.bin"):
             try:
                 with load_book(str(bin_file)) as reader:
-                    # Get moves for opening positions
                     for opening in openings:
                         board = chess.Board(opening["fen"])
                         moves = get_weighted_moves(reader, board)
                         if moves:
-                            book_moves[opening["fen"]] = moves
+                            merged = book_moves.setdefault(opening["fen"], {})
+                            for uci, weight in moves:
+                                merged[uci] = merged.get(uci, 0) + weight
             except Exception as exc:
                 logger.warning("Polyglot book %s failed: %s", bin_file, exc)
+
+    # Convert merged dicts to sorted (uci, weight) lists
+    book_moves_list: dict[str, list] = {}
+    for fen, move_weights in book_moves.items():
+        book_moves_list[fen] = sorted(
+            move_weights.items(), key=lambda x: x[1], reverse=True,
+        )
+    book_moves = book_moves_list  # type: ignore[assignment]
 
     # --- Source 6: Syzygy (loaded on demand by generators) ---
     endgame_positions: list[dict] = []
@@ -255,24 +269,72 @@ def load_sources(volume_override: int | None = None) -> dict:
         len(fen_pool_entries), len(puzzles), len(openings),
         len(position_evals), len(endgame_positions), len(mate_rows),
     )
+
+    if not fen_pool_entries:
+        logger.error(
+            "CRITICAL: fen_pool is empty after loading all sources. "
+            "Cannot generate training data."
+        )
+
     return config
 
 
-def run_eval_splits(config: dict) -> frozenset[str]:
-    """Generate eval splits and return the blocklist."""
+def run_eval_splits(config: dict, volume_override: int | None = None) -> frozenset[str]:
+    """Generate eval splits, freeze benchmark, and return the blocklist.
+
+    On reruns (blocklist already exists) this still performs ECO holdout
+    so that ``config["openings"]`` is trimmed to train-only rows, and
+    produces the frozen benchmark if it is missing.
+    """
+    # ECO-based holdout ALWAYS runs so config["openings"] is train-only.
+    all_openings = config.get("openings", [])
+    if all_openings:
+        eval_openings, train_openings = partition_eco_codes(all_openings)
+    else:
+        eval_openings, train_openings = [], []
+    config["openings"] = train_openings
+    logger.info(
+        "Openings ECO holdout: %d total -> %d eval, %d train",
+        len(all_openings), len(eval_openings), len(train_openings),
+    )
+
     blocklist_path = EVAL_SPLITS_DIR / "blocklist.txt"
 
     if blocklist_path.exists():
         logger.info("Loading existing blocklist from %s", blocklist_path)
-        return load_blocklist(str(blocklist_path))
+        blocklist = load_blocklist(str(blocklist_path))
+        # Ensure frozen benchmark exists even on reruns
+        if not (BENCHMARK_DIR / "manifest.json").exists():
+            logger.info("Benchmark missing — freezing from existing eval splits...")
+            _freeze_from_disk()
+        return blocklist
 
     logger.info("Generating eval splits...")
+
+    # Enrich eval openings with book moves data for continuation benchmarking
+    book_moves = config.get("book_moves", {})
+    for opening in eval_openings:
+        fen = opening.get("fen", "")
+        if fen in book_moves:
+            opening["book_moves"] = book_moves[fen]
+
+    # Evaluation split: require depth >= 40 for higher quality
+    all_evals = config.get("position_evals", [])
+    eval_benchmark_evals = [
+        e for e in all_evals
+        if e.get("depth", 0) >= MIN_DEPTH_EVAL_BENCHMARK
+    ]
+    logger.info(
+        "Evaluation split: %d / %d evals at depth >= %d",
+        len(eval_benchmark_evals), len(all_evals), MIN_DEPTH_EVAL_BENCHMARK,
+    )
+
     sources = {
         "perception": config.get("fen_pool", []),
         "rules": config.get("fen_pool", []),
         "tactics": config.get("puzzles", []),
-        "evaluation": config.get("position_evals", []),
-        "openings": config.get("openings", []),
+        "evaluation": eval_benchmark_evals,
+        "openings": eval_openings,
         "endgames": config.get("endgame_positions", []),
         "planning": config.get("puzzles", []) + config.get("best_move_evals", []),
         "chess960": [e for e in config.get("fen_pool", []) if e.get("is_chess960")],
@@ -281,7 +343,41 @@ def run_eval_splits(config: dict) -> frozenset[str]:
 
     splits = generate_all_eval_splits(sources)
     save_eval_splits(splits, str(EVAL_SPLITS_DIR))
+
+    # Freeze benchmark from raw eval splits.
+    # Relax coverage check for small test runs where some splits have
+    # too few source rows to populate all task types.
+    freeze_and_save(
+        splits, str(BENCHMARK_DIR), seed=MASTER_SEED,
+        strict_coverage=(volume_override is None),
+    )
+
     return build_blocklist(splits)
+
+
+def _freeze_from_disk() -> None:
+    """Re-freeze benchmark from existing eval split JSONL on disk."""
+    import json as _json
+    from config.settings import EVAL_SPLIT_SIZES
+
+    splits: dict[str, list[dict]] = {}
+    for split_name in EVAL_SPLIT_SIZES:
+        path = EVAL_SPLITS_DIR / f"{split_name}.jsonl"
+        if not path.exists():
+            continue
+        rows: list[dict] = []
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    rows.append(_json.loads(line))
+        splits[split_name] = rows
+
+    if splits:
+        freeze_and_save(
+            splits, str(BENCHMARK_DIR), seed=MASTER_SEED,
+            strict_coverage=False,
+        )
 
 
 def run_tier(
@@ -310,9 +406,32 @@ def run_tier(
         task_id = gen.task_id()
         output_path = tier_dir / f"{task_id}.jsonl"
 
-        # Resumption: skip if output exists and is non-empty
+        # Resumption: skip if output exists and is non-empty.
+        # Count existing examples so final stats reflect the full dataset.
         if output_path.exists() and output_path.stat().st_size > 0:
-            logger.info("Skipping %s — output exists at %s", task_id, output_path)
+            from validation.validator import validate_example as _val_ex
+
+            existing = 0
+            with open(output_path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    existing += 1
+                    try:
+                        obj = json.loads(line)
+                        passed, _ = _val_ex(obj)
+                        stats.record(
+                            task_id,
+                            is_chess960=obj.get("is_chess960", False),
+                            passed_validation=passed,
+                        )
+                    except json.JSONDecodeError:
+                        stats.record(task_id, passed_validation=False)
+            logger.info(
+                "Skipping %s — output exists at %s (%d examples)",
+                task_id, output_path, existing,
+            )
             continue
 
         logger.info("Generating %s (target: %d)...", task_id, gen.target_volume())
@@ -344,16 +463,55 @@ def main() -> int:
     args = parser.parse_args()
 
     # Ensure output dirs exist
-    for d in (OUTPUT_DIR, POOL_DIR, EVAL_SPLITS_DIR, ANNOTATIONS_DIR, TIER_OUTPUT_DIR):
+    for d in (OUTPUT_DIR, POOL_DIR, EVAL_SPLITS_DIR, ANNOTATIONS_DIR,
+              TIER_OUTPUT_DIR, BENCHMARK_DIR):
         Path(d).mkdir(parents=True, exist_ok=True)
 
     stats = PipelineStats()
 
     if args.validate_only:
+        from validation.validator import validate_example
+
         blocklist_path = EVAL_SPLITS_DIR / "blocklist.txt"
         if not blocklist_path.exists():
             logger.error("No blocklist found at %s — run eval splits first", blocklist_path)
             return 1
+
+        # 1. Per-example schema/semantic validation
+        total_examples = 0
+        total_errors = 0
+        for jsonl_path in sorted(Path(TIER_OUTPUT_DIR).rglob("*.jsonl")):
+            file_count = 0
+            file_errors = 0
+            with open(jsonl_path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        example = json.loads(line)
+                    except json.JSONDecodeError:
+                        file_errors += 1
+                        continue
+                    file_count += 1
+                    passed, errs = validate_example(example)
+                    if not passed:
+                        file_errors += 1
+            total_examples += file_count
+            total_errors += file_errors
+            if file_errors:
+                logger.warning(
+                    "%s: %d / %d examples failed validation",
+                    jsonl_path.name, file_errors, file_count,
+                )
+
+        logger.info(
+            "Validation: %d examples, %d errors (%.3f%%)",
+            total_examples, total_errors,
+            total_errors / total_examples * 100 if total_examples else 0,
+        )
+
+        # 2. Decontamination audit
         blocklist = load_blocklist(str(blocklist_path))
         report = audit_output_files(str(TIER_OUTPUT_DIR), blocklist)
         if report:
@@ -362,13 +520,18 @@ def main() -> int:
                 logger.error("  %s: %d contaminated FENs", f, len(fens))
             return 1
         logger.info("No contamination found. All outputs clean.")
-        return 0
+
+        return 1 if total_errors > 0 else 0
 
     # Load sources
     config = load_sources(volume_override=args.volume)
 
+    if not config.get("fen_pool"):
+        logger.error("All sources failed — fen_pool is empty. Aborting.")
+        return 1
+
     # Always run eval splits first
-    blocklist = run_eval_splits(config)
+    blocklist = run_eval_splits(config, volume_override=args.volume)
     logger.info("Eval blocklist: %d FENs", len(blocklist))
 
     if args.eval_only:

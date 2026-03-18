@@ -104,17 +104,24 @@ def stream_evals(
         knodes = row.get("knodes", 0)
         count += 1
 
-        # Dedup against SQLite (previous runs)
+        # Dedup against SQLite (previous runs) — same tie-break as _flush_batch
         existing = conn.execute(
-            "SELECT depth FROM evals WHERE fen = ?", (fen,)
+            "SELECT depth, knodes FROM evals WHERE fen = ?", (fen,)
         ).fetchone()
-        if existing and existing[0] >= depth:
-            continue
+        if existing:
+            ex_depth, ex_knodes = existing
+            if ex_depth > depth:
+                continue
+            if ex_depth == depth and (ex_knodes or 0) >= knodes:
+                continue
 
-        # Dedup against current run's best
+        # Dedup against current run's best (same tie-break as _flush_batch)
         prev = best.get(fen)
-        if prev is not None and prev["depth"] >= depth:
-            continue
+        if prev is not None:
+            if prev["depth"] > depth:
+                continue
+            if prev["depth"] == depth and prev["knodes"] >= knodes:
+                continue
 
         best[fen] = {
             "fen": fen,

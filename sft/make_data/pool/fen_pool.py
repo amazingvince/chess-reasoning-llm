@@ -74,6 +74,7 @@ class FENPool:
             candidates.append({"fen": fen, **tags})
 
         if len(candidates) <= n:
+            rng.shuffle(candidates)
             return candidates
 
         return rng.sample(candidates, n)

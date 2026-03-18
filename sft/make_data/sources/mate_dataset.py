@@ -1,180 +1,139 @@
 """Source 9: MATE Dataset.
 
-Load the OutFlankShu MATE dataset with SAN -> UCI conversion.
-Subsets: MATE-N (no explanation), MATE-S (strategy), MATE-T (tactic),
-MATE-ST (strategy + tactic).
+Load the OutFlankShu MATE dataset from zip archives on HuggingFace.
+The dataset is stored as instruction/input/output JSONL inside zip files,
+not as a standard HF datasets table.
+
+Subsets available: no_explain, strategy, tactic, both.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import zipfile
 from typing import Iterator
 
 import chess
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 from config.settings import HF_DATASETS
 
 logger = logging.getLogger(__name__)
 
+# Zip files available in the MATE repo
+_ZIP_FILES = ["no_explain.zip", "both.zip"]
+
 
 def load_mate(
-    subset: str = "all",
     max_rows: int | None = None,
 ) -> Iterator[dict]:
-    """Yield MATE dataset rows with moves converted to UCI.
+    """Yield MATE dataset rows with UCI moves.
 
-    Parameters
-    ----------
-    subset : str
-        One of "all", "N", "S", "T", "ST".
-    max_rows : int, optional
-        Limit number of rows.
+    Downloads zip archives from HuggingFace, extracts JSONL files,
+    and parses the instruction/input/output format.
 
     Yields
     ------
     dict
-        ``{fen, move_a, move_b, better_move, strategy, tactic}``
+        ``{fen, move_a, move_b, better_move}``
     """
     count = 0
-
-    # Try HuggingFace datasets first, fall back to raw download
-    try:
-        yield from _load_via_hf(subset, max_rows)
-        return
-    except Exception as exc:
-        logger.warning("HF datasets loader failed (%s), trying raw JSON", exc)
-
-    yield from _load_via_raw_json(subset, max_rows)
-
-
-def _load_via_hf(
-    subset: str, max_rows: int | None
-) -> Iterator[dict]:
-    """Load via HuggingFace datasets library."""
-    ds = load_dataset(HF_DATASETS["mate"], split="train", streaming=True)
-    count = 0
-    for row in ds:
-        if max_rows is not None and count >= max_rows:
-            return
-
-        result = _process_row(row, subset)
-        if result is not None:
-            yield result
-            count += 1
-
-
-def _load_via_raw_json(
-    subset: str, max_rows: int | None
-) -> Iterator[dict]:
-    """Fallback: load from cached JSON files if HF parser fails."""
-    from huggingface_hub import hf_hub_download
-
-    try:
-        path = hf_hub_download(
-            repo_id=HF_DATASETS["mate"],
-            filename="data/train.jsonl",
-            repo_type="dataset",
-        )
-    except Exception:
-        # Try alternative file patterns
+    for zip_name in _ZIP_FILES:
         try:
             path = hf_hub_download(
                 repo_id=HF_DATASETS["mate"],
-                filename="train.jsonl",
+                filename=zip_name,
                 repo_type="dataset",
             )
-        except Exception:
-            logger.error("Could not download MATE dataset")
-            return
+        except Exception as exc:
+            logger.warning("Could not download %s: %s", zip_name, exc)
+            continue
 
-    count = 0
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            if max_rows is not None and count >= max_rows:
-                return
-            try:
-                row = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
-            result = _process_row(row, subset)
-            if result is not None:
-                yield result
-                count += 1
+        try:
+            with zipfile.ZipFile(path) as zf:
+                jsonl_files = [
+                    n for n in zf.namelist()
+                    if n.endswith(".jsonl") and not n.startswith("__MACOSX")
+                ]
+                for jf in sorted(jsonl_files):
+                    with zf.open(jf) as fh:
+                        for raw_line in fh:
+                            if max_rows is not None and count >= max_rows:
+                                return
+                            try:
+                                row = json.loads(raw_line)
+                            except json.JSONDecodeError:
+                                continue
+                            result = _process_row(row)
+                            if result is not None:
+                                yield result
+                                count += 1
+        except (zipfile.BadZipFile, OSError) as exc:
+            logger.warning("Failed to read %s: %s", zip_name, exc)
+            continue
+
+    logger.info("MATE dataset: yielded %d rows from %d zip(s)", count, len(_ZIP_FILES))
 
 
-def _process_row(row: dict, subset: str) -> dict | None:
-    """Process a single MATE row, converting SAN to UCI."""
-    fen = row.get("fen", row.get("FEN", ""))
-    if not fen:
+# Regex to extract FEN, MoveA, MoveB from the input field
+_INPUT_RE = re.compile(
+    r'FEN[^"]*"([^"]+)".*?'
+    r'MoveA[:\s]*([a-h][1-8][a-h][1-8][qrbn]?).*?'
+    r'MoveB[:\s]*([a-h][1-8][a-h][1-8][qrbn]?)',
+    re.IGNORECASE,
+)
+
+# Regex to extract the chosen move from output field
+_OUTPUT_RE = re.compile(
+    r'Move([AB])[:\s]*([a-h][1-8][a-h][1-8][qrbn]?)',
+    re.IGNORECASE,
+)
+
+
+def _process_row(row: dict) -> dict | None:
+    """Process a single MATE instruction/input/output row."""
+    input_text = row.get("input", "")
+    output_text = row.get("output", "")
+
+    m = _INPUT_RE.search(input_text)
+    if not m:
         return None
 
-    # Subset filter
-    strategy = row.get("strategy", row.get("Strategy", ""))
-    tactic = row.get("tactic", row.get("Tactic", ""))
-    has_strategy = bool(strategy)
-    has_tactic = bool(tactic)
+    fen, move_a, move_b = m.group(1), m.group(2), m.group(3)
 
-    if subset == "N" and (has_strategy or has_tactic):
-        return None
-    elif subset == "S" and not has_strategy:
-        return None
-    elif subset == "T" and not has_tactic:
-        return None
-    elif subset == "ST" and not (has_strategy and has_tactic):
-        return None
-
+    # Validate FEN and moves
     try:
         board = chess.Board(fen)
     except (ValueError, TypeError):
         return None
 
-    # Convert moves: try UCI first, fall back to SAN -> UCI
-    move_a = _to_uci(board, row.get("move_a", row.get("Move_A", "")))
-    move_b = _to_uci(board, row.get("move_b", row.get("Move_B", "")))
-    better = row.get("better_move", row.get("Better_Move", row.get("label", "")))
-
-    if not move_a or not move_b:
+    move_a_obj = _validate_uci(board, move_a)
+    move_b_obj = _validate_uci(board, move_b)
+    if move_a_obj is None or move_b_obj is None:
         return None
 
-    # Normalize better_move to UCI
-    if better in ("A", "a", "move_a", "Move_A"):
-        better_move = move_a
-    elif better in ("B", "b", "move_b", "Move_B"):
-        better_move = move_b
-    else:
-        better_move = _to_uci(board, better) if better else ""
+    # Determine better move from output
+    om = _OUTPUT_RE.search(output_text)
+    if not om:
+        return None
+
+    choice_label = om.group(1).upper()
+    better_move = move_a if choice_label == "A" else move_b
 
     return {
         "fen": fen,
         "move_a": move_a,
         "move_b": move_b,
         "better_move": better_move,
-        "strategy": strategy or "",
-        "tactic": tactic or "",
     }
 
 
-def _to_uci(board: chess.Board, move_str: str) -> str:
-    """Convert a move string (SAN or UCI) to UCI. Returns '' on failure."""
-    if not move_str:
-        return ""
-    move_str = move_str.strip()
-
-    # Try UCI first
+def _validate_uci(board: chess.Board, uci: str) -> chess.Move | None:
+    """Validate a UCI move is legal. Returns Move or None."""
     try:
-        m = chess.Move.from_uci(move_str)
-        if m in board.legal_moves:
-            return move_str
+        m = chess.Move.from_uci(uci)
+        return m if m in board.legal_moves else None
     except (ValueError, chess.InvalidMoveError):
-        pass
-
-    # Try SAN
-    try:
-        m = board.parse_san(move_str)
-        return m.uci()
-    except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
-        pass
-
-    return ""
+        return None
