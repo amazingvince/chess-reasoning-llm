@@ -106,7 +106,7 @@ class EndgameClassification(TaskGenerator):
             raw = {"fen": fen, "is_chess960": False,
                    "metadata": {"material": sig, "source": eg.get("source", "syzygy")}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -141,7 +141,7 @@ class EndgameWDL(TaskGenerator):
                    "metadata": {"wdl": wdl, "dtz": eg.get("dtz"),
                                 "source": "syzygy"}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -178,7 +178,7 @@ class EndgameBestMove(TaskGenerator):
                    "metadata": {"best_move": best_move, "wdl": wdl, "dtz": dtz,
                                 "source": "syzygy"}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -227,6 +227,6 @@ class EndgamePrinciples(TaskGenerator):
             raw = {"fen": fen, "is_chess960": False,
                    "metadata": {"material": sig, "source": "syzygy"}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1

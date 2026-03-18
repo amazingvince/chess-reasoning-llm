@@ -6,9 +6,25 @@ from abc import ABC, abstractmethod
 from random import Random
 from typing import Iterator
 
+import chess
+
 from config.settings import VOLUMES, CHESS960_RATIOS
 from config.system_prompt import SYSTEM_PROMPT
 from config.templates import select_template
+
+
+def _board_to_ascii(board: chess.Board) -> str:
+    """Render a board as an ASCII diagram with rank/file labels."""
+    lines = []
+    for rank in range(7, -1, -1):
+        row = []
+        for file in range(8):
+            sq = chess.square(file, rank)
+            piece = board.piece_at(sq)
+            row.append(piece.symbol() if piece else ".")
+        lines.append(f"{rank + 1} {' '.join(row)}")
+    lines.append("  a b c d e f g h")
+    return "\n".join(lines)
 
 
 class TaskGenerator(ABC):
@@ -64,6 +80,44 @@ class TaskGenerator(ABC):
         """Return True if *fen* is in the eval blocklist."""
         return fen in self.blocklist
 
+    def build_template_context(self, raw: dict) -> dict:
+        """Augment *raw* with derived prompt fields like board/state text."""
+        context = dict(raw)
+        fen = context.get("fen", "")
+        if not fen:
+            return context
+
+        try:
+            board = chess.Board(fen)
+        except (ValueError, TypeError):
+            return context
+
+        context.setdefault("board", _board_to_ascii(board))
+        context.setdefault(
+            "side_to_move",
+            "white" if board.turn == chess.WHITE else "black",
+        )
+        castling = board.castling_xfen()
+        context.setdefault(
+            "castling_rights",
+            castling if castling and castling != "-" else "none",
+        )
+        context.setdefault(
+            "en_passant_square",
+            chess.square_name(board.ep_square) if board.ep_square is not None else "none",
+        )
+        return context
+
+    def render_template(
+        self,
+        raw: dict,
+        template_text: str | None = None,
+    ) -> str:
+        """Render a template using raw + derived board/state context."""
+        if template_text is None:
+            template_text = select_template(self.task_id(), self.rng)
+        return template_text.format(**self.build_template_context(raw))
+
     def format_example(
         self,
         raw: dict,
@@ -93,8 +147,7 @@ class TaskGenerator(ABC):
         metadata = raw.get("metadata", {})
 
         if template_text is None:
-            tpl = select_template(self.task_id(), self.rng)
-            template_text = tpl.format(**raw)
+            template_text = self.render_template(raw)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

@@ -59,7 +59,7 @@ class AvailableCaptures(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -128,7 +128,7 @@ class Threats(TaskGenerator):
                 else:
                     answer = f"{color_name.capitalize()} has no immediate threats."
 
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -188,7 +188,7 @@ class AttackedDefended(TaskGenerator):
             raw = {"fen": fen, "square": square_name, "piece": piece_name,
                    "color": color, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -226,7 +226,7 @@ class TacticalPatterns(TaskGenerator):
                    "metadata": {"themes": themes, "source": "lichess_puzzles",
                                 "rating": puzzle.get("rating", 0)}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -279,6 +279,6 @@ class HangingPieces(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1

@@ -14,7 +14,7 @@ from typing import Iterator
 
 import chess
 
-from config.templates import select_template
+from config.templates import TEMPLATES, select_template
 from generators.base import TaskGenerator
 
 
@@ -68,7 +68,7 @@ class FENToBoard(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960, "board": ascii_board}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=ascii_board)
             count += 1
 
@@ -99,7 +99,7 @@ class BoardToFEN(TaskGenerator):
 
             raw = {"fen": fen, "board": ascii_board, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=fen)
             count += 1
 
@@ -139,13 +139,11 @@ class PieceIdentification(TaskGenerator):
 
                 raw = {"fen": fen, "square": square_name, "is_chess960": is_960,
                        "color": "", "piece": ""}
-                tpl = select_template(self.task_id(), self.rng)
-                # Pick a template that uses {square}
-                templates_with_sq = [t for t in ["FEN: {fen}\nWhat piece is on {square}?",
-                    "In the position {fen}, identify the piece on square {square}.",
-                    "Given FEN: {fen}\nWhich piece occupies {square}?",
-                    "Position: {fen}\nTell me what is on {square}."]]
-                user_text = self.rng.choice(templates_with_sq).format(**raw)
+                templates_with_sq = [
+                    t for t in TEMPLATES[self.task_id()]
+                    if "{square}" in t and "{color}" not in t and "{piece}" not in t
+                ]
+                user_text = self.render_template(raw, self.rng.choice(templates_with_sq))
                 yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             else:
                 # Where are specific pieces?
@@ -172,10 +170,10 @@ class PieceIdentification(TaskGenerator):
                 raw = {"fen": fen, "color": color_name, "piece": piece_name,
                        "is_chess960": is_960, "square": ""}
                 templates_for_locate = [
-                    "FEN: {fen}\nWhere are all the {color} {piece}s?",
-                    "In this position, list the squares occupied by {color} {piece}s.\nFEN: {fen}",
+                    t for t in TEMPLATES[self.task_id()]
+                    if "{color}" in t and "{piece}" in t and "{square}" not in t
                 ]
-                user_text = self.rng.choice(templates_for_locate).format(**raw)
+                user_text = self.render_template(raw, self.rng.choice(templates_for_locate))
                 yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -243,7 +241,7 @@ class PieceCounting(TaskGenerator):
             raw = {"fen": fen, "color": color, "piece": piece_type_name,
                    "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
 
             # Branch the answer based on the selected template
             tpl_lower = tpl.lower()
@@ -343,7 +341,7 @@ class StateTracking(TaskGenerator):
                 "metadata": {"result_fen": result_fen, "moves": moves_str},
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(
                 raw, template_text=user_text, assistant_content=result_fen
             )

@@ -47,7 +47,7 @@ class LegalMoveGen(TaskGenerator):
             answer = " ".join(legal_moves)
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -106,7 +106,7 @@ class PieceSpecificMoves(TaskGenerator):
             answer = " ".join(moves_from_sq)
             raw = {"fen": fen, "square": square_name, "piece": pname, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -154,7 +154,7 @@ class MoveLegalityCheck(TaskGenerator):
             raw = {"fen": fen, "move": move_uci, "is_chess960": is_960,
                    "metadata": {"tested_move": move_uci}}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -208,7 +208,7 @@ class CheckDetection(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -285,7 +285,7 @@ class SpecialRules(TaskGenerator):
                         + ", ".join(promo_moves) + "."
                     )
 
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 

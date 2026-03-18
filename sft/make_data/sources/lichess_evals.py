@@ -49,8 +49,16 @@ def stream_evals(
 ) -> Iterator[dict]:
     """Stream position evaluations, filtering by depth and deduplicating.
 
-    Uses SQLite WAL-mode for dedup: ``INSERT OR REPLACE`` keeping the
-    highest-depth row per FEN.
+    Uses a two-phase approach:
+
+    1. **Collect** — iterate the source, validate, and keep only the
+       highest-depth row per FEN (checked against both the in-memory
+       ``best`` dict and the on-disk SQLite DB from previous runs).
+    2. **Yield** — emit the deduplicated results and flush to SQLite
+       for cross-run persistence.
+
+    This guarantees every FEN is yielded at most once (with the
+    highest depth seen in the current scan).
 
     Yields::
 
@@ -62,11 +70,10 @@ def stream_evals(
     ds = load_dataset(
         HF_DATASETS["lichess_evals"], split="train", streaming=True
     )
-    count = 0
-    batch: list[tuple] = []
-    # In-memory tracker covers the current unflushed batch so that
-    # duplicates within the same batch are caught immediately.
-    seen: dict[str, int] = {}  # fen -> best depth seen so far
+
+    # Phase 1: collect, keeping only the highest-depth row per FEN.
+    best: dict[str, dict] = {}  # fen -> row dict
+    count = 0  # valid rows consumed from the source
 
     for row in ds:
         if max_rows is not None and count >= max_rows:
@@ -95,43 +102,41 @@ def stream_evals(
         cp = row.get("cp")
         mate = row.get("mate")
         knodes = row.get("knodes", 0)
+        count += 1
 
-        # Dedup: check in-memory tracker first (covers unflushed batch),
-        # then fall back to SQLite for earlier runs / flushed batches.
-        prev_depth = seen.get(fen)
-        if prev_depth is not None:
-            if prev_depth >= depth:
-                continue
-        else:
-            existing = conn.execute(
-                "SELECT depth FROM evals WHERE fen = ?", (fen,)
-            ).fetchone()
-            if existing and existing[0] >= depth:
-                continue
+        # Dedup against SQLite (previous runs)
+        existing = conn.execute(
+            "SELECT depth FROM evals WHERE fen = ?", (fen,)
+        ).fetchone()
+        if existing and existing[0] >= depth:
+            continue
 
-        seen[fen] = depth
-        batch.append((fen, best_move, line, depth, knodes, cp, mate))
+        # Dedup against current run's best
+        prev = best.get(fen)
+        if prev is not None and prev["depth"] >= depth:
+            continue
 
-        if len(batch) >= 10_000:
-            _flush_batch(conn, batch)
-            batch.clear()
-            # After flushing, the DB is authoritative; clear in-memory
-            # tracker to bound memory usage.
-            seen.clear()
-
-        yield {
+        best[fen] = {
             "fen": fen,
             "best_move": best_move,
             "pv_line": line,
             "depth": depth,
+            "knodes": knodes,
             "cp": cp,
             "mate": mate,
         }
-        count += 1
 
+    # Phase 2: flush to SQLite for cross-run persistence, then yield.
+    batch = [
+        (r["fen"], r["best_move"], r["pv_line"], r["depth"],
+         r["knodes"], r["cp"], r["mate"])
+        for r in best.values()
+    ]
     if batch:
         _flush_batch(conn, batch)
     conn.close()
+
+    yield from best.values()
 
 
 def _flush_batch(conn: sqlite3.Connection, batch: list[tuple]) -> None:

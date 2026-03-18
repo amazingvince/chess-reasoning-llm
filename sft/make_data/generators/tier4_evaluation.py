@@ -95,7 +95,7 @@ class MaterialBalance(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -143,7 +143,7 @@ class PositionEvaluation(TaskGenerator):
                 },
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -192,7 +192,7 @@ class PawnStructure(TaskGenerator):
 
             raw = {"fen": fen, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 

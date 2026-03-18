@@ -62,7 +62,7 @@ class OpeningIdentification(TaskGenerator):
                 "metadata": {"source": "lichess_openings", "eco": eco},
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -101,19 +101,9 @@ class OpeningContinuation(TaskGenerator):
                     parts.append(f"{uci} ({pct:.0f}%)")
                 answer = "Top continuations: " + ", ".join(parts) + "."
             else:
-                # Fall back: use the opening's own continuation moves
-                uci_moves = opening.get("uci_moves", [])
-                if not uci_moves:
-                    continue
-                # Build a board up to this position, then suggest the
-                # next move(s) from the opening's own line.
-                board = chess.Board(fen)
-                # Show up to 3 legal moves starting with the most natural
-                legal = sorted(m.uci() for m in board.legal_moves)
-                if not legal:
-                    continue
-                shown = legal[:5]
-                answer = "Possible continuations: " + ", ".join(shown) + "."
+                # No Polyglot data for this position — skip rather than
+                # emitting arbitrary legal moves as "continuations."
+                continue
 
             raw = {
                 "fen": fen,
@@ -122,7 +112,7 @@ class OpeningContinuation(TaskGenerator):
                 "metadata": {"source": "polyglot_books"},
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 
@@ -195,6 +185,6 @@ class OpeningPrinciples(TaskGenerator):
                 "metadata": {"source": "lichess_openings", "eco": eco},
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1

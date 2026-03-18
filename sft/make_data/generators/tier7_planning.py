@@ -93,7 +93,7 @@ class BestMoveSelection(TaskGenerator):
                 },
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=trace)
             eval_count += 1
 
@@ -131,7 +131,7 @@ class BestMoveSelection(TaskGenerator):
                 },
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=trace)
             count += 1
 
@@ -188,7 +188,7 @@ class PuzzleSolving(TaskGenerator):
                 },
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=trace)
             count += 1
 
@@ -283,6 +283,6 @@ class MoveConsequence(TaskGenerator):
                 },
             }
             tpl = select_template(self.task_id(), self.rng)
-            user_text = tpl.format(**raw)
+            user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1

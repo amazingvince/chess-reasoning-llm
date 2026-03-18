@@ -53,8 +53,17 @@ def generate_all_eval_splits(
             splits[split_name] = []
             continue
 
-        # Filter out FENs already used by earlier splits
-        available = [c for c in candidates if c.get("fen", "") not in used_fens]
+        # Filter out FENs already used by earlier splits AND deduplicate
+        # within this split's candidate list (e.g. the planning split
+        # concatenates puzzles + evals which may share FENs).
+        seen_in_candidates: set[str] = set()
+        available: list[dict] = []
+        for c in candidates:
+            fen = c.get("fen", "")
+            if not fen or fen in used_fens or fen in seen_in_candidates:
+                continue
+            seen_in_candidates.add(fen)
+            available.append(c)
         n = min(target_size, len(available))
         sampled = rng.sample(available, n)
         splits[split_name] = sampled
