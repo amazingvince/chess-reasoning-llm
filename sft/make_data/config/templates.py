@@ -1,0 +1,260 @@
+"""
+Prompt templates for all 28 SFT tasks.
+
+Each task has 5-10 templates. Generators call select_template(task_id, rng)
+to pick one at random. Templates use {fen}, {square}, {color}, {piece},
+{move}, {moves}, {eco}, {name}, {material}, {side}, {n_moves} etc.
+"""
+
+from __future__ import annotations
+from random import Random
+
+TEMPLATES: dict[str, list[str]] = {
+    # ---- Tier 1: Perception ----
+    "1.1_fen_to_board": [
+        "Position (FEN): {fen}\nShow me the board.",
+        "Display this position:\n{fen}",
+        "Render the board for FEN: {fen}",
+        "FEN: {fen}\nPrint the chess board.",
+        "What does this position look like?\n{fen}",
+        "Here is a FEN string: {fen}\nLay out the board in ASCII.",
+        "Draw the board state for: {fen}",
+    ],
+    "1.2_board_to_fen": [
+        "Here is the current board:\n{board}\nWrite the FEN for this position.",
+        "Given this board layout:\n{board}\nWhat is the FEN?",
+        "Convert this board to FEN notation:\n{board}",
+        "Board:\n{board}\nProduce the FEN string.",
+        "Look at this board:\n{board}\nExpress it as a FEN string.",
+        "{board}\nWhat FEN represents this position?",
+    ],
+    "1.3_piece_identification": [
+        "FEN: {fen}\nWhat piece is on {square}?",
+        "In the position {fen}, identify the piece on square {square}.",
+        "Given FEN: {fen}\nWhich piece occupies {square}?",
+        "Position: {fen}\nTell me what is on {square}.",
+        "FEN: {fen}\nWhere are all the {color} {piece}s?",
+        "In this position, list the squares occupied by {color} {piece}s.\nFEN: {fen}",
+        "FEN: {fen}\nName every {color} piece and its square.",
+        "What pieces does {color} have in this position?\nFEN: {fen}",
+    ],
+    "1.4_piece_counting": [
+        "FEN: {fen}\nHow many pieces does {color} have?",
+        "Count the total number of pieces on the board.\nFEN: {fen}",
+        "FEN: {fen}\nWhat is the material count for both sides?",
+        "In this position, how many {piece}s are on the board?\nFEN: {fen}",
+        "FEN: {fen}\nCount all pieces and pawns for each side.",
+        "What is the material balance in this position?\nFEN: {fen}",
+        "FEN: {fen}\nHow many minor pieces does {color} have?",
+    ],
+    "1.5_state_tracking": [
+        "Starting FEN: {fen}\nAfter the moves {moves}, what is the resulting position?",
+        "From position {fen}, apply these moves: {moves}\nGive the new FEN.",
+        "FEN: {fen}\nMoves played: {moves}\nWhat is the board state now?",
+        "Position: {fen}\nThe following moves are played: {moves}\nShow the resulting FEN.",
+        "Given FEN: {fen}\nAfter {n_moves} move(s): {moves}\nWhat position do we reach?",
+        "Start: {fen}\nPlay: {moves}\nResult FEN?",
+    ],
+
+    # ---- Tier 2: Rules ----
+    "2.1_legal_move_gen": [
+        "FEN: {fen}\nList all legal moves.",
+        "What are the legal moves in this position?\nFEN: {fen}",
+        "Given position {fen}, enumerate every legal move in UCI notation.",
+        "FEN: {fen}\nGenerate the complete set of legal moves.",
+        "Position: {fen}\nWhat moves can the side to move play?",
+        "List every legal move available.\nFEN: {fen}",
+        "FEN: {fen}\nWhat are all possible moves here?",
+    ],
+    "2.2_piece_specific_moves": [
+        "FEN: {fen}\nWhat legal moves does the piece on {square} have?",
+        "In position {fen}, list all moves for the piece on {square}.",
+        "FEN: {fen}\nWhich squares can the piece on {square} move to?",
+        "Given FEN: {fen}\nWhat are the legal moves from {square}?",
+        "Position: {fen}\nShow every legal move originating from {square}.",
+        "FEN: {fen}\nWhere can the {piece} on {square} go?",
+    ],
+    "2.3_move_legality_check": [
+        "FEN: {fen}\nIs the move {move} legal?",
+        "In position {fen}, can the side to move play {move}?",
+        "Given FEN: {fen}\nIs {move} a legal move? Answer yes or no.",
+        "FEN: {fen}\nCheck whether {move} is a valid move.",
+        "Position: {fen}\nMove: {move}\nIs this move legal?",
+        "Can {move} be played in this position?\nFEN: {fen}",
+    ],
+    "2.4_check_detection": [
+        "FEN: {fen}\nIs the king in check?",
+        "In this position, is either king in check, checkmate, or stalemate?\nFEN: {fen}",
+        "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
+        "Given FEN: {fen}\nIs this check, checkmate, stalemate, or a normal position?",
+        "Position: {fen}\nWhat is the status of the position?",
+        "FEN: {fen}\nIs the side to move in check?",
+    ],
+    "2.5_special_rules": [
+        "FEN: {fen}\nCan the side to move castle? If so, which side(s)?",
+        "In this position, is castling available?\nFEN: {fen}",
+        "FEN: {fen}\nIs en passant possible in this position?",
+        "Given FEN: {fen}\nList any special moves available (castling, en passant, promotion).",
+        "FEN: {fen}\nWhat promotion options are available for the pawn on {square}?",
+        "Position: {fen}\nIdentify any special rules that apply here.",
+    ],
+
+    # ---- Tier 3: Tactics ----
+    "3.1_available_captures": [
+        "FEN: {fen}\nList all capture moves available.",
+        "What captures can the side to move make?\nFEN: {fen}",
+        "In position {fen}, enumerate every legal capture.",
+        "FEN: {fen}\nWhich pieces can be captured right now?",
+        "Given FEN: {fen}\nList all possible captures in UCI notation.",
+        "Position: {fen}\nFind every capture move.",
+    ],
+    "3.2_threats": [
+        "FEN: {fen}\nWhat pieces are {color} threatening?",
+        "In this position, identify all threats.\nFEN: {fen}",
+        "FEN: {fen}\nWhich {color} pieces are under attack?",
+        "Given FEN: {fen}\nList the threats the side to move creates.",
+        "Position: {fen}\nWhat are the immediate threats in this position?",
+        "FEN: {fen}\nIdentify all pieces that are being attacked by {color}.",
+    ],
+    "3.3_attacked_defended": [
+        "FEN: {fen}\nIs the square {square} attacked by {color}?",
+        "In position {fen}, which pieces attack square {square}?",
+        "FEN: {fen}\nIs the {piece} on {square} defended?",
+        "Given FEN: {fen}\nList all {color} pieces attacking {square}.",
+        "FEN: {fen}\nIs {square} attacked, defended, both, or neither?",
+        "Position: {fen}\nHow many times is {square} attacked and defended?",
+    ],
+    "3.4_tactical_patterns": [
+        "FEN: {fen}\nFind the best tactical move.",
+        "This position contains a tactic. Find it.\nFEN: {fen}",
+        "FEN: {fen}\nWhat tactic is available for the side to move?",
+        "Given FEN: {fen}\nIdentify the tactical pattern and the winning move.",
+        "Position: {fen}\nThere is a tactical opportunity here. What is it?",
+        "FEN: {fen}\nWhat is the strongest move exploiting a tactical motif?",
+    ],
+    "3.5_hanging_pieces": [
+        "FEN: {fen}\nAre there any hanging (undefended) pieces?",
+        "In this position, which pieces are undefended?\nFEN: {fen}",
+        "FEN: {fen}\nIdentify all hanging pieces for both sides.",
+        "Given FEN: {fen}\nList pieces that are attacked but not defended.",
+        "Position: {fen}\nFind any pieces that are en prise.",
+        "FEN: {fen}\nWhich pieces are unprotected and under attack?",
+    ],
+
+    # ---- Tier 4: Evaluation ----
+    "4.1_material_balance": [
+        "FEN: {fen}\nWhat is the material balance?",
+        "Count the material for both sides.\nFEN: {fen}",
+        "FEN: {fen}\nWho has more material and by how much?",
+        "Given FEN: {fen}\nCalculate the material difference in pawns.",
+        "Position: {fen}\nWhat is the total material for white and black?",
+        "FEN: {fen}\nEvaluate the material balance using standard piece values.",
+    ],
+    "4.2_position_evaluation": [
+        "FEN: {fen}\nEvaluate this position. Who is better?",
+        "Assess the position from both sides' perspective.\nFEN: {fen}",
+        "FEN: {fen}\nIs this position equal, slightly better for one side, or winning?",
+        "Given FEN: {fen}\nProvide a positional assessment.",
+        "Position: {fen}\nWho stands better and why?",
+        "FEN: {fen}\nRate this position: equal, slight edge, clear advantage, winning, or decisive.",
+    ],
+    "4.3_pawn_structure": [
+        "FEN: {fen}\nAnalyze the pawn structure.",
+        "Describe the pawn formation in this position.\nFEN: {fen}",
+        "FEN: {fen}\nAre there any doubled, isolated, or passed pawns?",
+        "Given FEN: {fen}\nIdentify pawn structure weaknesses for both sides.",
+        "Position: {fen}\nEvaluate the pawn structure features.",
+        "FEN: {fen}\nList all passed pawns, isolated pawns, and doubled pawns.",
+    ],
+
+    # ---- Tier 5: Openings ----
+    "5.1_opening_identification": [
+        "FEN: {fen}\nWhat opening is this?",
+        "Identify the opening from this position.\nFEN: {fen}",
+        "FEN: {fen}\nName the chess opening that leads to this position.",
+        "Given FEN: {fen}\nWhat opening has been played?",
+        "The moves {moves} were played. What opening is this?",
+        "Position: {fen}\nIdentify the ECO code and opening name.",
+    ],
+    "5.2_opening_continuation": [
+        "FEN: {fen}\nWhat are the main continuation moves in this opening?",
+        "Suggest the next move(s) from this opening position.\nFEN: {fen}",
+        "FEN: {fen}\nWhat is the most popular continuation here?",
+        "Given opening position {fen}, what are the typical next moves?",
+        "Position: {fen}\nThis is the {name}. What are the main lines from here?",
+        "FEN: {fen}\nList the top book moves for this position.",
+    ],
+    "5.3_opening_principles": [
+        "FEN: {fen}\nWhat are the key ideas and plans in this opening?",
+        "The opening is the {name}. Explain the strategic ideas.\nFEN: {fen}",
+        "FEN: {fen}\nWhat should each side aim for in this position?",
+        "Given opening {name} (FEN: {fen}), describe the typical plans for both sides.",
+        "Position: {fen}\nWhat is the character of this opening position?",
+    ],
+
+    # ---- Tier 6: Endgames ----
+    "6.1_endgame_classification": [
+        "FEN: {fen}\nWhat type of endgame is this?",
+        "Classify this endgame by material.\nFEN: {fen}",
+        "FEN: {fen}\nDescribe the endgame type (e.g., KRK, KPK, KRPKR).",
+        "Given FEN: {fen}\nWhat endgame category does this position fall into?",
+        "Position: {fen}\nIdentify the endgame type.",
+        "FEN: {fen}\nName the material configuration of this endgame.",
+    ],
+    "6.2_endgame_wdl": [
+        "FEN: {fen}\nIs this endgame a win, draw, or loss for the side to move?",
+        "Evaluate this endgame: win, draw, or loss?\nFEN: {fen}",
+        "FEN: {fen}\nWith perfect play, what is the result of this endgame?",
+        "Given FEN: {fen}\nWhat is the theoretical result of this position?",
+        "Position: {fen}\nDetermine if this endgame is won, drawn, or lost.",
+        "FEN: {fen}\nWith best play from both sides, who wins?",
+    ],
+    "6.3_endgame_best_move": [
+        "FEN: {fen}\nWhat is the best move in this endgame?",
+        "Find the optimal move in this endgame position.\nFEN: {fen}",
+        "FEN: {fen}\nWhat move makes the most progress in this endgame?",
+        "Given FEN: {fen}\nWhat is the theoretically best move?",
+        "Position: {fen}\nPlay the strongest endgame move.",
+        "FEN: {fen}\nWhat is the DTZ-optimal move here?",
+    ],
+    "6.4_endgame_principles": [
+        "FEN: {fen}\nWhat endgame principles apply here?",
+        "Explain the key ideas in this endgame.\nFEN: {fen}",
+        "FEN: {fen}\nWhat technique should be used to win/draw this endgame?",
+        "Given FEN: {fen}\nDescribe the correct plan in this endgame.",
+        "Position: {fen}\nWhat endgame concepts are relevant (opposition, Lucena, Philidor, etc.)?",
+    ],
+
+    # ---- Tier 7: Planning ----
+    "7.1_best_move_selection": [
+        "FEN: {fen}\nWhat is the best move?",
+        "Find the strongest move in this position.\nFEN: {fen}",
+        "FEN: {fen}\nAnalyze and select the best move.",
+        "Given FEN: {fen}\nWhat move should the side to move play?",
+        "Position: {fen}\nChoose the best move and explain your reasoning.",
+        "FEN: {fen}\nThink step by step and find the best move.",
+        "What is the optimal move here?\nFEN: {fen}",
+    ],
+    "7.2_puzzle_solving": [
+        "FEN: {fen}\nSolve this puzzle. Find the winning move.",
+        "This is a chess puzzle. Find the best move.\nFEN: {fen}",
+        "FEN: {fen}\nThere is a forcing sequence here. What is the first move?",
+        "Given this puzzle position:\nFEN: {fen}\nFind the solution.",
+        "Puzzle — FEN: {fen}\nWhat is the key move?",
+        "FEN: {fen}\n{side} to move. Find the best continuation.",
+    ],
+    "7.3_move_consequence": [
+        "FEN: {fen}\nIf {move} is played, what happens next?",
+        "Analyze the consequences of playing {move}.\nFEN: {fen}",
+        "FEN: {fen}\nWhat is the expected continuation after {move}?",
+        "Given FEN: {fen}\nAfter the move {move}, what is the likely sequence of play?",
+        "Position: {fen}\nPredict the next 3-5 moves after {move}.",
+        "FEN: {fen}\nWhat are the consequences of {move}? Analyze the resulting position.",
+    ],
+}
+
+
+def select_template(task_id: str, rng: Random) -> str:
+    """Pick a random template for *task_id*."""
+    pool = TEMPLATES[task_id]
+    return rng.choice(pool)

@@ -1,0 +1,8 @@
+python-chess
+datasets
+huggingface_hub
+tqdm
+numpy
+pandas
+jsonlines
+py7zr

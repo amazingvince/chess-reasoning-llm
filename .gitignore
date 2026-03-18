@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Extracted polyglot books (regenerable via scripts/extract_polyglot_books.py)
+sft/make_data/polyglot_opening_books/*.bin
+
+# Output data (generated, not source)
+E:/chess_sft_data/
+
+# Claude Code local settings
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
