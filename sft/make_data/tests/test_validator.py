@@ -83,6 +83,15 @@ def test_validate_state_tracking_wrong_result():
     assert validate_state_tracking(STARTING_FEN, ["e2e4", "e7e5"], STARTING_FEN) is False
 
 
+def test_validate_state_tracking_chess960_castling():
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    board = chess.Board(fen, chess960=True)
+    move = board.parse_uci("d1c1")
+    board.push(move)
+
+    assert validate_state_tracking(fen, ["d1c1"], board.fen(), chess960=True) is True
+
+
 # ── validate_template_complete ───────────────────────────────────────
 
 

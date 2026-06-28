@@ -39,7 +39,7 @@ class LegalMoveGen(TaskGenerator):
                 continue
             is_960 = entry.get("is_chess960", False) if isinstance(entry, dict) else False
 
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
             legal_moves = sorted(m.uci() for m in board.legal_moves)
             if not legal_moves:
                 continue
@@ -78,7 +78,7 @@ class PieceSpecificMoves(TaskGenerator):
             if self.is_blocked(fen):
                 continue
             is_960 = entry.get("is_chess960", False) if isinstance(entry, dict) else False
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
 
             # Pick a random piece belonging to the side to move
             pieces_of_side = []
@@ -132,7 +132,7 @@ class MoveLegalityCheck(TaskGenerator):
             if self.is_blocked(fen):
                 continue
             is_960 = entry.get("is_chess960", False) if isinstance(entry, dict) else False
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
 
             legal_moves = list(board.legal_moves)
             if not legal_moves:
@@ -195,7 +195,7 @@ class CheckDetection(TaskGenerator):
             if self.is_blocked(fen):
                 continue
             is_960 = entry.get("is_chess960", False) if isinstance(entry, dict) else False
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
 
             if board.is_checkmate():
                 answer = "Checkmate."
@@ -234,30 +234,11 @@ class SpecialRules(TaskGenerator):
             if self.is_blocked(fen):
                 continue
             is_960 = entry.get("is_chess960", False) if isinstance(entry, dict) else False
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
 
             special_moves = _identify_special_moves(board)
             if not special_moves:
                 continue
-
-            answer_parts = []
-            if special_moves["castling"]:
-                sides = ", ".join(special_moves["castling"])
-                answer_parts.append(f"Castling available: {sides}.")
-            if special_moves["en_passant"]:
-                ep_moves = " ".join(special_moves["en_passant"])
-                answer_parts.append(f"En passant possible: {ep_moves}.")
-            if special_moves["promotions"]:
-                promo_sqs = " ".join(special_moves["promotions"])
-                answer_parts.append(
-                    f"Promotion possible from: {promo_sqs}. "
-                    f"Each pawn can promote to queen, rook, bishop, or knight."
-                )
-
-            if not answer_parts:
-                answer = "No special moves available."
-            else:
-                answer = " ".join(answer_parts)
 
             # Pick a square for templates that need {square}
             square = ""
@@ -266,24 +247,56 @@ class SpecialRules(TaskGenerator):
 
             raw = {"fen": fen, "square": square, "is_chess960": is_960}
             tpl = select_template(self.task_id(), self.rng)
+            tpl_lower = tpl.lower()
+            is_generic_special_prompt = (
+                "special moves" in tpl_lower
+                or "special rules" in tpl_lower
+                or "identify any special" in tpl_lower
+            )
 
-            # If template asks about promotion options for a specific pawn,
-            # tailor the answer to that specific pawn
-            if "promotion options" in tpl.lower() and square:
+            if "en passant" in tpl_lower and not is_generic_special_prompt:
+                if special_moves["en_passant"]:
+                    answer = f"En passant possible: {' '.join(special_moves['en_passant'])}."
+                else:
+                    answer = "No en passant is possible in this position."
+            elif ("castle" in tpl_lower or "castling" in tpl_lower) and not is_generic_special_prompt:
+                if special_moves["castling"]:
+                    answer = f"Castling available: {', '.join(special_moves['castling'])}."
+                else:
+                    answer = "No castling is available for the side to move."
+            elif "promotion options" in tpl_lower:
                 # List specific promotion moves for this pawn
                 promo_moves = []
-                for move in board.legal_moves:
-                    if move.promotion and chess.square_name(move.from_square) == square:
-                        promo_names = {chess.QUEEN: "queen", chess.ROOK: "rook",
-                                       chess.BISHOP: "bishop", chess.KNIGHT: "knight"}
-                        dest = chess.square_name(move.to_square)
-                        pname = promo_names.get(move.promotion, "queen")
-                        promo_moves.append(f"{move.uci()} (promote to {pname} on {dest})")
+                if square:
+                    for move in board.legal_moves:
+                        if move.promotion and chess.square_name(move.from_square) == square:
+                            promo_names = {chess.QUEEN: "queen", chess.ROOK: "rook",
+                                           chess.BISHOP: "bishop", chess.KNIGHT: "knight"}
+                            dest = chess.square_name(move.to_square)
+                            pname = promo_names.get(move.promotion, "queen")
+                            promo_moves.append(f"{move.uci()} (promote to {pname} on {dest})")
                 if promo_moves:
                     answer = (
                         f"The pawn on {square} can promote with: "
                         + ", ".join(promo_moves) + "."
                     )
+                else:
+                    answer = "No promotion is available for the side to move."
+            else:
+                answer_parts = []
+                if special_moves["castling"]:
+                    sides = ", ".join(special_moves["castling"])
+                    answer_parts.append(f"Castling available: {sides}.")
+                if special_moves["en_passant"]:
+                    ep_moves = " ".join(special_moves["en_passant"])
+                    answer_parts.append(f"En passant possible: {ep_moves}.")
+                if special_moves["promotions"]:
+                    promo_sqs = " ".join(special_moves["promotions"])
+                    answer_parts.append(
+                        f"Promotion possible from: {promo_sqs}. "
+                        f"Each pawn can promote to queen, rook, bishop, or knight."
+                    )
+                answer = " ".join(answer_parts) if answer_parts else "No special moves available."
 
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)

@@ -161,9 +161,9 @@ TASK_METRIC_TYPE: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _derive_check_detection(fen: str) -> str:
+def _derive_check_detection(fen: str, chess960: bool = False) -> str:
     """Check detection matching CheckDetection generator (task 2.4) format."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     if board.is_checkmate():
         return "Checkmate."
     if board.is_stalemate():
@@ -224,9 +224,9 @@ def _derive_material_count(fen: str) -> str:
     )
 
 
-def _derive_special_rules(fen: str) -> str:
+def _derive_special_rules(fen: str, chess960: bool = False) -> str:
     """Special rules matching SpecialRules generator format."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     parts: list[str] = []
 
     # Castling (check for side-to-move rights)
@@ -311,9 +311,13 @@ def _derive_threats(fen: str) -> tuple[str, str]:
     return answer, color_name
 
 
-def _derive_state_tracking(fen: str, rng: Random) -> tuple[str, str]:
+def _derive_state_tracking(
+    fen: str,
+    rng: Random,
+    chess960: bool = False,
+) -> tuple[str, str]:
     """Generate random moves and result FEN. Returns (moves_str, result_fen)."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     n_moves = rng.randint(1, 8)
     moves_played: list[str] = []
     for _ in range(n_moves):
@@ -328,9 +332,13 @@ def _derive_state_tracking(fen: str, rng: Random) -> tuple[str, str]:
     return " ".join(moves_played), board.fen()
 
 
-def _derive_legality_check(fen: str, rng: Random) -> tuple[str, str]:
+def _derive_legality_check(
+    fen: str,
+    rng: Random,
+    chess960: bool = False,
+) -> tuple[str, str]:
     """Pick a legal or illegal move. Returns (move_uci, answer)."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     legal_moves = list(board.legal_moves)
     if not legal_moves:
         return "", ""
@@ -366,9 +374,9 @@ def _derive_opening_continuation(raw: dict) -> str:
     return "Top continuations: " + ", ".join(parts) + "."
 
 
-def _derive_castling_rules(fen: str) -> str:
+def _derive_castling_rules(fen: str, chess960: bool = False) -> str:
     """Castling availability for Chess960 positions."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     castling: list[str] = []
     if board.has_kingside_castling_rights(board.turn):
         castling.append("kingside")
@@ -399,16 +407,17 @@ def _derive_gold_answer_inner(
 ) -> str:
     """Inner implementation — may raise on bad FEN / data."""
     fen = raw.get("fen", "")
+    is_960 = bool(raw.get("is_chess960") or task_type.endswith("_960"))
 
     if task_type == "board_print":
-        board = chess.Board(fen)
+        board = chess.Board(fen, chess960=is_960)
         return _board_to_ascii(board)
 
     if task_type == "board_to_fen":
         return fen
 
     if task_type == "piece_id":
-        board = chess.Board(fen)
+        board = chess.Board(fen, chess960=is_960)
         occupied = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
         sq = rng.choice(occupied)
         piece = board.piece_at(sq)
@@ -421,25 +430,25 @@ def _derive_gold_answer_inner(
         return _derive_material_count(fen)
 
     if task_type == "state_tracking":
-        moves_str, result_fen = _derive_state_tracking(fen, rng)
+        moves_str, result_fen = _derive_state_tracking(fen, rng, chess960=is_960)
         raw["_state_tracking_moves"] = moves_str
         raw["_state_tracking_result"] = result_fen
         return result_fen
 
     if task_type in ("legal_moves", "legal_moves_960"):
-        return answer_legal_moves(fen)
+        return answer_legal_moves(fen, chess960=is_960)
 
     if task_type in ("check_detection", "check_detection_960"):
-        return _derive_check_detection(fen)
+        return _derive_check_detection(fen, chess960=is_960)
 
     if task_type in ("captures", "capture_id"):
         return _derive_captures(fen)
 
     if task_type == "special_rules":
-        return _derive_special_rules(fen)
+        return _derive_special_rules(fen, chess960=is_960)
 
     if task_type == "legality_check":
-        move_uci, answer = _derive_legality_check(fen, rng)
+        move_uci, answer = _derive_legality_check(fen, rng, chess960=is_960)
         raw["_legality_check_move"] = move_uci
         return answer
 
@@ -498,7 +507,7 @@ def _derive_gold_answer_inner(
         return raw.get("solution_first_move", "")
 
     if task_type == "castling_rules_960":
-        return _derive_castling_rules(fen)
+        return _derive_castling_rules(fen, chess960=True)
 
     if task_type == "binary_choice":
         return raw.get("better_move", "")
@@ -511,10 +520,11 @@ def _render_prompt(task_type: str, raw: dict) -> str:
     template = CANONICAL_PROMPTS[task_type]
     ctx: dict = dict(raw)
     fen = ctx.get("fen", "")
+    is_960 = bool(ctx.get("is_chess960") or task_type.endswith("_960"))
 
     if task_type == "board_to_fen" and fen:
         try:
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=is_960)
             ctx.setdefault("board", _board_to_ascii(board))
         except (ValueError, TypeError):
             ctx.setdefault("board", "")
@@ -575,22 +585,45 @@ def eval_bucket_accuracy(prediction: str, gold: str) -> float:
     return 0.0
 
 
+def normalize_prediction(prediction: str) -> str:
+    """Strip non-answer wrappers from a model prediction.
+
+    This keeps benchmark scoring robust against chat-template markers and
+    chain-of-thought blocks while preserving the model's final answer text.
+    """
+    import re as _re
+
+    text = prediction or ""
+    text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    text = text.replace("<|im_end|>", " ")
+    text = text.replace("<|endoftext|>", " ")
+    text = text.replace("<|assistant|>", " ")
+    text = text.replace("<|user|>", " ")
+    text = _re.sub(r"<\|im_start\|>\s*assistant", " ", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"^\s*assistant\s*:?\s*", "", text, flags=_re.IGNORECASE)
+    return text.strip()
+
+
 def format_compliance(prediction: str) -> float:
     """1.0 if valid <think>...</think><move>UCI</move> format."""
     return 1.0 if validate_think_move_format(prediction) else 0.0
 
 
-def legal_move_rate(prediction: str, fen: str) -> float | None:
+def legal_move_rate(
+    prediction: str,
+    fen: str,
+    chess960: bool = False,
+) -> float | None:
     """1.0 if move in <move> tag is legal in fen, None if no tag present.
 
     Per the benchmark plan, legal move rate is "of all outputs that
     contain a ``<move>`` tag".  Returning ``None`` for tag-less outputs
     lets callers exclude them from the denominator.
     """
-    uci = _extract_uci_from_move_tag(prediction)
+    uci = _extract_uci_from_move_tag(normalize_prediction(prediction))
     if uci is None:
         return None
-    return 1.0 if validate_move_legal(fen, uci) else 0.0
+    return 1.0 if validate_move_legal(fen, uci, chess960=chess960) else 0.0
 
 
 def move_extraction_match(prediction: str, gold_move: str) -> float:
@@ -601,11 +634,10 @@ def move_extraction_match(prediction: str, gold_move: str) -> float:
     from the tag before comparing.  Falls back to plain exact match if
     no ``<move>`` tag is found (handles bare UCI predictions too).
     """
-    uci = _extract_uci_from_move_tag(prediction)
-    if uci is not None:
-        return 1.0 if uci.strip().lower() == gold_move.strip().lower() else 0.0
-    # Fallback: plain exact match for bare UCI predictions
-    return exact_match(prediction, gold_move)
+    uci = _extract_move(prediction)
+    if uci is None:
+        return 0.0
+    return 1.0 if uci.strip().lower() == gold_move.strip().lower() else 0.0
 
 
 _NEGATION_RE = None  # lazy-compiled
@@ -684,7 +716,7 @@ def move_choice_match(
     """
     import re
     gold = gold_move.strip().lower()
-    pred = prediction.strip().lower()
+    pred = normalize_prediction(prediction).strip().lower()
 
     if candidates:
         ca, cb = candidates[0].strip().lower(), candidates[1].strip().lower()
@@ -751,13 +783,17 @@ def _extract_move(prediction: str) -> str | None:
     """
     import re as _re
 
-    uci = _extract_uci_from_move_tag(prediction)
+    text = normalize_prediction(prediction)
+    uci = _extract_uci_from_move_tag(text)
     if uci is not None:
         return uci
     # Bare UCI fallback — must match the standard UCI pattern
-    bare = prediction.strip().lower()
+    bare = text.strip().lower()
     if _re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", bare):
         return bare
+    match = _re.search(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b", bare)
+    if match:
+        return match.group(1)
     return None
 
 
@@ -860,7 +896,7 @@ _META_KEYS = frozenset({
     "cp", "mate", "wdl", "material", "eco", "name",
     "best_move", "solution_first_move", "better_move",
     "move_a", "move_b", "puzzle_id", "source", "themes",
-    "book_moves", "depth",
+    "book_moves", "depth", "is_chess960", "chess960_id",
 })
 
 
@@ -962,6 +998,8 @@ def score_prediction(
 
     Returns dict with ``primary`` metric and optional ``secondary`` metrics.
     """
+    raw_prediction = prediction
+    prediction = normalize_prediction(prediction)
     metric = example.metric_type
     gold = example.gold_answer
     scores: dict[str, float | None] = {}
@@ -989,8 +1027,12 @@ def score_prediction(
 
     # Secondary metrics for Tier 7 move-prediction tasks (think/move format)
     if example.task_type in ("best_move", "puzzle_solve"):
-        scores["format_compliance"] = format_compliance(prediction)
-        scores["legal_move"] = legal_move_rate(prediction, example.fen)
+        scores["format_compliance"] = format_compliance(raw_prediction)
+        scores["legal_move"] = legal_move_rate(
+            raw_prediction,
+            example.fen,
+            chess960=bool(example.metadata.get("is_chess960")),
+        )
 
     return scores
 

@@ -3,7 +3,6 @@
 
 Usage:
     python run_benchmark.py --benchmark-dir /path --predictions /path/output.jsonl
-    python run_benchmark.py --benchmark-dir /path --predictions /path --pass-k 8
     python run_benchmark.py --benchmark-dir /path --predictions /path --stockfish-path /path/to/sf
 """
 
@@ -288,7 +287,15 @@ def main() -> int:
         if planning_preds:
             fc_scores = [format_compliance(p) for _, p in planning_preds]
             lm_scores = [
-                v for v in (legal_move_rate(p, ex.fen) for ex, p in planning_preds)
+                v
+                for v in (
+                    legal_move_rate(
+                        p,
+                        ex.fen,
+                        chess960=bool(ex.metadata.get("is_chess960")),
+                    )
+                    for ex, p in planning_preds
+                )
                 if v is not None
             ]
             metrics["format_compliance"] = sum(fc_scores) / len(fc_scores)

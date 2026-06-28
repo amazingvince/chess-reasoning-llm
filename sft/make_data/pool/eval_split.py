@@ -16,6 +16,14 @@ from config.settings import EVAL_SPLIT_SIZES, MASTER_SEED
 logger = logging.getLogger(__name__)
 
 
+def canonical_fen_key(fen: str) -> str:
+    """Return the board-state key used for split/decontamination checks."""
+    parts = fen.strip().split()
+    if len(parts) >= 4:
+        return " ".join(parts[:4])
+    return fen.strip()
+
+
 def generate_all_eval_splits(
     sources: dict[str, list[dict]],
     seed: int = MASTER_SEED,
@@ -60,9 +68,10 @@ def generate_all_eval_splits(
         available: list[dict] = []
         for c in candidates:
             fen = c.get("fen", "")
-            if not fen or fen in used_fens or fen in seen_in_candidates:
+            fen_key = canonical_fen_key(fen)
+            if not fen or fen_key in used_fens or fen_key in seen_in_candidates:
                 continue
-            seen_in_candidates.add(fen)
+            seen_in_candidates.add(fen_key)
             available.append(c)
         n = min(target_size, len(available))
         sampled = rng.sample(available, n)
@@ -72,7 +81,7 @@ def generate_all_eval_splits(
         for ex in sampled:
             fen = ex.get("fen", "")
             if fen:
-                used_fens.add(fen)
+                used_fens.add(canonical_fen_key(fen))
 
         logger.info(
             "Eval split %r: %d / %d target (%d candidates after dedup)",
@@ -89,7 +98,7 @@ def build_blocklist(eval_splits: dict[str, list[dict]]) -> frozenset[str]:
         for ex in split_examples:
             fen = ex.get("fen", "")
             if fen:
-                fens.add(fen)
+                fens.add(canonical_fen_key(fen))
     logger.info("Built eval blocklist with %d FENs", len(fens))
     return frozenset(fens)
 
@@ -121,7 +130,7 @@ def load_blocklist(path: str) -> frozenset[str]:
         for line in fh:
             line = line.strip()
             if line:
-                fens.add(line)
+                fens.add(canonical_fen_key(line))
     return frozenset(fens)
 
 

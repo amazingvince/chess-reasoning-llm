@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 _DEDUP_DB = ANNOTATIONS_DIR / "evals_dedup.db"
 
 
+def _normalize_pv_line(
+    fen: str,
+    line: str,
+    chess960: bool = False,
+) -> str:
+    """Normalize every UCI move in a PV using python-chess parsing.
+
+    This converts king-to-rook castling notation from engine datasets into
+    the canonical UCI strings used by generated labels.
+    """
+    board = chess.Board(fen, chess960=chess960)
+    normalized: list[str] = []
+    for token in line.split():
+        move = board.parse_uci(token)
+        normalized.append(move.uci())
+        board.push(move)
+    return " ".join(normalized)
+
+
 def _init_dedup_db(db_path: Path) -> sqlite3.Connection:
     """Create or open the dedup SQLite database."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,14 +107,11 @@ def stream_evals(
         if not fen or not line:
             continue
 
-        best_move = line.split()[0]
-
-        # Validate FEN and best move
+        # Validate FEN and normalize the whole PV.  Lichess/Stockfish may
+        # output king-to-rook castling notation; python-chess normalizes it.
         try:
-            board = chess.Board(fen)
-            move = chess.Move.from_uci(best_move)
-            if move not in board.legal_moves:
-                continue
+            pv_line = _normalize_pv_line(fen, line)
+            best_move = pv_line.split()[0]
         except (ValueError, TypeError):
             continue
 
@@ -126,7 +142,7 @@ def stream_evals(
         best[fen] = {
             "fen": fen,
             "best_move": best_move,
-            "pv_line": line,
+            "pv_line": pv_line,
             "depth": depth,
             "knodes": knodes,
             "cp": cp,
@@ -141,9 +157,34 @@ def stream_evals(
     ]
     if batch:
         _flush_batch(conn, batch)
-    conn.close()
 
-    yield from best.values()
+    if best:
+        conn.close()
+        yield from best.values()
+        return
+
+    # Re-run: all rows already in DB at equal-or-better quality.
+    # Yield from the persisted DB instead of returning nothing.
+    logger.info("No new evals; yielding from dedup DB")
+    query = "SELECT fen, best_move, pv_line, depth, knodes, cp, mate FROM evals WHERE depth >= ?"
+    params: list = [min_depth]
+    if max_rows is not None:
+        query += " LIMIT ?"
+        params.append(max_rows)
+    for row in conn.execute(query, params):
+        fen = row[0]
+        pv_line = row[2]
+        # Normalize castling notation from DB (may have old king-to-rook data)
+        try:
+            pv_line = _normalize_pv_line(fen, pv_line)
+            best_move = pv_line.split()[0]
+        except (ValueError, TypeError):
+            continue
+        yield {
+            "fen": fen, "best_move": best_move, "pv_line": pv_line,
+            "depth": row[3], "knodes": row[4], "cp": row[5], "mate": row[6],
+        }
+    conn.close()
 
 
 def _flush_batch(conn: sqlite3.Connection, batch: list[tuple]) -> None:

@@ -1,25 +1,26 @@
 """Source 1: Lichess Standard Chess Games.
 
 Stream PGN games from HuggingFace, extract FEN at each ply,
-filter by Elo >= 2000. Provides realistic position distributions.
+filter by Elo >= MIN_ELO_GAMES. Provides realistic position distributions.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterator
 
 import chess
 import chess.pgn
 from datasets import load_dataset
 
-from config.settings import HF_DATASETS
+from config.settings import HF_DATASETS, MIN_ELO_GAMES
 
 logger = logging.getLogger(__name__)
 
 
 def stream_games(
-    min_elo: int = 2000,
+    min_elo: int = MIN_ELO_GAMES,
     max_games: int | None = None,
 ) -> Iterator[dict]:
     """Yield game dicts from the Lichess standard chess games dataset.
@@ -53,12 +54,13 @@ def stream_games(
         if white_elo < min_elo or black_elo < min_elo:
             continue
 
+        moves_raw = row.get("moves") or row.get("pgn") or row.get("movetext") or ""
         yield {
-            "pgn": row.get("pgn", row.get("moves", "")),
+            "pgn": row.get("pgn") or moves_raw,
             "white_elo": white_elo,
             "black_elo": black_elo,
             "result": row.get("Result", row.get("result", "*")),
-            "moves": row.get("moves", ""),
+            "moves": moves_raw,
         }
         count += 1
 
@@ -95,9 +97,12 @@ def extract_positions(game: dict) -> Iterator[dict]:
 
     Each dict: ``{fen, move_played_uci, game_phase, material_balance, ply}``.
     """
-    moves_str = game.get("moves", "") or game.get("pgn", "")
+    moves_str = game.get("moves") or game.get("pgn") or game.get("movetext") or ""
     if not moves_str:
         return
+
+    # Strip PGN clock/eval comments like { [%clk 0:05:00] } before tokenizing
+    moves_str = re.sub(r'\{[^}]*\}', '', moves_str)
 
     board = chess.Board()
     # Try splitting as UCI moves first, fallback to SAN

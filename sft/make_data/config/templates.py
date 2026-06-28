@@ -213,6 +213,32 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nMoves played: {moves}\nWhat opening is this?",
         "Board:\n{board}\nFEN: {fen}\nIdentify the opening name and ECO code.",
     ],
+    "5.1_id_name_only": [
+        "FEN: {fen}\nName this opening.",
+        "What opening is this position from?\nFEN: {fen}",
+        "FEN: {fen}\nGive the name of this chess opening.",
+        "Identify the opening by name.\nFEN: {fen}",
+        "Board:\n{board}\nWhat is the name of this opening?",
+    ],
+    "5.1_id_eco_focus": [
+        "FEN: {fen}\nWhat is the ECO classification of this opening?",
+        "Give the ECO code and opening name for this position.\nFEN: {fen}",
+        "FEN: {fen}\nClassify this opening by its ECO code.",
+        "What ECO code corresponds to this position?\nFEN: {fen}",
+        "Board:\n{board}\nFEN: {fen}\nProvide the ECO classification.",
+    ],
+    "5.1_id_contextual": [
+        "FEN: {fen}\nIdentify this opening and describe its character.",
+        "Name this opening and explain what kind of game it produces.\nFEN: {fen}",
+        "FEN: {fen}\nWhat opening is this, and what is its typical character?",
+        "Board:\n{board}\nFEN: {fen}\nIdentify the opening and describe its nature.",
+    ],
+    "5.1_id_from_moves": [
+        "The move sequence {moves} was played. What opening does this represent?",
+        "After the moves {moves}, what opening have we reached?",
+        "Moves played: {moves}\nIdentify the opening.",
+        "Given the move order {moves}, name the opening and ECO code.",
+    ],
     "5.2_opening_continuation": [
         "FEN: {fen}\nWhat are the main continuation moves in this opening?",
         "Suggest the next move(s) from this opening position.\nFEN: {fen}",
@@ -223,6 +249,24 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nFEN: {fen}\nWhat are the main continuation moves in this opening?",
         "Board:\n{board}\nThis is the {name}. List the top book moves.",
     ],
+    "5.2_cont_best_single": [
+        "FEN: {fen}\nWhat is the single most popular move here?",
+        "What is the main move in this opening position?\nFEN: {fen}",
+        "FEN: {fen}\nGive the most commonly played continuation.",
+        "Board:\n{board}\nFEN: {fen}\nWhat is the most popular next move?",
+    ],
+    "5.2_cont_with_context": [
+        "This is the {name}.\nFEN: {fen}\nWhat are the main continuations?",
+        "In the {name} (FEN: {fen}), what moves are typically played next?",
+        "FEN: {fen}\nThis position arises from the {name}. List the main continuations.",
+        "Board:\n{board}\nThis is the {name}. What are the principal continuations?",
+    ],
+    "5.2_cont_alternatives": [
+        "FEN: {fen}\nBesides the main move, what alternatives exist?",
+        "What secondary continuations are available in this position?\nFEN: {fen}",
+        "FEN: {fen}\nList the alternative moves to the main line.",
+        "Board:\n{board}\nFEN: {fen}\nWhat are the alternative continuations?",
+    ],
     "5.3_opening_principles": [
         "FEN: {fen}\nWhat are the key ideas and plans in this opening?",
         "The opening is the {name}. Explain the strategic ideas.\nFEN: {fen}",
@@ -231,6 +275,30 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nWhat is the character of this opening position?",
         "Board:\n{board}\nThis is the {name}. What are the key ideas and plans?",
         "Board:\n{board}\nFEN: {fen}\nDescribe the character of this opening position.",
+    ],
+    "5.3_white_plans": [
+        "FEN: {fen}\nWhat are White's main goals in this opening?",
+        "In the {name}, what should White aim for?\nFEN: {fen}",
+        "FEN: {fen}\nDescribe White's typical plans and objectives.",
+        "Board:\n{board}\nFEN: {fen}\nWhat is White's strategy in this position?",
+    ],
+    "5.3_black_plans": [
+        "FEN: {fen}\nWhat are Black's main goals in this opening?",
+        "In the {name}, what should Black aim for?\nFEN: {fen}",
+        "FEN: {fen}\nDescribe Black's typical plans and objectives.",
+        "Board:\n{board}\nFEN: {fen}\nWhat is Black's strategy in this position?",
+    ],
+    "5.3_development": [
+        "FEN: {fen}\nDescribe the development state of both sides.",
+        "How developed are the pieces in this position?\nFEN: {fen}",
+        "FEN: {fen}\nGive a development snapshot for White and Black.",
+        "Board:\n{board}\nFEN: {fen}\nAssess the piece development for both sides.",
+    ],
+    "5.3_pawn_structure": [
+        "FEN: {fen}\nAnalyze the pawn structure in this opening.",
+        "What pawn features characterize this position?\nFEN: {fen}",
+        "FEN: {fen}\nDescribe the pawn structure: doubled, isolated, passed, or chains.",
+        "Board:\n{board}\nFEN: {fen}\nWhat is the pawn structure like?",
     ],
 
     # ---- Tier 6: Endgames ----

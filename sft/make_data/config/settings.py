@@ -74,10 +74,10 @@ VOLUMES: dict[str, int] = {
     "4.1_material_balance": 50_000,
     "4.2_position_evaluation": 60_000,
     "4.3_pawn_structure": 40_000,
-    # Tier 5 — Openings (~9K; capped by ~3,090 train openings after 15% ECO holdout)
-    "5.1_opening_identification": 3_000,
-    "5.2_opening_continuation": 3_000,
-    "5.3_opening_principles": 3_000,
+    # Tier 5 — Openings (~30K; ~3,090 train openings × 3-5 variants each)
+    "5.1_opening_identification": 10_000,
+    "5.2_opening_continuation": 10_000,
+    "5.3_opening_principles": 10_000,
     # Tier 6 — Endgames (~140K)
     "6.1_endgame_classification": 30_000,
     "6.2_endgame_wdl": 40_000,
@@ -88,6 +88,11 @@ VOLUMES: dict[str, int] = {
     "7.2_puzzle_solving": 50_000,
     "7.3_move_consequence": 40_000,
 }
+
+# ---------------------------------------------------------------------------
+# Elo filters
+# ---------------------------------------------------------------------------
+MIN_ELO_GAMES = 1200  # min Elo for both players in streamed Lichess games
 
 # ---------------------------------------------------------------------------
 # Depth filters

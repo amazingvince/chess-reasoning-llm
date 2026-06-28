@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def answer_legal_moves(fen: str) -> str:
+def answer_legal_moves(fen: str, chess960: bool = False) -> str:
     """Sorted space-separated UCI legal move list."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     return " ".join(sorted(m.uci() for m in board.legal_moves))
 
 
-def answer_check_detection(fen: str) -> str:
+def answer_check_detection(fen: str, chess960: bool = False) -> str:
     """Return game status: Checkmate, Check, Stalemate, or Normal."""
-    board = chess.Board(fen)
+    board = chess.Board(fen, chess960=chess960)
     if board.is_checkmate():
         return "Checkmate"
     if board.is_check():
@@ -223,6 +223,7 @@ def _run_check(fn, example: dict) -> tuple[bool | str, str]:
     or ``("skip", "")`` when required fields are missing.
     """
     fen = example.get("fen", "")
+    is_960 = bool(example.get("is_chess960") or example.get("chess960_id") is not None)
 
     try:
         if fn is answer_position_eval:
@@ -261,7 +262,10 @@ def _run_check(fn, example: dict) -> tuple[bool | str, str]:
         else:
             if not fen:
                 return _SKIP, ""
-            result = fn(fen)
+            if fn in (answer_legal_moves, answer_check_detection):
+                result = fn(fen, chess960=is_960)
+            else:
+                result = fn(fen)
 
         # Basic sanity: result is non-empty
         if not result and result != "":
@@ -269,7 +273,7 @@ def _run_check(fn, example: dict) -> tuple[bool | str, str]:
 
         # Validate the FEN parses (if the function used it)
         if fn not in (answer_position_eval, answer_endgame_wdl):
-            chess.Board(fen)  # will raise on bad FEN
+            chess.Board(fen, chess960=is_960)  # will raise on bad FEN
 
         return True, ""
 

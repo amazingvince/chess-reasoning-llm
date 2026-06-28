@@ -1,138 +1,210 @@
-# make_data — Chess SFT Data Generation Pipeline
+# Chess SFT Data Generation
 
-Generates ~1.5M chess SFT training examples across 7 tiers (25 tasks) from 9 data sources. All examples use a consistent `messages` format with FEN positions and UCI move notation.
+This package builds the supervised fine-tuning data used to teach a small
+language model chess. The goal is not only to teach syntax like FEN and UCI,
+but to build a curriculum that moves from board perception, to rules, to
+tactics, to evaluation, to planning.
 
-## Quick Start
+At full target volume the pipeline generates about 1.56M examples across
+7 tiers and 28 tasks. It also freezes a held-out benchmark before training
+data is generated, then uses a canonical FEN blocklist to prevent train/eval
+position leakage.
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+## Mental Model
 
-# Small test run (100 examples per task)
-python scripts/run_pipeline.py --volume 100
+The pipeline has six layers:
 
-# Full pipeline
-python scripts/run_pipeline.py --all
+1. Source loaders collect chess positions and labels from real games,
+   puzzles, openings, engine evaluations, tablebases, and generated Chess960.
+2. A FEN pool deduplicates positions while preserving metadata like source,
+   game phase, and `is_chess960`.
+3. Eval splits are sampled first, frozen, and converted into a blocklist.
+4. Task generators turn source rows into chat-style SFT examples.
+5. The JSONL writer validates each example before writing it.
+6. Benchmark tooling creates deterministic prompts and scoring metrics for
+   model evaluation.
 
-# Single tier
-python scripts/run_pipeline.py --tier 1
-
-# Validate existing outputs
-python scripts/run_pipeline.py --validate-only
-```
+The important design choice is that training data generation is downstream of
+the eval split. A position can only enter training if it is not in the frozen
+benchmark blocklist, using a canonical key based on the first four FEN fields
+so move counters do not create false "new" positions.
 
 ## Directory Layout
 
-```
-make_data/
-├── config/
-│   ├── settings.py          # Paths, volumes, depths, mix ratios, seeds
-│   ├── templates.py          # 5-10 prompt templates per task (25 tasks)
-│   └── system_prompt.py      # Single system prompt constant
-├── sources/                   # 9 data source loaders
-│   ├── lichess_games.py       # Stream PGN, extract FEN per ply, Elo >= 2000
-│   ├── lichess_puzzles.py     # ~4M puzzles with setup-move preprocessing
-│   ├── lichess_openings.py    # 3,630 named openings with ECO codes
-│   ├── lichess_evals.py       # 845M position evals, SQLite dedup, partitioning
-│   ├── polyglot_books.py      # Polyglot .bin book reader, weighted moves
-│   ├── syzygy_probing.py      # WDL/DTZ probing, endgame position sampling
-│   ├── stockfish_engine.py    # UCI wrapper for live Stockfish evaluation
-│   ├── chess960.py            # Generate all 960 starting positions + variants
-│   └── mate_dataset.py        # MATE dataset binary choice (zip/JSONL from HF)
-├── pool/
-│   ├── fen_pool.py            # Unified FEN collection, dedup, tagging
-│   ├── eval_split.py          # Generate eval splits FIRST, build FEN blocklist
-│   └── annotator.py           # Stockfish annotation with SQLite cache
-├── generators/
-│   ├── base.py                # Abstract TaskGenerator base class
-│   ├── tier1_perception.py    # Tasks 1.1-1.5 (~440K)
-│   ├── tier2_rules.py         # Tasks 2.1-2.5 (~370K)
-│   ├── tier3_tactics.py       # Tasks 3.1-3.5 (~260K)
-│   ├── tier4_evaluation.py    # Tasks 4.1-4.3 (~150K)
-│   ├── tier5_openings.py      # Tasks 5.1-5.3 (~9K)
-│   ├── tier6_endgames.py      # Tasks 6.1-6.4 (~140K)
-│   ├── tier7_planning.py      # Tasks 7.1-7.3 (~170K)
-│   └── reasoning_traces.py    # Shared <think>/<move> trace generation
-├── validation/
-│   ├── validator.py           # 7 validation checks (FEN, moves, templates, etc.)
-│   ├── benchmark.py           # Frozen benchmark: gold answers, metrics, oracle validation
-│   ├── eval_harness.py        # Self-consistency checks on eval split data
-│   └── decontamination.py     # Eval blocklist enforcement
-├── output/
-│   ├── writer.py              # JSONL writer with inline validation
-│   └── stats.py               # Volume tracking, Chess960 mix verification
-├── scripts/
-│   ├── run_pipeline.py        # Main CLI: full pipeline or single tier
-│   ├── run_eval_split.py      # Generate + freeze eval splits independently
-│   ├── run_eval_harness.py    # Run eval harness checks on eval splits
-│   ├── run_benchmark.py       # Score model predictions against frozen benchmark
-│   ├── freeze_benchmark.py    # Refreeze benchmark from existing eval splits
-│   ├── validate_outputs.py    # Post-hoc validation of generated JSONL
-│   └── download_tablebases.py # Download Syzygy tablebases
-├── tests/                     # 251 pytest tests covering all tiers + benchmark
-└── polyglot_opening_books/    # Polyglot book archives (.bin, .zip, .7z)
+```text
+sft/make_data/
+  config/
+    settings.py          Paths, volumes, source IDs, depth filters, seeds
+    templates.py         Prompt templates for all task IDs
+    system_prompt.py     Shared system prompt for SFT examples
+  sources/
+    lichess_games.py     Streams games and extracts per-ply positions
+    lichess_puzzles.py   Loads puzzles and applies setup-move preprocessing
+    lichess_openings.py  Loads ECO/name/opening move data
+    lichess_evals.py     Streams engine evals with SQLite dedup
+    polyglot_books.py    Reads local Polyglot books for opening moves
+    syzygy_probing.py    Probes WDL/DTZ tablebases
+    stockfish_engine.py  Thin python-chess Stockfish wrapper
+    chess960.py          Generates Chess960 starts and random continuations
+    mate_dataset.py      Loads MATE binary move-comparison data
+  pool/
+    fen_pool.py          In-memory FEN dedup and tagging
+    eval_split.py        Eval split sampling, ECO holdout, blocklist
+    annotator.py         Stockfish annotation cache
+  generators/
+    base.py              Shared TaskGenerator contract
+    tier1_perception.py  Board/FEN/piece/state tracking tasks
+    tier2_rules.py       Legal moves, checks, castling, EP, promotion
+    tier3_tactics.py     Captures, threats, attacked pieces, tactics
+    tier4_evaluation.py  Material, eval buckets, pawn structure
+    tier5_openings.py    ECO/name/continuation/opening-plan tasks
+    tier6_endgames.py    Material class, WDL, DTZ move, principles
+    tier7_planning.py    Best move, puzzles, PV consequences
+    reasoning_traces.py  Shared think/move reasoning helpers
+  validation/
+    validator.py         Per-example validation before write
+    benchmark.py         Frozen benchmark schema, gold derivation, scoring
+    eval_harness.py      Oracle checks for benchmark examples
+    decontamination.py   Output audit against eval blocklist
+  output/
+    writer.py            Validating JSONL writer
+    stats.py             Generation counts and Chess960 mix checks
+  scripts/
+    run_pipeline.py      Main orchestration CLI
+    freeze_benchmark.py  Refreeze benchmark JSONL from eval splits
+    run_benchmark.py     Score model predictions against benchmark
+    run_eval_split.py    Generate held-out eval splits
+    run_eval_harness.py  Validate eval split oracle consistency
+    validate_outputs.py  Post-hoc validation of generated JSONL
+    preflight_check.py   Environment/data preflight checks
 ```
 
-### Runtime Data (not in repo)
+Large runtime outputs default to `E:/chess_sft_data`, controlled by
+`CHESS_SFT_OUTPUT`. Hugging Face cache defaults to `E:/hf_cache`.
 
-All large/generated data lives on the E: drive:
+## Data Sources
 
+The pipeline currently uses nine source families.
+
+| Source | What It Provides | Used For |
+| --- | --- | --- |
+| Lichess games | Realistic game FENs, played move, ply, phase, material | General FEN pool, state tracking, rules, tactics, evaluation |
+| Lichess puzzles | Puzzle FEN after setup move, solution line, themes, rating | Tactics and puzzle-solving supervision |
+| Lichess openings | ECO code, name, PGN, UCI move sequence, replayed FEN | Opening ID and opening principle tasks |
+| Lichess position evals | FEN, depth, best move, PV, cp/mate | Position evaluation, best move, move consequence |
+| Polyglot books | Weighted book moves for opening positions | Opening continuation labels |
+| Syzygy tablebases | WDL and DTZ for <=7-piece endings | Endgame WDL and DTZ-optimal moves |
+| Stockfish | Live fallback eval, best move, PV | Annotation cache and future backfills |
+| Chess960 generator | Chess960 start IDs plus random legal continuations | Rules/perception robustness and Chess960 benchmark |
+| MATE dataset | Two legal candidate moves and the better move | Binary move-choice benchmark/data |
+
+Source-specific safeguards are built in:
+
+- Lichess puzzle rows are preprocessed by pushing the opponent's setup move,
+  so the FEN shown to the model is the real puzzle position.
+- Opening rows are replayed from UCI moves with python-chess before use.
+- Position-eval PV lines are parsed through python-chess, including castling
+  normalization, before best moves are stored.
+- Eval rows are deduplicated in SQLite, keeping higher depth and then higher
+  `knodes` when the same FEN appears multiple times.
+- Chess960 positions are parsed with `chess960=True` anywhere castling/legal
+  move semantics matter.
+
+## Pipeline Flow
+
+### 1. Load Sources
+
+`scripts/run_pipeline.py` calls `load_sources()`. It streams or loads the
+source datasets, applies memory caps, and builds a shared config dict consumed
+by generators:
+
+```python
+config["fen_pool"]
+config["game_positions"]
+config["puzzles"]
+config["openings"]
+config["position_evals"]
+config["best_move_evals"]
+config["consequence_evals"]
+config["book_moves"]
+config["endgame_positions"]
+config["mate_rows"]
 ```
-E:/hf_cache/                   # HuggingFace datasets cache
-E:/chess_sft_data/
-├── pool/                      # FEN pools
-├── eval_splits/               # Raw eval split data (9 splits + blocklist)
-│   ├── blocklist.txt          # One FEN per line — training must exclude these
-│   ├── perception.jsonl
-│   ├── rules.jsonl
-│   └── ...
-├── benchmark/                 # Frozen benchmark (canonical prompts + gold answers)
-│   ├── manifest.json          # Version, seed, split sizes
-│   ├── perception.jsonl
-│   └── ...
-├── annotations/               # Stockfish annotation cache (SQLite)
-└── output/                    # Final JSONL per tier
-    ├── tier1/
-    ├── tier2/
-    └── ...
+
+The FEN pool is shuffled after deduplication so individual generators see a
+varied mixture of positions.
+
+### 2. Freeze Eval Splits First
+
+Before training examples are generated, `run_eval_splits()` creates held-out
+splits:
+
+| Split | Target Size | Main Source |
+| --- | ---: | --- |
+| perception | 2,000 | FEN pool |
+| rules | 2,000 | FEN pool |
+| tactics | 2,000 | puzzles |
+| evaluation | 1,500 | depth >= 40 evals |
+| openings | 500 | held-out ECO codes |
+| endgames | 1,500 | Syzygy positions |
+| planning | 2,000 | puzzles plus depth >= 30 evals |
+| chess960 | 500 | Chess960-only positions |
+| mate | 1,000 | MATE rows |
+
+Openings get an extra leakage guard: rows are held out by ECO code, not by
+individual row, so closely related opening positions stay on the same side of
+the train/eval boundary.
+
+The frozen blocklist stores canonical FEN keys:
+
+```text
+piece-placement side-to-move castling-rights en-passant-square
 ```
 
-## Tasks
+That means positions that only differ by halfmove or fullmove counter are
+treated as the same position for decontamination.
 
-| Tier | Task | ID | Volume | Description |
-|------|------|----|--------|-------------|
-| 1 | FEN to Board | 1.1 | 80K | FEN -> ASCII board diagram |
-| 1 | Board to FEN | 1.2 | 80K | ASCII board -> FEN |
-| 1 | Piece Identification | 1.3 | 100K | What piece is on a square / where are pieces |
-| 1 | Piece Counting | 1.4 | 80K | Material count and balance |
-| 1 | State Tracking | 1.5 | 100K | Apply 1-8 moves, report resulting FEN |
-| 2 | Legal Move Gen | 2.1 | 100K | List all legal moves (incl. Chess960) |
-| 2 | Piece-Specific Moves | 2.2 | 80K | Legal moves for a specific piece/square |
-| 2 | Move Legality Check | 2.3 | 80K | Is a given move legal? (50/50 split) |
-| 2 | Check Detection | 2.4 | 60K | Check / checkmate / stalemate / normal |
-| 2 | Special Rules | 2.5 | 50K | Castling, en passant, promotion |
-| 3 | Available Captures | 3.1 | 60K | List all capture moves |
-| 3 | Threats | 3.2 | 50K | Identify threats to opponent pieces |
-| 3 | Attacked/Defended | 3.3 | 60K | Square attack/defense analysis |
-| 3 | Tactical Patterns | 3.4 | 50K | Fork, pin, skewer from Lichess puzzles |
-| 3 | Hanging Pieces | 3.5 | 40K | Undefended pieces under attack |
-| 4 | Material Balance | 4.1 | 50K | Count material difference |
-| 4 | Position Evaluation | 4.2 | 60K | Centipawn -> 5-bucket eval labels |
-| 4 | Pawn Structure | 4.3 | 40K | Doubled, isolated, passed pawns |
-| 5 | Opening ID | 5.1 | 3K | Name the opening from position/moves |
-| 5 | Opening Continuation | 5.2 | 3K | Suggest next moves via Polyglot weights |
-| 5 | Opening Principles | 5.3 | 3K | Plans and character of the position |
-| 6 | Endgame Classification | 6.1 | 30K | Categorize by material (KRK, KPK, etc.) |
-| 6 | Endgame WDL | 6.2 | 40K | Syzygy win/draw/loss evaluation |
-| 6 | Endgame Best Move | 6.3 | 40K | DTZ-optimal move from tablebases |
-| 6 | Endgame Principles | 6.4 | 30K | Opposition, Lucena, Philidor, zugzwang |
-| 7 | Best Move Selection | 7.1 | 80K | `<think>`/`<move>` format, depth >= 30 |
-| 7 | Puzzle Solving | 7.2 | 50K | Lichess puzzles rated 1000-2500 |
-| 7 | Move Consequence | 7.3 | 40K | PV line analysis and consequence prediction |
+### 3. Freeze the Benchmark
 
-## Output Format
+Raw eval splits are converted into a deterministic benchmark under
+`E:/chess_sft_data/benchmark`. Benchmark examples use a fixed schema:
 
-Every example follows this structure:
+```json
+{
+  "example_id": "rules_00042",
+  "split": "rules",
+  "task_type": "legal_moves",
+  "fen": "...",
+  "prompt": "FEN: ...\nList all legal moves.",
+  "gold_answer": "a2a3 a2a4 ...",
+  "metric_type": "jaccard",
+  "metadata": {}
+}
+```
+
+Unlike training data, benchmark prompts are canonical and deterministic. Gold
+answers are derived from source data or from python-chess/Syzygy/engine-backed
+oracles, then self-scored to verify that the expected answer receives a perfect
+primary metric.
+
+### 4. Generate Training Examples
+
+Each task is implemented as a `TaskGenerator`. The base class handles:
+
+- target volume lookup and small-run overrides
+- Chess960 target ratios by tier
+- eval blocklist checks
+- prompt rendering from templates
+- common derived prompt fields like ASCII board, side to move, castling rights,
+  and en passant square
+- wrapping raw labels into the shared chat schema
+
+Every generated example is written only if `validation.validator.validate_example`
+accepts it.
+
+## Output Schema
+
+Training rows are JSONL objects with a three-message chat format:
 
 ```json
 {
@@ -142,66 +214,257 @@ Every example follows this structure:
   "is_chess960": false,
   "messages": [
     {"role": "system", "content": "You are a chess reasoning engine..."},
-    {"role": "user", "content": "What are the legal moves in this position?\nFEN: rnbqkbnr/..."},
+    {"role": "user", "content": "FEN: ...\nList all legal moves."},
     {"role": "assistant", "content": "a7a5 a7a6 b7b5 b7b6 ..."}
   ],
   "metadata": {
-    "source": "lichess_games",
-    "game_phase": "opening",
-    "stockfish_eval_cp": 35,
-    "template_id": 3
+    "source": "lichess_games"
   }
 }
 ```
 
-Tier 7 tasks use `<think>...</think>` and `<move>...</move>` tags in assistant responses.
+Tier 7 move-selection tasks use a stricter answer format:
 
-## Data Sources
+```xml
+<think>short chess reasoning trace</think>
+<move>e2e4</move>
+```
 
-| # | Source | Dataset |
-|---|--------|---------|
-| 1 | Lichess Games | `Lichess/standard-chess-games` |
-| 2 | Lichess Puzzles | `Lichess/chess-puzzles` |
-| 3 | Lichess Openings | `Lichess/chess-openings` |
-| 4 | Lichess Evals | `Lichess/chess-position-evaluations` (845M rows) |
-| 5 | Polyglot Books | Local `.bin` files in `polygloy_opening_books/` |
-| 6 | Syzygy Tablebases | Downloaded via `scripts/download_tablebases.py` |
-| 7 | Stockfish | Local engine binary (17+ with NNUE) |
-| 8 | Chess960 | Generated via `chess.Board.from_chess960_pos()` |
-| 9 | MATE Dataset | `OutFlankShu/MATE_DATASET` |
+That format lets benchmark scoring separately measure answer extraction,
+format compliance, and move legality.
 
-## Key Design Decisions
+## Curriculum Tiers
 
-- **Eval splits first** — 13K held-out examples are generated before any training data. A FEN blocklist prevents contamination.
-- **SQLite dedup** — The 40GB Position Evals dataset is deduplicated via SQLite WAL-mode, keeping the highest-depth row per FEN.
-- **Annotation cache** — SQLite DB maps FEN -> eval. Position Evals pre-populates it; live Stockfish only runs for uncached FENs.
-- **Template-driven variety** — Each task has 5-10 prompt templates randomly selected per example.
-- **Chess960 mix** — Tiers 1-2: 20%, Tier 3: 15%, Tiers 4-7: 5-10% Chess960 positions.
-- **Resumption** — The pipeline skips tasks with existing non-empty output files.
+The tiers are ordered from board literacy to actual chess decision-making.
 
-## Eval Benchmark
+### Tier 1: Perception and State
 
-| Split | Size | Sources |
-|-------|------|---------|
-| Perception | 2,000 | Random FEN + Chess960 |
-| Rules | 2,000 | Random FEN + Chess960 |
-| Tactics | 2,000 | Lichess puzzles by theme |
-| Evaluation | 1,500 | Stockfish-evaluated positions |
-| Openings | 500 | Held-out ECO codes |
-| Endgames | 1,500 | Syzygy-backed positions |
-| Planning | 2,000 | Puzzles + engine-evaluated positions |
-| Chess960 | 500 | Chess960 positions only |
-| MATE | 1,000 | MATE dataset held-out |
-| **Total** | **13,000** | |
+Target volume: about 440K examples.
 
-## Validation
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `1.1_fen_to_board` | 80K | Render FEN as ASCII board |
+| `1.2_board_to_fen` | 80K | Recover FEN from ASCII board |
+| `1.3_piece_identification` | 100K | Identify a square or list pieces |
+| `1.4_piece_counting` | 80K | Count pieces/material |
+| `1.5_state_tracking` | 100K | Apply 1-8 legal moves and return resulting FEN |
 
-Every generated example passes 7 checks:
+This tier teaches the model how to read and update board state.
 
-1. FEN parseable by python-chess
-2. Legal move lists match `board.legal_moves` exactly
-3. All UCI moves in outputs are legal in the position
-4. State tracking results match python-chess replay
-5. No unfilled `{placeholder}` template variables
-6. Tier 7 outputs have valid `<think>`/`<move>` tags
-7. No training FEN appears in the eval blocklist
+### Tier 2: Rules
+
+Target volume: about 370K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `2.1_legal_move_gen` | 100K | Exact legal move set |
+| `2.2_piece_specific_moves` | 80K | Legal moves from one square |
+| `2.3_move_legality_check` | 80K | Yes/no legality for a candidate move |
+| `2.4_check_detection` | 60K | Check, checkmate, stalemate, or normal |
+| `2.5_special_rules` | 50K | Castling, en passant, and promotion availability |
+
+This tier is where python-chess is used most directly as a rules oracle. It
+also carries the heaviest Chess960 mix, because castling and legal move
+generation are where Chess960 errors are most likely.
+
+### Tier 3: Tactics
+
+Target volume: about 260K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `3.1_available_captures` | 60K | All legal captures |
+| `3.2_threats` | 50K | Threatened pieces |
+| `3.3_attacked_defended` | 60K | Attack/defense status of a square |
+| `3.4_tactical_patterns` | 50K | Puzzle-backed tactic and best move |
+| `3.5_hanging_pieces` | 40K | Attacked and undefended pieces |
+
+This tier connects rule knowledge to tactical features.
+
+### Tier 4: Evaluation
+
+Target volume: about 150K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `4.1_material_balance` | 50K | Standard material count/difference |
+| `4.2_position_evaluation` | 60K | Engine cp/mate converted into buckets |
+| `4.3_pawn_structure` | 40K | Passed, isolated, doubled pawn features |
+
+This tier teaches static assessment: material, structure, and broad engine
+evaluation categories such as equal, slight edge, winning, or decisive.
+
+### Tier 5: Openings
+
+Target volume: about 30K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `5.1_opening_identification` | 10K | ECO/name from position or move sequence |
+| `5.2_opening_continuation` | 10K | Top book moves and alternatives |
+| `5.3_opening_principles` | 10K | Opening plans, development, pawn structure |
+
+This tier mixes factual opening labels with book-move continuations and
+short strategic descriptions.
+
+### Tier 6: Endgames
+
+Target volume: about 140K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `6.1_endgame_classification` | 30K | Material signature such as KRK or KPK |
+| `6.2_endgame_wdl` | 40K | Syzygy win/draw/loss |
+| `6.3_endgame_best_move` | 40K | DTZ-optimal move |
+| `6.4_endgame_principles` | 30K | Opposition, rook technique, pawn-race ideas |
+
+This tier is tablebase-backed where possible, so the labels are not just
+heuristic.
+
+### Tier 7: Planning
+
+Target volume: about 170K examples.
+
+| Task | Target | Supervision |
+| --- | ---: | --- |
+| `7.1_best_move_selection` | 80K | Engine best move with reasoning trace |
+| `7.2_puzzle_solving` | 50K | First solution move from Lichess puzzle |
+| `7.3_move_consequence` | 40K | PV/consequence analysis after a candidate move |
+
+This tier is the first explicit bridge from chess knowledge to chess
+reasoning. Best-move and puzzle tasks require the `<think>`/`<move>` format.
+
+## Prompt Templates
+
+Training prompts are randomized through `config/templates.py`. Each task has
+multiple phrasings, and many include richer context than raw FEN:
+
+- ASCII board rendering
+- side to move
+- castling rights
+- en passant square
+- selected square, piece, color, or candidate move
+- opening ECO/name and move sequence
+- puzzle side and themes
+
+This is meant to reduce overfitting to one instruction phrasing while keeping
+the output labels deterministic.
+
+## Chess960 Support
+
+Chess960 is not a separate afterthought. It is mixed into the training data by
+tier:
+
+| Tier | Target Chess960 Ratio |
+| --- | ---: |
+| 1 | 20% |
+| 2 | 20% |
+| 3 | 15% |
+| 4 | 10% |
+| 5 | 5% |
+| 6 | 5% |
+| 7 | 10% |
+
+The code uses `chess.Board(fen, chess960=True)` for Chess960-sensitive
+validation and answer derivation, especially legal moves and castling. The
+pipeline stats report compares actual ratio against target after generation.
+
+## Validation and Quality Gates
+
+Validation happens at write time and can also be run after the fact.
+
+Current checks include:
+
+1. FEN parses under standard chess or Chess960 as appropriate.
+2. Legal move generation exactly matches python-chess legal moves.
+3. Tagged moves in Tier 7 are legal in the position.
+4. Move-legality answers agree with the actual legal move set.
+5. State-tracking result FEN matches replaying the listed moves.
+6. Prompt and answer text contain no unfilled `{placeholder}` fields.
+7. Tier 7 answers follow strict `<think>...</think><move>...</move>` format.
+8. Output files can be audited against the eval blocklist for contamination.
+
+Run validation only:
+
+```bash
+python scripts/run_pipeline.py --validate-only
+```
+
+## Benchmark and Scoring
+
+The benchmark layer is separate from the training JSONL. It creates fixed
+prompts and gold answers for held-out splits. Scoring supports:
+
+- exact match for deterministic text labels
+- Jaccard overlap for legal-move and capture sets
+- evaluation-bucket accuracy for cp/mate labels
+- continuation-rank scoring for book moves
+- move extraction from `<move>...</move>`
+- move-choice accuracy for MATE-style binary comparisons
+- optional Stockfish ACPL for move-prediction tasks
+- format compliance and legal-move secondary metrics
+
+Run benchmark scoring against model predictions:
+
+```bash
+python scripts/run_benchmark.py --predictions predictions.jsonl --benchmark-dir E:/chess_sft_data/benchmark
+```
+
+## Commands
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Small smoke run:
+
+```bash
+python scripts/run_pipeline.py --volume 100 --all
+```
+
+Single tier:
+
+```bash
+python scripts/run_pipeline.py --tier 2
+```
+
+Eval split and benchmark only:
+
+```bash
+python scripts/run_pipeline.py --eval-only
+```
+
+Full generation:
+
+```bash
+python scripts/run_pipeline.py --all
+```
+
+## How This Supports SFT, SDPO, and Self-Distillation
+
+The current data is primarily SFT data. It teaches the model:
+
+- board representation and FEN/state manipulation
+- legal move generation and rule edge cases
+- tactical features and puzzle first moves
+- material/positional/endgame evaluation
+- opening knowledge and book continuations
+- best-move selection with a strict answer format
+
+That is the cold-start foundation for later on-policy work. Once a model can
+read positions and produce legal moves, the same benchmark/eval infrastructure
+can support SDPO-style loops:
+
+1. sample moves or reasoning traces from the current student
+2. verify legality, outcome, engine score, puzzle success, or tablebase result
+3. feed that feedback to a teacher or feedback-conditioned student
+4. distill the corrected trajectory back into the deployment-time prompt format
+
+The pieces already built for that future loop are the most important data
+plumbing pieces: canonical FEN identity, held-out benchmark splits, legality
+oracles, engine/tablebase feedback, prompt templates, and strict move-answer
+extraction. The next missing layer is a richer trajectory/preference schema
+that stores student rollout, environment feedback, teacher correction, and
+chosen/rejected responses side by side.

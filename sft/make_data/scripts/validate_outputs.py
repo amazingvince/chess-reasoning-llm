@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.settings import TIER_OUTPUT_DIR, EVAL_SPLITS_DIR
 from validation.validator import validate_example
 from validation.decontamination import audit_output_files
+from validation.completeness import audit_output_completeness
 from pool.eval_split import load_blocklist
 
 logging.basicConfig(
@@ -33,6 +34,17 @@ def main() -> int:
     parser.add_argument(
         "--output-dir", type=str, default=str(TIER_OUTPUT_DIR),
         help="Directory containing tier output JSONL files",
+    )
+    parser.add_argument(
+        "--expected-volume",
+        type=int,
+        default=None,
+        help="Expected rows per task, for smoke outputs generated with --volume",
+    )
+    parser.add_argument(
+        "--skip-completeness",
+        action="store_true",
+        help="Skip checks for missing or underfilled task files",
     )
     args = parser.parse_args()
 
@@ -89,7 +101,22 @@ def main() -> int:
         else:
             logger.info("%s: %d examples, 0 errors", rel_path, file_count)
 
-    # 2. Decontamination check
+    # 2. Completeness check
+    if not args.skip_completeness:
+        logger.info("Running completeness audit...")
+        completeness = audit_output_completeness(
+            args.output_dir,
+            expected_volume_override=args.expected_volume,
+        )
+        if completeness:
+            logger.error("COMPLETENESS ISSUES FOUND:")
+            for rel_path, issue in completeness.items():
+                logger.error("  %s: %s", rel_path, issue)
+            total_errors += len(completeness)
+        else:
+            logger.info("Completeness check passed: all expected task files present")
+
+    # 3. Decontamination check
     blocklist_path = EVAL_SPLITS_DIR / "blocklist.txt"
     if blocklist_path.exists():
         logger.info("Running decontamination audit...")

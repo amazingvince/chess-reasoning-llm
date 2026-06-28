@@ -8,12 +8,14 @@ import json
 import logging
 from pathlib import Path
 
+from pool.eval_split import canonical_fen_key
+
 logger = logging.getLogger(__name__)
 
 
 def check_no_contamination(fen: str, blocklist: frozenset[str]) -> bool:
     """Return True if *fen* is NOT in the eval blocklist (i.e., safe)."""
-    return fen not in blocklist
+    return fen not in blocklist and canonical_fen_key(fen) not in blocklist
 
 
 def audit_output_files(
@@ -39,7 +41,7 @@ def audit_output_files(
                     malformed += 1
                     continue
                 fen = obj.get("fen", "")
-                if fen and fen in blocklist:
+                if fen and not check_no_contamination(fen, blocklist):
                     contaminated.append(fen)
         if malformed:
             logger.warning(

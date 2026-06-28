@@ -47,6 +47,7 @@ from pool.annotator import BatchAnnotator
 from output.writer import JSONLWriter
 from output.stats import PipelineStats
 from validation.decontamination import audit_output_files
+from validation.completeness import audit_output_completeness
 
 # Generator imports
 from generators.tier1_perception import (
@@ -132,6 +133,8 @@ def load_sources(volume_override: int | None = None) -> dict:
     except Exception as exc:
         logger.warning("Lichess games loading failed: %s", exc)
 
+    logger.info("Lichess games: %d FENs, %d game_positions", len(fen_pool_entries), len(game_positions))
+
     # --- Source 2: Lichess Puzzles ---
     logger.info("Loading Lichess puzzles...")
     from sources.lichess_puzzles import load_puzzles
@@ -169,6 +172,33 @@ def load_sources(volume_override: int | None = None) -> dict:
                 best_move_evals.append(ev)
     except Exception as exc:
         logger.warning("Lichess evals loading failed: %s", exc)
+
+    # Add lichess eval FENs to the pool — these are real game positions
+    # with depth-20+ Stockfish analysis, already validated.
+    for ev in position_evals:
+        fen_pool_entries.append({
+            "fen": ev["fen"], "source": "lichess_evals",
+            "game_phase": "unknown", "is_chess960": False,
+        })
+    logger.info("Added %d lichess eval FENs to pool (total: %d)", len(position_evals), len(fen_pool_entries))
+
+    # Supplement game_positions from evals if games yielded too few
+    if len(game_positions) < 50_000:
+        supplement_count = 0
+        for ev in position_evals:
+            if ev.get("fen") and ev.get("best_move"):
+                game_positions.append({
+                    "fen": ev["fen"],
+                    "move_played_uci": ev["best_move"],
+                    "game_phase": "unknown",
+                    "material_balance": 0,
+                    "ply": 0,
+                })
+                supplement_count += 1
+        logger.info(
+            "Supplemented game_positions with %d eval entries (total: %d)",
+            supplement_count, len(game_positions),
+        )
 
     # --- Source 5: Polyglot books ---
     logger.info("Loading Polyglot opening books...")
@@ -222,8 +252,18 @@ def load_sources(volume_override: int | None = None) -> dict:
     logger.info("Generating Chess960 positions...")
     from sources.chess960 import sample_chess960_positions
 
+    # Size Chess960 dynamically to hit ~15% of total pool
+    if volume_override:
+        n_chess960 = volume_override
+    else:
+        n_standard = len(fen_pool_entries)
+        target_960_ratio = 0.15
+        n_chess960 = int(n_standard * target_960_ratio / (1 - target_960_ratio))
+        n_chess960 = max(5_000, min(n_chess960, 100_000))
+    logger.info("Chess960 target: %d (standard pool: %d)", n_chess960, len(fen_pool_entries))
+
     chess960_positions = sample_chess960_positions(
-        n=volume_override or 50_000, n_random_moves=20, rng=rng
+        n=n_chess960, n_random_moves=20, rng=rng
     )
     for pos in chess960_positions:
         fen_pool_entries.append(pos)
@@ -380,6 +420,53 @@ def _freeze_from_disk() -> None:
         )
 
 
+def _scan_task_output(
+    output_path: Path,
+    task_id: str,
+    stats: PipelineStats | None = None,
+) -> tuple[int, int]:
+    """Return non-empty line count and validation error count for one task file."""
+    from validation.validator import validate_example as _val_ex
+
+    count = 0
+    errors = 0
+    with open(output_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            count += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                errors += 1
+                if stats is not None:
+                    stats.record(task_id, passed_validation=False)
+                continue
+
+            passed, _ = _val_ex(obj)
+            if obj.get("task") != task_id:
+                passed = False
+            if not passed:
+                errors += 1
+            if stats is not None:
+                stats.record(
+                    task_id,
+                    is_chess960=obj.get("is_chess960", False),
+                    passed_validation=passed,
+                )
+
+    return count, errors
+
+
+def _assert_task_complete(task_id: str, count: int, errors: int, target: int) -> None:
+    """Fail generation when the task file is invalid or below target volume."""
+    if errors:
+        raise RuntimeError(f"{task_id} has {errors} validation error(s)")
+    if count < target:
+        raise RuntimeError(f"{task_id} underfilled: wrote {count} / {target}")
+
+
 def run_tier(
     tier: int,
     config: dict,
@@ -404,39 +491,31 @@ def run_tier(
     for gen_cls in generators:
         gen = gen_cls(config=gen_config, blocklist=blocklist, rng=rng)
         task_id = gen.task_id()
+        target = gen.target_volume()
         output_path = tier_dir / f"{task_id}.jsonl"
 
-        # Resumption: skip if output exists and is non-empty.
-        # Count existing examples so final stats reflect the full dataset.
         if output_path.exists() and output_path.stat().st_size > 0:
-            from validation.validator import validate_example as _val_ex
-
-            existing = 0
-            with open(output_path, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    existing += 1
-                    try:
-                        obj = json.loads(line)
-                        passed, _ = _val_ex(obj)
-                        stats.record(
-                            task_id,
-                            is_chess960=obj.get("is_chess960", False),
-                            passed_validation=passed,
-                        )
-                    except json.JSONDecodeError:
-                        stats.record(task_id, passed_validation=False)
+            existing, existing_errors = _scan_task_output(output_path, task_id)
+            if existing_errors == 0 and existing >= target:
+                _scan_task_output(output_path, task_id, stats)
+                logger.info(
+                    "Skipping %s - output exists at %s (%d examples)",
+                    task_id, output_path, existing,
+                )
+                continue
             logger.info(
-                "Skipping %s — output exists at %s (%d examples)",
-                task_id, output_path, existing,
+                "Regenerating %s - existing output incomplete or invalid "
+                "(%d / %d examples, %d error(s))",
+                task_id, existing, target, existing_errors,
             )
-            continue
 
-        logger.info("Generating %s (target: %d)...", task_id, gen.target_volume())
+        logger.info("Generating %s (target: %d)...", task_id, target)
 
-        with JSONLWriter(str(output_path)) as writer:
+        with JSONLWriter(
+            str(output_path),
+            commit_on_close=False,
+            expected_task_id=task_id,
+        ) as writer:
             for example in gen.generate():
                 written = writer.write(example)
                 stats.record(
@@ -444,6 +523,8 @@ def run_tier(
                     is_chess960=example.get("is_chess960", False),
                     passed_validation=written,
                 )
+            _assert_task_complete(task_id, writer.count, writer.error_count, target)
+            writer.commit()
 
         logger.info(
             "  %s: %d written, %d errors",
@@ -511,14 +592,27 @@ def main() -> int:
             total_errors / total_examples * 100 if total_examples else 0,
         )
 
-        # 2. Decontamination audit
+        # 2. Completeness audit
+        completeness = audit_output_completeness(
+            str(TIER_OUTPUT_DIR),
+            expected_volume_override=args.volume,
+        )
+        if completeness:
+            logger.error("Completeness issues found:")
+            for rel_path, issue in completeness.items():
+                logger.error("  %s: %s", rel_path, issue)
+            total_errors += len(completeness)
+        else:
+            logger.info("Completeness check passed.")
+
+        # 3. Decontamination audit
         blocklist = load_blocklist(str(blocklist_path))
         report = audit_output_files(str(TIER_OUTPUT_DIR), blocklist)
         if report:
             logger.error("Contamination found:")
             for f, fens in report.items():
                 logger.error("  %s: %d contaminated FENs", f, len(fens))
-            return 1
+            total_errors += len(report)
         logger.info("No contamination found. All outputs clean.")
 
         return 1 if total_errors > 0 else 0

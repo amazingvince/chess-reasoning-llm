@@ -63,27 +63,47 @@ def check_stockfish() -> tuple[bool, str]:
 
 
 def check_syzygy() -> tuple[bool, str]:
-    """Check that Syzygy tablebase path exists and has .rtbw files."""
+    """Check that Syzygy tablebase path exists and can probe WDL/DTZ."""
     path = Path(SYZYGY_PATH)
     if not path.exists():
         return False, f"Directory not found: {path}"
     rtbw_files = list(path.glob("*.rtbw"))
     if not rtbw_files:
         return False, f"No .rtbw files in {path}"
+    rtbz_files = list(path.glob("*.rtbz"))
+    if not rtbz_files:
+        return False, f"No .rtbz files in {path}"
 
     # Try probing a KRK position
+    tb = None
     try:
+        import chess
         import chess.syzygy
 
         tb = chess.syzygy.open_tablebase(str(path))
         board = chess.Board("8/8/8/4k3/8/8/8/4K2R w - - 0 1")
         wdl = tb.probe_wdl(board)
-        tb.close()
+        dtz = tb.probe_dtz(board)
         if wdl == 2:
-            return True, f"Syzygy OK ({len(rtbw_files)} .rtbw files, KRK probe=Win)"
+            return (
+                True,
+                "Syzygy OK "
+                f"({len(rtbw_files)} .rtbw, {len(rtbz_files)} .rtbz, "
+                f"KRK probe=Win, DTZ={dtz})",
+            )
         return False, f"KRK probe returned WDL={wdl}, expected 2"
     except Exception as exc:
-        return True, f"Syzygy files present ({len(rtbw_files)} .rtbw) but probe failed: {exc}"
+        return False, (
+            "Syzygy files present "
+            f"({len(rtbw_files)} .rtbw, {len(rtbz_files)} .rtbz) "
+            f"but probe failed: {exc}"
+        )
+    finally:
+        if tb is not None:
+            try:
+                tb.close()
+            except Exception:
+                pass
 
 
 def check_hf_datasets() -> tuple[bool, str]:

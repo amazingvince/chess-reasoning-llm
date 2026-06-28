@@ -18,43 +18,55 @@ import re
 import chess
 
 
-def validate_fen(fen: str) -> bool:
+def validate_fen(fen: str, chess960: bool = False) -> bool:
     """Return True if *fen* is parseable by python-chess."""
     try:
-        chess.Board(fen)
+        chess.Board(fen, chess960=chess960)
         return True
     except (ValueError, TypeError):
         return False
 
 
-def validate_legal_moves(fen: str, moves: list[str]) -> bool:
+def validate_legal_moves(
+    fen: str, moves: list[str], chess960: bool = False,
+) -> bool:
     """Return True if *moves* exactly matches the legal move set."""
     try:
-        board = chess.Board(fen)
+        board = chess.Board(fen, chess960=chess960)
     except (ValueError, TypeError):
         return False
     expected = {m.uci() for m in board.legal_moves}
     return set(moves) == expected
 
 
-def validate_move_legal(fen: str, uci_move: str) -> bool:
-    """Return True if *uci_move* is legal in *fen*."""
+def validate_move_legal(
+    fen: str, uci_move: str, chess960: bool = False,
+) -> bool:
+    """Return True if *uci_move* is legal in *fen*.
+
+    Uses string comparison against the legal move set so that the
+    check is consistent with generator-side string-based filtering
+    (avoids python-chess quirks where ``Move.from_uci`` object
+    matching recognises castling notation that isn't in the UCI set).
+    """
     try:
-        board = chess.Board(fen)
-        move = chess.Move.from_uci(uci_move)
-        return move in board.legal_moves
+        board = chess.Board(fen, chess960=chess960)
+        return uci_move in {m.uci() for m in board.legal_moves}
     except (ValueError, TypeError):
         return False
 
 
 def validate_state_tracking(
-    start_fen: str, moves: list[str], result_fen: str
+    start_fen: str,
+    moves: list[str],
+    result_fen: str,
+    chess960: bool = False,
 ) -> bool:
     """Apply *moves* to *start_fen* and compare to *result_fen*."""
     try:
-        board = chess.Board(start_fen)
+        board = chess.Board(start_fen, chess960=chess960)
         for uci in moves:
-            board.push(chess.Move.from_uci(uci))
+            board.push(board.parse_uci(uci))
         return board.fen() == result_fen
     except (ValueError, TypeError, AssertionError):
         return False
@@ -95,9 +107,10 @@ def validate_example(example: dict) -> tuple[bool, list[str]]:
     """
     errors: list[str] = []
     fen = example.get("fen", "")
+    is_960 = example.get("is_chess960", False)
 
     # 1. FEN validity
-    if not validate_fen(fen):
+    if not validate_fen(fen, chess960=is_960):
         errors.append(f"Invalid FEN: {fen!r}")
 
     messages = example.get("messages", [])
@@ -121,8 +134,8 @@ def validate_example(example: dict) -> tuple[bool, list[str]]:
                     errors.append("Missing or invalid <think>/<move> tags")
                 # Also validate the UCI move is legal
                 uci = _extract_uci_from_move_tag(msg["content"])
-                if uci and validate_fen(fen):
-                    if not validate_move_legal(fen, uci):
+                if uci and validate_fen(fen, chess960=is_960):
+                    if not validate_move_legal(fen, uci, chess960=is_960):
                         errors.append(
                             f"UCI move {uci!r} in <move> tag is not legal in FEN"
                         )
@@ -130,20 +143,20 @@ def validate_example(example: dict) -> tuple[bool, list[str]]:
     # --- Task-aware semantic validation ---
 
     # 2.1 Legal move generation: parse assistant as move list, validate
-    if task == "2.1_legal_move_gen" and validate_fen(fen):
+    if task == "2.1_legal_move_gen" and validate_fen(fen, chess960=is_960):
         for msg in messages:
             if msg["role"] == "assistant" and msg["content"]:
                 move_list = msg["content"].strip().split()
-                if not validate_legal_moves(fen, move_list):
+                if not validate_legal_moves(fen, move_list, chess960=is_960):
                     errors.append(
                         "Legal move list does not match actual legal moves"
                     )
 
     # 2.3 Move legality check: extract the tested move, verify answer
-    if task == "2.3_move_legality_check" and validate_fen(fen):
+    if task == "2.3_move_legality_check" and validate_fen(fen, chess960=is_960):
         tested_move = metadata.get("tested_move", "")
         if tested_move:
-            is_legal = validate_move_legal(fen, tested_move)
+            is_legal = validate_move_legal(fen, tested_move, chess960=is_960)
             for msg in messages:
                 if msg["role"] == "assistant":
                     says_legal = "yes" in msg["content"].lower()
@@ -155,12 +168,12 @@ def validate_example(example: dict) -> tuple[bool, list[str]]:
                         )
 
     # 1.5 State tracking: verify the result FEN matches applying moves
-    if task == "1.5_state_tracking" and validate_fen(fen):
+    if task == "1.5_state_tracking" and validate_fen(fen, chess960=is_960):
         result_fen = metadata.get("result_fen", "")
         moves_str = metadata.get("moves", "")
         if result_fen and moves_str:
             move_list = moves_str.split()
-            if not validate_state_tracking(fen, move_list, result_fen):
+            if not validate_state_tracking(fen, move_list, result_fen, chess960=is_960):
                 errors.append(
                     "State tracking: applying moves does not produce result FEN"
                 )

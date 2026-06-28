@@ -314,7 +314,8 @@ class StateTracking(TaskGenerator):
             if self.is_blocked(fen):
                 continue
 
-            board = chess.Board(fen)
+            is_960 = pos.get("is_chess960", False)
+            board = chess.Board(fen, chess960=is_960)
             n_moves = self.rng.randint(1, 8)
 
             # Play random legal moves
@@ -337,7 +338,7 @@ class StateTracking(TaskGenerator):
                 "fen": fen,
                 "moves": moves_str,
                 "n_moves": str(len(moves_played)),
-                "is_chess960": pos.get("is_chess960", False),
+                "is_chess960": is_960,
                 "metadata": {"result_fen": result_fen, "moves": moves_str},
             }
             tpl = select_template(self.task_id(), self.rng)

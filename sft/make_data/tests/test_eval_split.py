@@ -58,6 +58,17 @@ def test_build_blocklist_excludes_empty():
     assert "" not in blocklist
 
 
+def test_blocklist_uses_position_key_not_move_counters():
+    """Same board state with different clocks must still be blocked."""
+    fen_eval = "8/8/8/8/8/8/4K3/4k3 w - - 0 1"
+    fen_train_same_position = "8/8/8/8/8/8/4K3/4k3 w - - 17 42"
+    splits = {"perception": [{"fen": fen_eval}]}
+
+    blocklist = eval_split.build_blocklist(splits)
+
+    assert eval_split.canonical_fen_key(fen_train_same_position) in blocklist
+
+
 def test_save_load_blocklist(tmp_path):
     splits = {"test_split": [{"fen": "fen_a"}, {"fen": "fen_b"}]}
     eval_split.save_eval_splits(splits, str(tmp_path / "splits"))

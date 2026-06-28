@@ -6,10 +6,19 @@ from conftest import KRK_FEN, STARTING_FEN
 from sources.lichess_evals import (
     _flush_batch,
     _init_dedup_db,
+    _normalize_pv_line,
     partition_evals,
 )
 
 # ── partition_evals ──────────────────────────────────────────────────
+
+
+def test_normalize_pv_line_converts_castling_king_to_rook_notation():
+    fen = "r3k2r/8/8/8/8/8/5P2/R3K2R w KQkq - 0 1"
+
+    normalized = _normalize_pv_line(fen, "e1h1 e8h8")
+
+    assert normalized == "e1g1 e8g8"
 
 
 def test_partition_mate():

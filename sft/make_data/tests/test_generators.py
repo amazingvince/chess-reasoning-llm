@@ -182,6 +182,41 @@ def test_state_tracking_valid_metadata(monkeypatch):
     assert ex["messages"][2]["content"] == metadata["result_fen"]
 
 
+def test_state_tracking_uses_chess960_legal_moves(monkeypatch):
+    """Chess960 state tracking must be able to sample Chess960 castling."""
+    from generators.tier1_perception import StateTracking
+    from validation.validator import validate_example
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "Starting FEN: {fen}\nAfter the moves {moves}, what is the resulting position?"
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    class PreferChess960Castle:
+        def randint(self, _low, _high):
+            return 1
+
+        def choice(self, values):
+            for value in values:
+                if value.uci() == "d1c1":
+                    return value
+            return values[0]
+
+    gen = StateTracking(
+        config={
+            "game_positions": [{"fen": chess960_fen, "is_chess960": True}],
+            "volume_override": 1,
+        },
+        rng=PreferChess960Castle(),
+    )
+    ex = list(gen.generate())[0]
+
+    assert ex["metadata"]["moves"] == "d1c1"
+    passed, errors = validate_example(ex)
+    assert passed is True, errors
+
+
 # ── Tier 2: LegalMoveGen ─────────────────────────────────────────────
 
 
@@ -295,6 +330,26 @@ def test_special_rules_en_passant(monkeypatch):
     examples = list(gen.generate())
     assert len(examples) == 1
     assert "en passant" in examples[0]["messages"][2]["content"].lower()
+
+
+def test_special_rules_en_passant_prompt_without_ep_answers_no(monkeypatch):
+    """An en-passant question should not be answered with unrelated castling info."""
+    from generators.tier2_rules import SpecialRules
+
+    tpl = "FEN: {fen}\nIs en passant possible in this position?"
+    monkeypatch.setattr(
+        "generators.tier2_rules.select_template", lambda tid, rng: tpl
+    )
+
+    gen = SpecialRules(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    assert len(examples) == 1
+    answer = examples[0]["messages"][2]["content"].lower()
+    assert "no en passant" in answer
+    assert "castling available" not in answer
 
 
 def test_special_rules_no_special(monkeypatch):
@@ -712,6 +767,146 @@ def test_opening_identification(monkeypatch):
     answer = examples[0]["messages"][2]["content"]
     assert "Italian Game" in answer
     assert "C50" in answer
+
+
+def test_opening_identification_multi_variant(monkeypatch):
+    """volume_override=5, 1 opening with full data -> 5 distinct variants."""
+    from generators.tier5_openings import OpeningIdentification
+
+    tpl = "FEN: {fen}\nWhat opening is this?"
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    openings = [{
+        "fen": STARTING_FEN,
+        "name": "Italian Game",
+        "eco": "C50",
+        "eco_volume": "C",
+        "uci_moves": ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4"],
+    }]
+
+    gen = OpeningIdentification(
+        config={"openings": openings, "volume_override": 5},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    assert len(examples) == 5
+
+    variants = [ex["metadata"]["variant"] for ex in examples]
+    assert len(set(variants)) == 5, f"Expected 5 distinct variants, got {set(variants)}"
+
+
+def test_opening_continuation_multi_variant(monkeypatch):
+    """volume_override=4, 1 opening with 3+ book moves -> 4 variants."""
+    from generators.tier5_openings import OpeningContinuation
+
+    tpl = "FEN: {fen}\nWhat are the main continuation moves?"
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    openings = [{"fen": STARTING_FEN, "name": "Starting Position", "uci_moves": []}]
+    book_moves = {STARTING_FEN: [("e2e4", 100), ("d2d4", 80), ("g1f3", 30)]}
+
+    gen = OpeningContinuation(
+        config={
+            "openings": openings,
+            "book_moves": book_moves,
+            "volume_override": 4,
+        },
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    assert len(examples) == 4
+
+    variants = [ex["metadata"]["variant"] for ex in examples]
+    assert len(set(variants)) == 4
+
+
+def test_opening_continuation_alternatives_skipped(monkeypatch):
+    """1 opening with exactly 1 book move -> 'alternatives' variant skipped."""
+    from generators.tier5_openings import OpeningContinuation
+
+    tpl = "FEN: {fen}\nWhat are the main continuation moves?"
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    openings = [{"fen": STARTING_FEN, "name": "Odd Opening", "uci_moves": []}]
+    book_moves = {STARTING_FEN: [("e2e4", 100)]}
+
+    gen = OpeningContinuation(
+        config={
+            "openings": openings,
+            "book_moves": book_moves,
+            "volume_override": 4,
+        },
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    # top_n, best_single, with_context -> 3; alternatives skipped (only 1 move)
+    assert len(examples) == 3
+
+    variants = {ex["metadata"]["variant"] for ex in examples}
+    assert "alternatives" not in variants
+
+
+def test_opening_principles_multi_variant(monkeypatch):
+    """volume_override=5, 1 opening -> 5 distinct variants."""
+    from generators.tier5_openings import OpeningPrinciples
+
+    tpl = "FEN: {fen}\nWhat are the key ideas?"
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    openings = [{
+        "fen": STARTING_FEN,
+        "name": "Starting Position",
+        "eco": "A00",
+        "eco_volume": "A",
+    }]
+
+    gen = OpeningPrinciples(
+        config={"openings": openings, "volume_override": 5},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    assert len(examples) == 5
+
+    variants = [ex["metadata"]["variant"] for ex in examples]
+    assert len(set(variants)) == 5
+
+
+def test_opening_principles_pawn_structure(monkeypatch):
+    """Opening with known doubled pawns -> pawn_structure answer mentions 'doubled'."""
+    from generators.tier5_openings import OpeningPrinciples
+
+    tpl = "FEN: {fen}\nWhat are the key ideas?"
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    # Position with doubled white e-pawns
+    doubled_fen = "rnbqkbnr/pppp1ppp/8/8/4P3/4P3/PPPP2PP/RNBQKBNR b KQkq - 0 2"
+    openings = [{
+        "fen": doubled_fen,
+        "name": "Weird Line",
+        "eco": "C00",
+        "eco_volume": "C",
+    }]
+
+    gen = OpeningPrinciples(
+        config={"openings": openings, "volume_override": 5},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    pawn_examples = [
+        ex for ex in examples if ex["metadata"]["variant"] == "pawn_structure"
+    ]
+    assert len(pawn_examples) == 1
+    assert "doubled" in pawn_examples[0]["messages"][2]["content"].lower()
 
 
 # ── Tier 7: MATE dataset path ────────────────────────────────────────

@@ -11,6 +11,7 @@ import chess
 from config.settings import VOLUMES, CHESS960_RATIOS
 from config.system_prompt import SYSTEM_PROMPT
 from config.templates import select_template
+from pool.eval_split import canonical_fen_key
 
 
 def _board_to_ascii(board: chess.Board) -> str:
@@ -78,7 +79,7 @@ class TaskGenerator(ABC):
 
     def is_blocked(self, fen: str) -> bool:
         """Return True if *fen* is in the eval blocklist."""
-        return fen in self.blocklist
+        return fen in self.blocklist or canonical_fen_key(fen) in self.blocklist
 
     def build_template_context(self, raw: dict) -> dict:
         """Augment *raw* with derived prompt fields like board/state text."""
@@ -88,7 +89,7 @@ class TaskGenerator(ABC):
             return context
 
         try:
-            board = chess.Board(fen)
+            board = chess.Board(fen, chess960=context.get("is_chess960", False))
         except (ValueError, TypeError):
             return context
 

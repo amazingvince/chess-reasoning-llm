@@ -103,6 +103,33 @@ def test_gold_legal_moves():
     assert gold == answer_legal_moves(STARTING_FEN)
 
 
+def test_chess960_legal_moves_use_chess960_rules():
+    from random import Random
+    from validation.benchmark import derive_gold_answer
+
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    raw = {"fen": fen, "is_chess960": True}
+
+    gold = derive_gold_answer("legal_moves_960", raw, Random(42))
+    expected = " ".join(
+        sorted(m.uci() for m in chess.Board(fen, chess960=True).legal_moves)
+    )
+
+    assert gold == expected
+
+
+def test_chess960_castling_rules_use_chess960_rights():
+    from random import Random
+    from validation.benchmark import derive_gold_answer
+
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    raw = {"fen": fen, "is_chess960": True}
+
+    gold = derive_gold_answer("castling_rules_960", raw, Random(42))
+
+    assert gold == "Castling available: kingside, queenside."
+
+
 def test_gold_check_detection_matches_training_format():
     """check_detection gold matches CheckDetection generator format."""
     from random import Random
@@ -727,6 +754,19 @@ def test_move_extraction_bare_uci():
     assert move_extraction_match("d2d4", "e2e4") == 0.0
 
 
+def test_move_extraction_sentence_with_uci():
+    """Move extraction accepts a normal sentence containing a UCI move."""
+    from validation.benchmark import move_extraction_match
+    assert move_extraction_match("The best move is e2e4.", "e2e4") == 1.0
+
+
+def test_move_extraction_sentence_with_think_block():
+    """Move extraction ignores <think> wrappers before extracting the move."""
+    from validation.benchmark import move_extraction_match
+    pred = "<think>Calculate first.</think>\n\nThe best move is e2e4."
+    assert move_extraction_match(pred, "e2e4") == 1.0
+
+
 def test_score_prediction_best_move_with_tags():
     """score_prediction for best_move accepts <think>/<move> format."""
     from validation.benchmark import BenchmarkExample, score_prediction
@@ -752,6 +792,19 @@ def test_score_prediction_puzzle_solve_with_tags():
         metric_type="move_extraction", metadata={},
     )
     scores = score_prediction(ex, "<think>Nf3 blocks.</think><move>e2e4</move>")
+    assert scores["primary"] == 1.0
+
+
+def test_score_prediction_exact_match_ignores_think_block():
+    """Exact-match tasks should ignore leaked thinking wrappers."""
+    from validation.benchmark import BenchmarkExample, score_prediction
+
+    ex = BenchmarkExample(
+        example_id="rules_00000", split="rules", task_type="check_detection",
+        fen=STARTING_FEN, prompt="...", gold_answer="Check.",
+        metric_type="exact_match", metadata={},
+    )
+    scores = score_prediction(ex, "<think>reason</think>\nCheck.")
     assert scores["primary"] == 1.0
 
 
@@ -931,6 +984,12 @@ def test_pass_at_k_mixed_formats():
         "e2e4",
     ]
     assert pass_at_k(preds, "e2e4") == 1.0
+
+
+def test_pass_at_k_sentence_with_uci():
+    """pass_at_k finds the move inside a natural-language sentence."""
+    from validation.benchmark import pass_at_k
+    assert pass_at_k(["The winning move is e2e4."], "e2e4") == 1.0
 
 
 # ── legal_move_rate denominator ──────────────────────────────────────
