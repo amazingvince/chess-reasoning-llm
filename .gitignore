@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local environment files
+.env
+
 # Extracted polyglot books (regenerable via scripts/extract_polyglot_books.py)
 sft/make_data/polyglot_opening_books/*.bin
 
