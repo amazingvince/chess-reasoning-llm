@@ -1,0 +1,14 @@
+torch>=2.8.0,<2.13.0
+transformers>=5.3.0,<5.13.0
+trl>=1.7.0,<2.0.0
+datasets>=3.0.0
+accelerate>=1.0.0
+liger-kernel>=0.5.0; platform_system == "Linux"
+wandb>=0.19.0
+python-chess>=1.10.0
+tqdm>=4.66.0
+# Optional for benchmark eval on supported Linux/WSL GPU setups:
+# vllm
+# Optional to enable attn_implementation="flash_attention_2" in Linux builds.
+# Install a wheel/source build that matches Torch, CUDA, Python, CXX11 ABI, and glibc.
+# flash-attn
