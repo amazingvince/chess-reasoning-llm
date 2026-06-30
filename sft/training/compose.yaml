@@ -9,12 +9,12 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime}
         INSTALL_VLLM: ${INSTALL_VLLM:-0}
         INSTALL_QWEN_FAST_PATH: ${INSTALL_QWEN_FAST_PATH:-1}
-        FLASH_LINEAR_ATTENTION_VERSION: ${FLASH_LINEAR_ATTENTION_VERSION:-0.4.2}
+        FLASH_LINEAR_ATTENTION_VERSION: ${FLASH_LINEAR_ATTENTION_VERSION:-0.5.1}
+        CAUSAL_CONV1D_VERSION: ${CAUSAL_CONV1D_VERSION:-1.6.2.post1}
         INSTALL_FLASH_ATTN: ${INSTALL_FLASH_ATTN:-1}
         FLASH_ATTN_WHEEL_URL: ${FLASH_ATTN_WHEEL_URL:-https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl}
-        CAUSAL_CONV1D_WHEEL_URL: ${CAUSAL_CONV1D_WHEEL_URL:-https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl}
     image: chess-sft-training:latest
-    working_dir: /workspace/sft/training
+    working_dir: /workspace
     command: bash
     stdin_open: true
     tty: true
@@ -22,21 +22,67 @@ services:
     environment:
       CHESS_SFT_OUTPUT: /data/chess_sft_data
       CHESS_SFT_CHECKPOINTS: /data/chess_sft_checkpoints
-      CHESS_SFT_BASE_MODEL: ${CHESS_SFT_BASE_MODEL:-Qwen/Qwen3-0.6B}
+      CHESS_SFT_BASE_MODEL: ${CHESS_SFT_BASE_MODEL:-Qwen/Qwen3.5-0.8B}
       HF_HOME: /cache/huggingface
       STOCKFISH_PATH: /usr/games/stockfish
       WANDB_DIR: /data/wandb
-      CUDA_VISIBLE_DEVICES: ${CUDA_DEVICE_ID:-1}
+      CUDA_VISIBLE_DEVICES: ${CUDA_DEVICE_ID:-0}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_TOKEN: ${HF_TOKEN:-}
       WANDB_API_KEY: ${WANDB_API_KEY:-}
+      WANDB_MODE: ${WANDB_MODE:-}
+      WANDB_ENTITY: ${WANDB_ENTITY:-}
+      WANDB_BASE_URL: ${WANDB_BASE_URL:-}
     volumes:
       - ../..:/workspace
-      - ${CHESS_SFT_OUTPUT_HOST:-E:/chess_sft_data}:/data/chess_sft_data
-      - ${CHESS_SFT_CHECKPOINTS_HOST:-E:/chess_sft_checkpoints}:/data/chess_sft_checkpoints
-      - ${HF_CACHE_HOST:-E:/hf_cache}:/cache/huggingface
-      - ${WANDB_HOST_DIR:-E:/wandb}:/data/wandb
+      - ${CHESS_SFT_OUTPUT_HOST:-../../.runtime/chess_sft_data}:/data/chess_sft_data
+      - ${CHESS_SFT_CHECKPOINTS_HOST:-../../.runtime/chess_sft_checkpoints}:/data/chess_sft_checkpoints
+      - ${HF_CACHE_HOST:-../../.runtime/hf_cache}:/cache/huggingface
+      - ${WANDB_HOST_DIR:-../../.runtime/wandb}:/data/wandb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+
+  evaluator:
+    build:
+      context: ../..
+      dockerfile: sft/training/Dockerfile.eval
+      args:
+        EVAL_BASE_IMAGE: ${EVAL_BASE_IMAGE:-vllm/vllm-openai:latest}
+    image: chess-sft-eval-vllm:latest
+    working_dir: /workspace
+    command: bash
+    stdin_open: true
+    tty: true
+    shm_size: "16gb"
+    environment:
+      CHESS_SFT_OUTPUT: /data/chess_sft_data
+      CHESS_SFT_CHECKPOINTS: /data/chess_sft_checkpoints
+      CHESS_SFT_BASE_MODEL: ${CHESS_SFT_BASE_MODEL:-Qwen/Qwen3.5-0.8B}
+      HF_HOME: /cache/huggingface
+      STOCKFISH_PATH: /usr/games/stockfish
+      WANDB_DIR: /data/wandb
+      CUDA_VISIBLE_DEVICES: ${EVAL_CUDA_DEVICE_ID:-0}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_TOKEN: ${HF_TOKEN:-}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      WANDB_MODE: ${WANDB_MODE:-}
+      WANDB_ENTITY: ${WANDB_ENTITY:-}
+      WANDB_BASE_URL: ${WANDB_BASE_URL:-}
+    volumes:
+      - ../..:/workspace
+      - ${CHESS_SFT_OUTPUT_HOST:-../../.runtime/chess_sft_data}:/data/chess_sft_data
+      - ${CHESS_SFT_CHECKPOINTS_HOST:-../../.runtime/chess_sft_checkpoints}:/data/chess_sft_checkpoints
+      - ${HF_CACHE_HOST:-../../.runtime/hf_cache}:/cache/huggingface
+      - ${WANDB_HOST_DIR:-../../.runtime/wandb}:/data/wandb
     deploy:
       resources:
         reservations:

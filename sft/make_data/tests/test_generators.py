@@ -19,9 +19,120 @@ from conftest import (
 
 # Position after 1.e4 d5 — white e4 pawn attacked by black d5 pawn
 AFTER_E4_D5 = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+AFTER_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+NO_CASTLING_FEN = "8/8/8/8/8/8/4K3/4k3 w - - 0 1"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"fen": STARTING_FEN},
+        {"fen": "not a fen", "board": "custom"},
+        {"fen": STARTING_FEN, "board": "custom"},
+        {
+            "fen": "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1",
+            "is_chess960": True,
+        },
+        {"fen": NO_CASTLING_FEN},
+        {"fen": AFTER_E4},
+    ],
+)
+def test_task_generator_template_context_matches_package_context(raw):
+    from chess_llm.sft import build_template_context
+    from generators.tier2_rules import LegalMoveGen
+
+    gen = LegalMoveGen(config={}, rng=Random(42))
+
+    assert gen.build_template_context(raw) == build_template_context(raw)
+
+
+def test_fen_to_board_uses_package_ascii_renderer(monkeypatch):
+    from chess_llm.formats import render_ascii_board
+    from generators.tier1_perception import FENToBoard
+
+    tpl = "FEN: {fen}\nShow me the board."
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    gen = FENToBoard(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+    ex = list(gen.generate())[0]
+    expected = render_ascii_board(chess.Board(STARTING_FEN))
+
+    assert ex["messages"][1]["content"] == f"FEN: {STARTING_FEN}\nShow me the board."
+    assert ex["messages"][2]["content"] == expected
 
 
 # ── Tier 1: PieceCounting ────────────────────────────────────────────
+
+
+def test_fen_to_board_accepts_chess960_fen(monkeypatch):
+    from chess_llm.formats import render_ascii_board
+    from generators.tier1_perception import FENToBoard
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "FEN: {fen}\nShow me the board."
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    gen = FENToBoard(
+        config={
+            "fen_pool": [{"fen": chess960_fen, "is_chess960": True}],
+            "volume_override": 1,
+        },
+        rng=Random(42),
+    )
+    ex = list(gen.generate())[0]
+    expected = render_ascii_board(chess.Board(chess960_fen, chess960=True))
+
+    assert ex["is_chess960"] is True
+    assert ex["messages"][2]["content"] == expected
+
+
+def test_board_to_fen_prompt_includes_state_needed_for_full_fen(monkeypatch):
+    from generators.tier1_perception import BoardToFEN
+
+    tpl = "Board:\n{board}\nProduce the FEN string."
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    gen = BoardToFEN(
+        config={"fen_pool": [{"fen": AFTER_E4}], "volume_override": 1},
+        rng=Random(42),
+    )
+    ex = list(gen.generate())[0]
+    user_prompt = ex["messages"][1]["content"]
+
+    assert "Side to move: black" in user_prompt
+    assert "Castling rights: KQkq" in user_prompt
+    assert "En passant: e3" in user_prompt
+    assert "Halfmove clock: 0" in user_prompt
+    assert "Fullmove number: 1" in user_prompt
+    assert ex["messages"][2]["content"] == AFTER_E4
+    assert "{" not in user_prompt
+
+
+def test_generator_blocklist_accepts_chess960_rows():
+    from chess_llm.core.board import canonical_fen_key
+    from generators.tier1_perception import FENToBoard
+
+    chess960_row = {
+        "fen": "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1",
+        "is_chess960": True,
+        "chess960_id": 3,
+    }
+    blocklist = frozenset(
+        [canonical_fen_key(chess960_row["fen"], chess960=True)]
+    )
+
+    gen = FENToBoard(config={}, blocklist=blocklist, rng=Random(42))
+
+    assert gen.is_blocked(chess960_row) is True
 
 
 def test_piece_identification_square_board_template(monkeypatch):
@@ -179,7 +290,41 @@ def test_state_tracking_valid_metadata(monkeypatch):
     metadata = ex["metadata"]
     assert "result_fen" in metadata
     assert "moves" in metadata
-    assert ex["messages"][2]["content"] == metadata["result_fen"]
+    answer = ex["messages"][2]["content"]
+    assert "Lookup:" in answer
+    assert "Squares:" in answer
+    assert "Ranks:" in answer
+    assert "Result placement:" not in answer
+    assert answer.splitlines()[-1] == f"Result FEN: {metadata['result_fen']}"
+
+
+def test_fen_assembly_legacy_import_valid_metadata(monkeypatch):
+    from generators.tier1_perception import FENAssembly
+    from validation.validator import validate_example
+
+    tpl = "Starting FEN: {fen}\nMove: {move}\nAssemble the resulting full FEN."
+    monkeypatch.setattr(
+        "generators.tier1_perception.select_template", lambda tid, rng: tpl
+    )
+
+    gen = FENAssembly(
+        config={"game_positions": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+    assert len(examples) == 1
+
+    ex = examples[0]
+    answer = ex["messages"][2]["content"]
+    metadata = ex["metadata"]
+    assert ex["task"] == "1.9_fen_assembly"
+    assert metadata["expected_answer"] == answer
+    assert "\nLookup: " in answer
+    assert "\nSquares: " in answer
+    assert "\nRanks: " in answer
+    assert answer.splitlines()[-1] == f"Result FEN: {metadata['result_fen']}"
+    passed, errors = validate_example(ex)
+    assert passed is True, errors
 
 
 def test_state_tracking_uses_chess960_legal_moves(monkeypatch):
@@ -273,6 +418,32 @@ def test_legal_move_gen_board_state_template(monkeypatch):
 # ── Tier 2: SpecialRules ─────────────────────────────────────────────
 
 
+def test_legal_move_gen_accepts_metadata_only_chess960_marker(monkeypatch):
+    from generators.tier2_rules import LegalMoveGen
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "FEN: {fen}\nList all legal moves."
+    monkeypatch.setattr(
+        "generators.tier2_rules.select_template", lambda tid, rng: tpl
+    )
+
+    gen = LegalMoveGen(
+        config={
+            "fen_pool": [
+                {"fen": chess960_fen, "metadata": {"chess960_id": 3}},
+            ],
+            "volume_override": 1,
+        },
+        rng=Random(42),
+    )
+
+    examples = list(gen.generate())
+
+    assert len(examples) == 1
+    assert examples[0]["is_chess960"] is True
+    assert "d1c1" in examples[0]["messages"][2]["content"]
+
+
 def test_special_rules_promotion(monkeypatch):
     """Promotion FEN + 'promotion options' -> lists Q/R/B/N."""
     from generators.tier2_rules import SpecialRules
@@ -296,8 +467,25 @@ def test_special_rules_promotion(monkeypatch):
     assert "knight" in answer
 
 
-def test_special_rules_castling(monkeypatch):
-    """Starting FEN -> answer mentions castling."""
+def test_special_rules_skips_promotion_template_without_promotion(monkeypatch):
+    """Promotion-specific prompts must not render an empty pawn square."""
+    from generators.tier2_rules import SpecialRules
+
+    tpl = "FEN: {fen}\nWhat promotion options are available for the pawn on {square}?"
+    monkeypatch.setattr(
+        "generators.tier2_rules.select_template", lambda tid, rng: tpl
+    )
+
+    gen = SpecialRules(
+        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        rng=Random(42),
+    )
+
+    assert list(gen.generate()) == []
+
+
+def test_special_rules_castling_requires_legal_castle(monkeypatch):
+    """Starting FEN has rights but blocked pieces, so castling is unavailable."""
     from generators.tier2_rules import SpecialRules
 
     tpl = "FEN: {fen}\nCan the side to move castle? If so, which side(s)?"
@@ -311,7 +499,31 @@ def test_special_rules_castling(monkeypatch):
     )
     examples = list(gen.generate())
     assert len(examples) == 1
-    assert "castling" in examples[0]["messages"][2]["content"].lower()
+    assert examples[0]["messages"][2]["content"] == (
+        "No castling is available for the side to move."
+    )
+
+
+def test_special_rules_castling_available_when_legal(monkeypatch):
+    """Open castling lanes with rights should report legal castling sides."""
+    from generators.tier2_rules import SpecialRules
+
+    tpl = "FEN: {fen}\nCan the side to move castle? If so, which side(s)?"
+    monkeypatch.setattr(
+        "generators.tier2_rules.select_template", lambda tid, rng: tpl
+    )
+
+    fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"
+    gen = SpecialRules(
+        config={"fen_pool": [{"fen": fen}], "volume_override": 1},
+        rng=Random(42),
+    )
+    examples = list(gen.generate())
+
+    assert len(examples) == 1
+    assert examples[0]["messages"][2]["content"] == (
+        "Castling available: kingside, queenside."
+    )
 
 
 def test_special_rules_en_passant(monkeypatch):
@@ -533,10 +745,12 @@ def test_move_consequence_format(monkeypatch):
         config={"consequence_evals": evals, "volume_override": 1},
         rng=Random(42),
     )
-    answer = list(gen.generate())[0]["messages"][2]["content"]
+    example = list(gen.generate())[0]
+    answer = example["messages"][2]["content"]
     assert re.match(
         r"^<think>.*</think>\s*<move>.*</move>\s*$", answer, re.DOTALL
     )
+    assert example["metadata"]["target_move"] == "e2e4"
 
 
 def test_move_consequence_no_trailing_content(monkeypatch):
@@ -645,11 +859,44 @@ def test_best_move_selection_tier7_format(monkeypatch):
         config={"best_move_evals": evals, "volume_override": 1},
         rng=Random(42),
     )
-    answer = list(gen.generate())[0]["messages"][2]["content"]
+    example = list(gen.generate())[0]
+    answer = example["messages"][2]["content"]
     assert validate_think_move_format(answer)
+    assert example["metadata"]["target_move"] == "e2e4"
 
 
 # ── Cross-cutting: blocklist & volume ─────────────────────────────────
+
+
+def test_best_move_selection_preserves_chess960_eval_rows(monkeypatch):
+    from generators.tier7_planning import BestMoveSelection
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "FEN: {fen}\nWhat is the best move?"
+    monkeypatch.setattr(
+        "generators.tier7_planning.select_template", lambda tid, rng: tpl
+    )
+
+    evals = [{
+        "fen": chess960_fen,
+        "best_move": "d1c1",
+        "pv_line": "d1c1",
+        "cp": 30,
+        "mate": None,
+        "depth": 35,
+        "is_chess960": True,
+        "chess960_id": 3,
+    }]
+
+    gen = BestMoveSelection(
+        config={"best_move_evals": evals, "volume_override": 1},
+        rng=Random(42),
+    )
+    example = list(gen.generate())[0]
+
+    assert example["is_chess960"] is True
+    assert example["metadata"]["chess960_id"] == 3
+    assert example["metadata"]["target_move"] == "d1c1"
 
 
 def test_blocklist_excludes_fen(monkeypatch):
@@ -909,6 +1156,70 @@ def test_opening_principles_pawn_structure(monkeypatch):
     assert "doubled" in pawn_examples[0]["messages"][2]["content"].lower()
 
 
+def test_opening_principles_preserves_chess960_metadata(monkeypatch):
+    from generators.tier5_openings import OpeningPrinciples
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "Board:\n{board}\nFEN: {fen}\nDescribe the character of this opening position."
+    monkeypatch.setattr(
+        "generators.tier5_openings.select_template", lambda tid, rng: tpl
+    )
+
+    gen = OpeningPrinciples(
+        config={
+            "openings": [
+                {
+                    "fen": chess960_fen,
+                    "name": "Chess960 Start",
+                    "eco": "A00",
+                    "is_chess960": True,
+                    "chess960_id": 3,
+                }
+            ],
+            "volume_override": 1,
+        },
+        rng=Random(42),
+    )
+    example = list(gen.generate())[0]
+
+    assert example["is_chess960"] is True
+    assert example["metadata"]["chess960_id"] == 3
+    assert "8 b q r k r n n b" in example["messages"][1]["content"]
+
+
+@pytest.mark.parametrize(
+    "generator_name",
+    ["EndgameClassification", "EndgamePrinciples"],
+)
+def test_endgame_generators_preserve_chess960_metadata(monkeypatch, generator_name):
+    import generators.tier6_endgames as tier6
+
+    chess960_fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    tpl = "FEN: {fen}\nWhat endgame information applies?"
+    monkeypatch.setattr(
+        "generators.tier6_endgames.select_template", lambda tid, rng: tpl
+    )
+
+    generator_cls = getattr(tier6, generator_name)
+    gen = generator_cls(
+        config={
+            "endgame_positions": [
+                {
+                    "fen": chess960_fen,
+                    "metadata": {"chess960_id": 3},
+                    "source": "test",
+                }
+            ],
+            "volume_override": 1,
+        },
+        rng=Random(42),
+    )
+    example = list(gen.generate())[0]
+
+    assert example["is_chess960"] is True
+    assert example["metadata"]["chess960_id"] == 3
+
+
 # ── Tier 7: MATE dataset path ────────────────────────────────────────
 
 
@@ -945,3 +1256,40 @@ def test_best_move_selection_mate_only(monkeypatch):
     for ex in examples:
         assert ex["metadata"]["source"] == "mate_dataset"
         assert validate_think_move_format(ex["messages"][2]["content"])
+
+
+def test_best_move_selection_uses_parser_preserved_mate_annotations(monkeypatch):
+    from chess_llm.sft.sources.mate import process_mate_row
+    from generators.tier7_planning import BestMoveSelection
+
+    tpl = "FEN: {fen}\nWhat is the best move?"
+    monkeypatch.setattr(
+        "generators.tier7_planning.select_template", lambda tid, rng: tpl
+    )
+
+    parsed = process_mate_row(
+        {
+            "input": f'The FEN of the given chess board is "{STARTING_FEN}". '
+            "Which move is better? MoveA:e2e4 MoveB:d2d4 ",
+            "output": "MoveA:e2e4",
+            "strategy": "control the center",
+            "tactic": "central pawn push",
+        }
+    )
+    assert parsed is not None
+
+    gen = BestMoveSelection(
+        config={
+            "best_move_evals": [],
+            "mate_rows": [parsed],
+            "volume_override": 1,
+        },
+        rng=Random(42),
+    )
+    example = list(gen.generate())[0]
+    answer = example["messages"][2]["content"]
+
+    assert example["metadata"]["strategy"] == "control the center"
+    assert example["metadata"]["tactic"] == "central pawn push"
+    assert "control the center" in answer
+    assert "central pawn push" in answer

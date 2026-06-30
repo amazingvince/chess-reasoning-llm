@@ -103,6 +103,59 @@ Verifier or teacher assessment of a rollout.
 }
 ```
 
+## EvaluationRunArtifact
+
+Metadata for one benchmark evaluation run. This is written as a JSON sidecar
+next to `chess-llm-evaluate` prediction and result files so later batch judge,
+autodata, preference, and SDPO tools can recover the run context without
+guessing from file names.
+
+```json
+{
+  "schema_version": "artifact.v1",
+  "artifact_type": "evaluation_run",
+  "run_id": "eval-20260629T120000Z-abc12345",
+  "created_at_utc": "2026-06-29T12:00:00+00:00",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "phase": "c",
+  "benchmark_dir": "benchmark",
+  "benchmark_manifest_path": "benchmark/manifest.json",
+  "benchmark_version": "unit-v1",
+  "predictions_path": "predictions.jsonl",
+  "results_path": "predictions.results.json",
+  "return_code": 0,
+  "split_counts": {"planning": 2000},
+  "has_acpl": true,
+  "n_failures": 0,
+  "inference": {
+    "backend": "vllm",
+    "attn_implementation": "auto",
+    "vllm_gpu_memory_utilization": 0.85,
+    "pass_k": 8,
+    "primary_temperature": 0.0,
+    "sample_temperature": 0.7,
+    "max_new_tokens": 256,
+    "batch_size": 16,
+    "max_examples_per_split": null
+  },
+  "scoring": {
+    "stockfish_path": "stockfish",
+    "acpl_depth": 20,
+    "no_acpl": false,
+    "full_acpl_report": false
+  },
+  "gate": {
+    "baseline_path": null,
+    "report_only": false,
+    "soft_gate": true
+  },
+  "metadata": {
+    "eval_run_path": "predictions.eval_run.json",
+    "prediction_analysis_path": "predictions.analysis.json"
+  }
+}
+```
+
 ## PreferencePairArtifact
 
 Chosen/rejected response for preference training.
@@ -143,6 +196,7 @@ feedback-conditioned distillation.
 
 ## Training Consumers
 
+- Static benchmark evaluation writes `EvaluationRunArtifact` sidecars.
 - SFT refresh consumes prompts plus corrected target outputs.
 - Preference training consumes `PreferencePairArtifact` rows.
 - SDPO and related feedback-distillation experiments consume

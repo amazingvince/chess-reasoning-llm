@@ -148,7 +148,7 @@ Perception:
   Board print accuracy:    92.3%
   Board → FEN accuracy:    88.7%
   Piece ID accuracy:       95.1%
-  State tracking (1-2m):   83.4%
+  State tracking (1m):     83.4%
   State tracking (3-5m):   71.2%
 Rules:
   Legal move gen accuracy: 87.5%

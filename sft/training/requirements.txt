@@ -3,6 +3,7 @@ transformers>=5.3.0,<5.13.0
 trl>=1.7.0,<2.0.0
 datasets>=3.0.0
 accelerate>=1.0.0
+kernels>=0.14.0,<0.15.0; platform_system == "Linux"
 liger-kernel>=0.5.0; platform_system == "Linux"
 wandb>=0.19.0
 python-chess>=1.10.0
@@ -12,3 +13,9 @@ tqdm>=4.66.0
 # Optional to enable attn_implementation="flash_attention_2" in Linux builds.
 # Install a wheel/source build that matches Torch, CUDA, Python, CXX11 ABI, and glibc.
 # flash-attn
+# Optional WSL packed/padding-free path uses the pinned Hugging Face
+# kernels-community FlashAttention 2 build through the kernels package.
+# Optional Qwen3.5 Gated DeltaNet fast path. Install causal-conv1d with
+# --no-build-isolation so it builds against the active torch/CUDA stack.
+# causal-conv1d==1.6.2.post1
+# flash-linear-attention[cuda]==0.5.1

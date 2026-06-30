@@ -157,6 +157,80 @@ def test_batch_judge_prefers_raw_prediction_for_rollout_output(tmp_path):
     assert rollouts[0].parsed_answer.format_type == "move_tag"
 
 
+def test_batch_judge_uses_per_example_chess960_metadata(tmp_path):
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    _write_jsonl(
+        benchmark_dir / "chess960.jsonl",
+        [
+            {
+                "example_id": "chess960_00000",
+                "split": "chess960",
+                "task_type": "legal_moves_960",
+                "fen": fen,
+                "prompt": f"FEN: {fen}\nList all legal moves.",
+                "gold_answer": "d1c1",
+                "metric_type": "jaccard",
+                "metadata": {"is_chess960": True},
+            }
+        ],
+    )
+    predictions = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions,
+        [{"example_id": "chess960_00000", "prediction": "<move>d1c1</move>"}],
+    )
+
+    result = judge_prediction_file(
+        benchmark_dir,
+        predictions,
+        tmp_path / "artifacts",
+        model_id="model-a",
+    )
+
+    judgments = list(read_jsonl(result.judgments_path, JudgmentArtifact))
+    assert judgments[0].legal is True
+    assert judgments[0].failure_bucket == LEGAL_UNSCORED
+
+
+def test_batch_judge_treats_nested_chess960_id_as_chess960(tmp_path):
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    _write_jsonl(
+        benchmark_dir / "planning.jsonl",
+        [
+            {
+                "example_id": "planning_00000",
+                "split": "planning",
+                "task_type": "best_move",
+                "fen": fen,
+                "prompt": f"FEN: {fen}\nWhat is the best move?",
+                "gold_answer": "d1c1",
+                "metric_type": "move_extraction",
+                "metadata": {"chess960_id": 321},
+            }
+        ],
+    )
+    predictions = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions,
+        [{"example_id": "planning_00000", "prediction": "<move>d1c1</move>"}],
+    )
+
+    result = judge_prediction_file(
+        benchmark_dir,
+        predictions,
+        tmp_path / "artifacts",
+        model_id="model-a",
+    )
+
+    judgments = list(read_jsonl(result.judgments_path, JudgmentArtifact))
+    assert judgments[0].legal is True
+    assert judgments[0].failure_bucket == LEGAL_UNSCORED
+
+
 def test_batch_judge_raises_for_unknown_example_id(tmp_path):
     benchmark_dir = _write_benchmark(tmp_path)
     predictions = tmp_path / "predictions.jsonl"

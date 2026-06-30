@@ -1,5 +1,6 @@
 from chess_llm.artifacts.schemas import (
     ChatMessage,
+    EvaluationRunArtifact,
     FeedbackDistillationArtifact,
     JudgmentArtifact,
     ParsedAnswer,
@@ -86,6 +87,64 @@ def test_downstream_artifacts_round_trip_preserves_identity_fields():
         FeedbackDistillationArtifact.from_dict(feedback.to_dict()).artifact_type
         == "feedback_distillation"
     )
+
+
+def test_evaluation_run_artifact_round_trip_preserves_run_metadata():
+    import chess_llm.artifacts as artifacts
+
+    assert artifacts.EvaluationRunArtifact is EvaluationRunArtifact
+
+    artifact = EvaluationRunArtifact(
+        run_id="eval-unit",
+        created_at_utc="2026-06-29T12:00:00+00:00",
+        model_id="Qwen/Qwen3-0.6B",
+        phase="c",
+        benchmark_dir="benchmark",
+        benchmark_manifest_path="benchmark/manifest.json",
+        benchmark_version="unit-v1",
+        predictions_path="predictions.jsonl",
+        results_path="predictions.results.json",
+        return_code=0,
+        split_counts={"planning": 2},
+        has_acpl=True,
+        n_failures=0,
+        inference={
+            "backend": "vllm",
+            "attn_implementation": "auto",
+            "vllm_gpu_memory_utilization": 0.85,
+            "pass_k": 8,
+            "primary_temperature": 0.0,
+            "sample_temperature": 0.7,
+            "max_new_tokens": 256,
+            "batch_size": 16,
+            "max_examples_per_split": None,
+        },
+        scoring={
+            "stockfish_path": "stockfish",
+            "acpl_depth": 20,
+            "no_acpl": False,
+            "full_acpl_report": False,
+        },
+        gate={
+            "baseline_path": None,
+            "report_only": False,
+            "soft_gate": True,
+        },
+        metadata={"eval_run_path": "predictions.eval_run.json"},
+    )
+
+    restored = EvaluationRunArtifact.from_dict(artifact.to_dict())
+
+    assert restored.schema_version == "artifact.v1"
+    assert restored.artifact_type == "evaluation_run"
+    assert restored.run_id == "eval-unit"
+    assert restored.model_id == "Qwen/Qwen3-0.6B"
+    assert restored.split_counts == {"planning": 2}
+    assert restored.inference["backend"] == "vllm"
+    assert restored.inference["pass_k"] == 8
+    assert restored.scoring["acpl_depth"] == 20
+    assert restored.gate["soft_gate"] is True
+    assert restored.metadata["eval_run_path"] == "predictions.eval_run.json"
 
 
 def test_artifact_from_dict_rejects_wrong_artifact_type():

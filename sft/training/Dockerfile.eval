@@ -1,4 +1,5 @@
-FROM vllm/vllm-openai:latest
+ARG EVAL_BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${EVAL_BASE_IMAGE}
 
 ARG STOCKFISH_SOURCE_URL=https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_18.tar.gz
 ARG STOCKFISH_ARCH=x86-64-bmi2
@@ -33,13 +34,16 @@ RUN set -eux; \
     printf "quit\n" | /usr/games/stockfish | head -n 1; \
     rm -rf /tmp/stockfish.tar.gz /tmp/stockfish-src
 
-COPY sft/training/requirements.eval.txt /tmp/requirements.eval.txt
-RUN python3 -m pip install -r /tmp/requirements.eval.txt
-
 WORKDIR /workspace
-COPY . /workspace
 
-WORKDIR /workspace/sft/training
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+COPY pyproject.toml README.md /workspace/
+COPY src /workspace/src
+
+RUN python3 -m pip install -e ".[eval]"
+
+COPY . /workspace
 
 ENTRYPOINT []
 CMD ["bash"]

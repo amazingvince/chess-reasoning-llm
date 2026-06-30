@@ -2,7 +2,7 @@
 
 **Phase**: SFT Stage 1, Phase B
 **Prerequisites**: Phase A pass criteria met
-**Data volume**: ~485K new (Tiers 3-6) + ~243K review (30% of Tiers 1-2)
+**Data volume**: ~580K new (Tiers 3-6) + ~327K review (30% of Tiers 1-2)
 **Training**: 2-3 epochs
 **Focus**: Tactical awareness, position evaluation, opening/endgame theory
 
@@ -258,7 +258,7 @@ The position evaluations dataset provides additional endgame training data:
 
 ## Tier 1-2 Review Data
 
-To prevent catastrophic forgetting, 30% of Phase A data (~243K examples)
+To prevent catastrophic forgetting, 30% of Phase A data (~327K examples)
 is mixed into Phase B training. Sample uniformly from all Tier 1-2 tasks.
 
 **Mix ratio**: For each batch, ~33% Tier 1-2 review, ~67% Tier 3-6 new.
@@ -267,7 +267,7 @@ is mixed into Phase B training. Sample uniformly from all Tier 1-2 tasks.
 
 ## Training Configuration
 
-**Data**: ~728K total (485K new Tier 3-6 + 243K Tier 1-2 review)
+**Data**: ~907K total (580K new Tier 3-6 + 327K Tier 1-2 review)
 **Epochs**: 2-3
 **Mixing**: Shuffle all tiers together. Each batch should contain
 examples from multiple tiers.
@@ -328,7 +328,7 @@ If any drops more than 5%, increase Tier 1-2 review ratio and retrain.
 - [ ] Generate Task 6.2 data (Endgame Eval, ~40K)
 - [ ] Generate Task 6.3 data (Endgame Best Move, ~40K)
 - [ ] Generate Task 6.4 data (Endgame Principles, ~30K)
-- [ ] Sample 30% Tier 1-2 review data (~243K)
+- [ ] Sample 30% Tier 1-2 review data (~327K)
 - [ ] Validate Chess960 mix ratio (~15% for T3, ~5-10% for T4-6)
 - [ ] Run python-chess validation on all generated data
 - [ ] Confirm no eval set contamination

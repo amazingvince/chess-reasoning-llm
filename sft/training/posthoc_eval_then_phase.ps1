@@ -1,5 +1,3 @@
-$ErrorActionPreference = "Stop"
-
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("a", "b", "c")]
@@ -11,18 +9,22 @@ param(
 
     [string]$InferenceBackend = "transformers",
     [string]$WandbProject = "chess-sft",
+    [string]$WandbGroup = "",
     [string]$RunPrefix = "",
     [switch]$NoWandb,
     [switch]$BuildImage,
     [switch]$SkipEvalOnNextPhase
 )
 
+$ErrorActionPreference = "Stop"
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
+$repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+$defaultRuntimeRoot = Join-Path $repoRoot ".runtime"
 $envPath = Join-Path $scriptDir ".env"
 
 $config = @{
-    CHESS_SFT_CHECKPOINTS_HOST = "E:/chess_sft_checkpoints"
+    CHESS_SFT_CHECKPOINTS_HOST = Join-Path $defaultRuntimeRoot "chess_sft_checkpoints"
 }
 
 if (Test-Path $envPath) {
@@ -35,11 +37,24 @@ if (Test-Path $envPath) {
         if ($parts.Count -eq 2) {
             $key = $parts[0].Trim()
             $value = $parts[1].Trim()
-            if (-not $config.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($config[$key])) {
+            if ($config.ContainsKey($key)) {
                 $config[$key] = $value
             }
         }
     }
+}
+
+foreach ($key in @($config.Keys)) {
+    $envValue = [Environment]::GetEnvironmentVariable($key)
+    if (-not [string]::IsNullOrWhiteSpace($envValue)) {
+        $config[$key] = $envValue
+    }
+}
+
+if (-not [System.IO.Path]::IsPathRooted($config["CHESS_SFT_CHECKPOINTS_HOST"])) {
+    $config["CHESS_SFT_CHECKPOINTS_HOST"] = [System.IO.Path]::GetFullPath(
+        (Join-Path $scriptDir $config["CHESS_SFT_CHECKPOINTS_HOST"])
+    )
 }
 
 $phaseDir = Join-Path $config["CHESS_SFT_CHECKPOINTS_HOST"] "phase_$Phase"
@@ -58,11 +73,20 @@ try {
         }
     }
 
-    $evalArgs = @("python", "train.py", "--phase", $Phase, "--eval-only", "--inference-backend", $InferenceBackend)
+    $evalArgs = @(
+        "chess-llm-train",
+        "--phase", $Phase,
+        "--eval-only",
+        "--require-phase-gate",
+        "--inference-backend", $InferenceBackend
+    )
     if ($NoWandb) {
         $evalArgs += "--no-wandb"
     } else {
         $evalArgs += @("--wandb-project", $WandbProject, "--run-name", $evalRunName)
+        if ($WandbGroup) {
+            $evalArgs += @("--wandb-group", $WandbGroup)
+        }
     }
 
     Write-Host "Running post-hoc eval for phase $Phase..." -ForegroundColor Cyan
@@ -82,7 +106,7 @@ try {
 
     $nextArgs = @(
         "compose", "-f", "compose.yaml", "run", "-d", "--name", $nextContainer,
-        "trainer", "python", "train.py", "--phase", $NextPhase
+        "trainer", "chess-llm-train", "--phase", $NextPhase
     )
     if ($SkipEvalOnNextPhase) {
         $nextArgs += "--skip-eval"
@@ -91,6 +115,9 @@ try {
         $nextArgs += "--no-wandb"
     } else {
         $nextArgs += @("--wandb-project", $WandbProject, "--run-name", $nextRunName)
+        if ($WandbGroup) {
+            $nextArgs += @("--wandb-group", $WandbGroup)
+        }
     }
 
     Write-Host "Launching phase $NextPhase in detached container $nextContainer..." -ForegroundColor Cyan

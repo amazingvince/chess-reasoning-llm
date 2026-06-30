@@ -12,6 +12,12 @@ _MOVE_TAG_RE = re.compile(
     r"<move>\s*([a-h][1-8][a-h][1-8][qrbn]?)\s*</move>",
     re.IGNORECASE,
 )
+_STRICT_MOVE_TAG_RE = re.compile(r"<move>([a-h][1-8][a-h][1-8][qrbn]?)</move>")
+_THINK_MOVE_STRICT_RE = re.compile(
+    r"^<think>.*?</think>\s*<move>[a-h][1-8][a-h][1-8][qrbn]?</move>\s*$",
+    re.DOTALL,
+)
+_BARE_UCI_RE = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?", re.IGNORECASE)
 _UCI_RE = re.compile(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b", re.IGNORECASE)
 
 
@@ -77,6 +83,38 @@ def parse_answer(text: str) -> ParsedAnswer:
     )
 
 
+def validate_think_move_format(text: str) -> bool:
+    """Return True for strict ``<think>...</think><move>UCI</move>`` output."""
+    return _THINK_MOVE_STRICT_RE.match(text or "") is not None
+
+
+def extract_uci_from_move_tag(text: str) -> str | None:
+    """Extract a strict lowercase UCI move from the first ``<move>`` tag."""
+    match = _STRICT_MOVE_TAG_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def extract_move(text: str) -> str | None:
+    """Extract the first benchmark-style UCI move from tag, bare text, or prose.
+
+    This helper intentionally returns the first prose UCI mention.  Use
+    ``parse_answer`` when ambiguous prose should be rejected instead.
+    """
+    raw_text = text or ""
+    uci = extract_uci_from_move_tag(raw_text)
+    if uci is not None:
+        return uci
+
+    stripped = raw_text.strip().lower()
+    if _BARE_UCI_RE.fullmatch(stripped):
+        return stripped
+
+    match = _UCI_RE.search(stripped)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
 def _parse_json_move(text: str) -> str | None:
     stripped = text.strip()
     if not stripped.startswith("{"):
@@ -91,7 +129,7 @@ def _parse_json_move(text: str) -> str | None:
     if not isinstance(move, str):
         return None
     move = move.strip().lower()
-    if re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", move):
+    if _BARE_UCI_RE.fullmatch(move):
         return move
     return None
 

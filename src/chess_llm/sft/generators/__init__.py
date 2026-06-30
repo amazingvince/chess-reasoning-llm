@@ -1,0 +1,130 @@
+"""Package-owned SFT task generators."""
+
+from chess_llm.sft.generators.base import TaskGenerator
+from chess_llm.sft.generators.tier1_perception import (
+    BoardToFEN,
+    FENAssembly,
+    FENBoardEdit,
+    FENRankCellEdit,
+    FENRankExpansion,
+    FENRowApplication,
+    FENToBoard,
+    MoveSquareEdits,
+    PieceCounting,
+    PieceIdentification,
+    RankLookup,
+    SquareCoordinates,
+    SquareLookup,
+    StateTracking,
+)
+from chess_llm.sft.generators.tier2_rules import (
+    CheckDetection,
+    LegalMoveGen,
+    MoveLegalityCheck,
+    PieceSpecificMoves,
+    SidePieceInventory,
+    SpecialRules,
+)
+from chess_llm.sft.generators.tier3_tactics import (
+    AttackedDefended,
+    AvailableCaptures,
+    HangingPieces,
+    TacticalPatterns,
+    Threats,
+)
+from chess_llm.sft.generators.tier4_evaluation import (
+    MaterialBalance,
+    PawnStructure,
+    PositionEvaluation,
+)
+from chess_llm.sft.generators.tier5_openings import (
+    OpeningContinuation,
+    OpeningIdentification,
+    OpeningPrinciples,
+)
+from chess_llm.sft.generators.tier6_endgames import (
+    EndgameBestMove,
+    EndgameClassification,
+    EndgamePrinciples,
+    EndgameWDL,
+)
+from chess_llm.sft.generators.tier7_planning import (
+    BestMoveSelection,
+    MoveConsequence,
+    PuzzleSolving,
+)
+
+TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
+    1: [
+        FENToBoard,
+        BoardToFEN,
+        PieceIdentification,
+        PieceCounting,
+        SquareLookup,
+        RankLookup,
+        SquareCoordinates,
+        FENRankExpansion,
+        FENRankCellEdit,
+        FENBoardEdit,
+        MoveSquareEdits,
+        FENRowApplication,
+        FENAssembly,
+        StateTracking,
+    ],
+    2: [
+        SidePieceInventory,
+        LegalMoveGen,
+        PieceSpecificMoves,
+        MoveLegalityCheck,
+        CheckDetection,
+        SpecialRules,
+    ],
+    3: [AvailableCaptures, Threats, AttackedDefended, TacticalPatterns, HangingPieces],
+    4: [MaterialBalance, PositionEvaluation, PawnStructure],
+    5: [OpeningIdentification, OpeningContinuation, OpeningPrinciples],
+    6: [EndgameClassification, EndgameWDL, EndgameBestMove, EndgamePrinciples],
+    7: [BestMoveSelection, PuzzleSolving, MoveConsequence],
+}
+
+__all__ = [
+    "AttackedDefended",
+    "AvailableCaptures",
+    "BestMoveSelection",
+    "BoardToFEN",
+    "CheckDetection",
+    "EndgameBestMove",
+    "EndgameClassification",
+    "EndgamePrinciples",
+    "EndgameWDL",
+    "FENAssembly",
+    "FENBoardEdit",
+    "FENRankCellEdit",
+    "FENRankExpansion",
+    "FENRowApplication",
+    "FENToBoard",
+    "HangingPieces",
+    "LegalMoveGen",
+    "MaterialBalance",
+    "MoveSquareEdits",
+    "MoveConsequence",
+    "MoveLegalityCheck",
+    "OpeningContinuation",
+    "OpeningIdentification",
+    "OpeningPrinciples",
+    "PawnStructure",
+    "PieceCounting",
+    "PieceIdentification",
+    "PieceSpecificMoves",
+    "PositionEvaluation",
+    "PuzzleSolving",
+    "RankLookup",
+    "SquareCoordinates",
+    "SquareLookup",
+    "SidePieceInventory",
+    "SpecialRules",
+    "StateTracking",
+    "TIER_GENERATORS",
+    "TacticalPatterns",
+    "TaskGenerator",
+    "Threats",
+]

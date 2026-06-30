@@ -7,6 +7,8 @@ import pytest
 
 from conftest import CHECKMATE_FEN, KRK_FEN, STARTING_FEN
 
+CHESS960_CASTLE_FEN = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+
 
 # ── answer_legal_moves ──────────────────────────────────────────────
 
@@ -50,7 +52,7 @@ def test_answer_captures_starting():
     from validation.eval_harness import answer_captures
 
     # No captures available from starting position
-    assert answer_captures(STARTING_FEN) == ""
+    assert answer_captures(STARTING_FEN) == "No captures available."
 
 
 def test_answer_captures_after_e4_d5():
@@ -117,6 +119,17 @@ def test_evaluate_split_unknown_split():
 
     result = evaluate_split("nonexistent", [{"fen": STARTING_FEN}])
     assert result.skipped == 1
+
+
+def test_evaluate_split_rejects_parseable_but_invalid_board():
+    from validation.eval_harness import evaluate_split
+
+    result = evaluate_split("rules", [{"fen": "8/8/8/8/8/8/8/8 w - - 0 1"}])
+
+    assert result.total == 1
+    assert result.failed == 1
+    assert result.passed == 0
+    assert any("invalid FEN" in error for error in result.errors)
 
 
 def test_evaluate_split_jsonl_roundtrip(tmp_path):
@@ -208,6 +221,44 @@ def test_evaluate_planning_with_best_move_passes():
     assert result.total == 1
     assert result.passed == 1
     assert result.skipped == 0
+
+
+def test_evaluate_planning_accepts_chess960_castling_best_move():
+    from validation.eval_harness import evaluate_split
+
+    examples = [
+        {
+            "fen": CHESS960_CASTLE_FEN,
+            "is_chess960": True,
+            "best_move": "d1c1",
+        }
+    ]
+
+    result = evaluate_split("planning", examples)
+
+    assert result.total == 1
+    assert result.passed == 1
+    assert result.failed == 0
+
+
+def test_evaluate_mate_choice_accepts_chess960_castling_candidate():
+    from validation.eval_harness import evaluate_split
+
+    examples = [
+        {
+            "fen": CHESS960_CASTLE_FEN,
+            "chess960_id": 0,
+            "move_a": "d1c1",
+            "move_b": "d2d4",
+            "better_move": "d1c1",
+        }
+    ]
+
+    result = evaluate_split("mate", examples)
+
+    assert result.total == 1
+    assert result.passed == 1
+    assert result.failed == 0
 
 
 def test_evaluate_planning_no_move_at_all_is_skipped():

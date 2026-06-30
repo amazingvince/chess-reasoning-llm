@@ -1,8 +1,10 @@
 """Tests for sources/lichess_evals.py — streaming dedup and partitioning."""
 
 import pytest
+import chess
 
 from conftest import KRK_FEN, STARTING_FEN
+import sources.lichess_evals as lichess_evals
 from sources.lichess_evals import (
     _flush_batch,
     _init_dedup_db,
@@ -48,6 +50,30 @@ def test_partition_endgame():
     parts = partition_evals(iter(rows))
     assert len(parts["endgame"]) == 1
     assert len(parts["high_eval"]) == 1   # also high eval
+
+
+def test_partition_evals_uses_row_board_helper_for_chess960(monkeypatch):
+    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    calls = []
+
+    def fake_board_from_raw(row):
+        calls.append(row)
+        return chess.Board(row["fen"], chess960=True)
+
+    monkeypatch.setattr(lichess_evals, "board_from_raw", fake_board_from_raw)
+
+    rows = [{
+        "fen": fen,
+        "cp": 30,
+        "mate": None,
+        "depth": 35,
+        "metadata": {"chess960_id": 321},
+    }]
+
+    parts = partition_evals(iter(rows))
+
+    assert calls == rows
+    assert len(parts["best_move"]) == 1
 
 
 # ── _flush_batch + DB dedup ──────────────────────────────────────────
@@ -114,9 +140,13 @@ def test_stream_dedup_cross_run_same_depth_prefers_higher_knodes(monkeypatch, tm
             "line": "d2d4 d7d5", "cp": 35, "mate": None, "knodes": 200,
         },
     ]
-    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
-
-    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    results = list(
+        lichess_evals.stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *a, **kw: iter(rows),
+        )
+    )
     assert len(results) == 1
     assert results[0]["knodes"] == 200
     assert results[0]["best_move"] == "d2d4"
@@ -146,10 +176,14 @@ def test_stream_dedup_skips_lower_depth(monkeypatch, tmp_path):
         },
     ]
 
-    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
-
     db_path = tmp_path / "dedup.db"
-    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    results = list(
+        lichess_evals.stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *a, **kw: iter(rows),
+        )
+    )
     assert len(results) == 1
     assert results[0]["depth"] == 25
 
@@ -173,10 +207,14 @@ def test_stream_dedup_lower_then_higher_yields_only_higher(monkeypatch, tmp_path
         },
     ]
 
-    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
-
     db_path = tmp_path / "dedup.db"
-    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    results = list(
+        lichess_evals.stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *a, **kw: iter(rows),
+        )
+    )
     assert len(results) == 1
     assert results[0]["depth"] == 25
     assert results[0]["best_move"] == "d2d4"
@@ -197,10 +235,14 @@ def test_stream_dedup_same_depth_prefers_higher_knodes(monkeypatch, tmp_path):
         },
     ]
 
-    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
-
     db_path = tmp_path / "dedup.db"
-    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    results = list(
+        lichess_evals.stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *a, **kw: iter(rows),
+        )
+    )
     assert len(results) == 1
     assert results[0]["knodes"] == 200
     assert results[0]["best_move"] == "d2d4"
@@ -221,10 +263,14 @@ def test_stream_dedup_distinct_fens_both_yielded(monkeypatch, tmp_path):
         },
     ]
 
-    monkeypatch.setattr(lichess_evals, "load_dataset", lambda *a, **kw: iter(rows))
-
     db_path = tmp_path / "dedup.db"
-    results = list(lichess_evals.stream_evals(min_depth=20, dedup_db_path=db_path))
+    results = list(
+        lichess_evals.stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *a, **kw: iter(rows),
+        )
+    )
     assert len(results) == 2
     fens = {r["fen"] for r in results}
     assert fens == {STARTING_FEN, KRK_FEN}

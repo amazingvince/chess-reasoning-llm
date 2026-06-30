@@ -5,8 +5,8 @@ language model chess. The goal is not only to teach syntax like FEN and UCI,
 but to build a curriculum that moves from board perception, to rules, to
 tactics, to evaluation, to planning.
 
-At full target volume the pipeline generates about 1.56M examples across
-7 tiers and 28 tasks. It also freezes a held-out benchmark before training
+At full target volume the pipeline generates about 1.94M examples across
+7 tiers and 32 generator tasks. It also freezes a held-out benchmark before training
 data is generated, then uses a canonical FEN blocklist to prevent train/eval
 position leakage.
 
@@ -35,32 +35,24 @@ so move counters do not create false "new" positions.
 sft/make_data/
   config/
     settings.py          Paths, volumes, source IDs, depth filters, seeds
-    templates.py         Prompt templates for all task IDs
+    templates.py         Compatibility wrapper for chess_llm.sft.templates
     system_prompt.py     Shared system prompt for SFT examples
   sources/
     lichess_games.py     Streams games and extracts per-ply positions
     lichess_puzzles.py   Loads puzzles and applies setup-move preprocessing
     lichess_openings.py  Loads ECO/name/opening move data
     lichess_evals.py     Streams engine evals with SQLite dedup
-    polyglot_books.py    Reads local Polyglot books for opening moves
-    syzygy_probing.py    Probes WDL/DTZ tablebases
+    polyglot_books.py    Compatibility wrapper for package Polyglot helpers
+    syzygy_probing.py    Compatibility wrapper for package Syzygy helpers
     stockfish_engine.py  Thin python-chess Stockfish wrapper
     chess960.py          Generates Chess960 starts and random continuations
     mate_dataset.py      Loads MATE binary move-comparison data
   pool/
     fen_pool.py          In-memory FEN dedup and tagging
     eval_split.py        Eval split sampling, ECO holdout, blocklist
-    annotator.py         Stockfish annotation cache
+    annotator.py         Compatibility wrapper for package annotation cache
   generators/
-    base.py              Shared TaskGenerator contract
-    tier1_perception.py  Board/FEN/piece/state tracking tasks
-    tier2_rules.py       Legal moves, checks, castling, EP, promotion
-    tier3_tactics.py     Captures, threats, attacked pieces, tactics
-    tier4_evaluation.py  Material, eval buckets, pawn structure
-    tier5_openings.py    ECO/name/continuation/opening-plan tasks
-    tier6_endgames.py    Material class, WDL, DTZ move, principles
-    tier7_planning.py    Best move, puzzles, PV consequences
-    reasoning_traces.py  Shared think/move reasoning helpers
+    *.py                 Compatibility wrappers for chess_llm.sft.generators
   validation/
     validator.py         Per-example validation before write
     benchmark.py         Frozen benchmark schema, gold derivation, scoring
@@ -70,13 +62,16 @@ sft/make_data/
     writer.py            Validating JSONL writer
     stats.py             Generation counts and Chess960 mix checks
   scripts/
-    run_pipeline.py      Main orchestration CLI
+    run_pipeline.py      Compatibility wrapper for chess_llm.sft.pipeline
     freeze_benchmark.py  Refreeze benchmark JSONL from eval splits
     run_benchmark.py     Score model predictions against benchmark
-    run_eval_split.py    Generate held-out eval splits
+    extract_polyglot_books.py  Compatibility alias for package extractor
+    download_tablebases.py     Compatibility alias for package downloader
+    run_eval_split.py    Compatibility alias for chess_llm.sft.run_eval_split
     run_eval_harness.py  Validate eval split oracle consistency
-    validate_outputs.py  Post-hoc validation of generated JSONL
-    preflight_check.py   Environment/data preflight checks
+    push_to_hub.py       Compatibility alias for chess_llm.sft.hub_upload
+    validate_outputs.py  Compatibility alias for chess_llm.sft.validate_outputs
+    preflight_check.py   Compatibility alias for chess_llm.sft.preflight
 ```
 
 Large runtime outputs default to `E:/chess_sft_data`, controlled by
@@ -110,6 +105,31 @@ Source-specific safeguards are built in:
 - Chess960 positions are parsed with `chess960=True` anywhere castling/legal
   move semantics matter.
 
+Package-owned source parsers and the first source loaders live under
+`src/chess_llm/sft/sources/` and define the contracts the legacy data pipeline
+consumes. Lichess game streaming now normalizes the HF
+`WhiteElo`/`BlackElo`/`Result`/`movetext` schema into the game rows consumed by
+the pipeline, and rejects malformed PGN rows instead of emitting a valid
+prefix. Lichess puzzle loading now normalizes the HF
+`PuzzleId`/`FEN`/`Moves`/`Rating`/`Themes` schema before setup-move
+preprocessing. Lichess position-eval streaming and SQLite deduplication now
+live in the package: rows are validated through python-chess, highest depth
+then highest `knodes` wins per FEN, persisted DB reruns are emitted in
+deterministic quality order, and old king-to-rook castling PVs are normalized
+when read back. Position eval rows preserve Stockfish `cp` and `mate` values as
+White-perspective scores and emit `eval_perspective="white"`. MATE ZIP archive
+loading is also package-owned: Hugging Face Hub is imported lazily, bad archives
+and malformed JSONL rows are skipped, parseable-but-invalid FENs are rejected,
+and strategy/tactic annotations are preserved for Tier 7 traces. Lichess opening
+rows are replayed from UCI in package code and treat replayed UCI as
+authoritative; if the source EPD disagrees, the row is marked with
+`epd_mismatch`. Chess960 generation is also package-owned and reports the actual
+number of random legal moves pushed, not just the requested rollout length.
+Stockfish process configuration and the live annotation wrapper now live in
+`chess_llm.external.stockfish`; the legacy `sources/stockfish_engine.py` module
+only supplies the old default path behavior. Stockfish scores are stored from
+White's perspective, matching the Lichess eval-row contract.
+
 ## Pipeline Flow
 
 ### 1. Load Sources
@@ -133,6 +153,12 @@ config["mate_rows"]
 
 The FEN pool is shuffled after deduplication so individual generators see a
 varied mixture of positions.
+
+After sources load, `chess_llm.sft.source_readiness` counts each source family
+and reports which selected tiers or strict eval splits depend on empty inputs.
+Full-volume runs fail early on missing required families instead of failing
+later as generator underfills. `--volume` and `--allow-source-gaps` keep smoke
+and exploratory runs permissive while still logging the missing inputs.
 
 ### 2. Freeze Eval Splits First
 
@@ -164,6 +190,27 @@ piece-placement side-to-move castling-rights en-passant-square
 That means positions that only differ by halfmove or fullmove counter are
 treated as the same position for decontamination.
 
+Eval split sampling, ECO-code holdout partitioning, canonical FEN blocklist
+save/load, and output decontamination audits now live in
+`chess_llm.sft.eval_split` and `chess_llm.sft.decontamination`. The legacy
+`pool/eval_split.py` and `validation/decontamination.py` modules are
+compatibility wrappers.
+
+FEN-pool deduplication now lives in `chess_llm.sft.fen_pool`. It deduplicates
+by canonical board identity rather than literal FEN text, so positions that
+only differ by move counters or impossible en-passant fields collapse to one
+pool entry. Later duplicate rows can still contribute missing metadata such as
+Chess960 markers.
+
+The eval-source map used by both `run_pipeline.py` and `run_eval_split.py` now
+comes from `chess_llm.sft.source_preparation`, which keeps Chess960 positions
+out of standard perception/rules splits and enriches eval-opening rows on
+copies rather than mutating the loaded opening rows.
+
+Opening rows with blank or missing ECO codes are assigned to the training side
+of the opening partition instead of being dropped. `holdout_fraction=0.0`
+means no ECO holdout.
+
 ### 3. Freeze the Benchmark
 
 Raw eval splits are converted into a deterministic benchmark under
@@ -186,6 +233,20 @@ Unlike training data, benchmark prompts are canonical and deterministic. Gold
 answers are derived from source data or from python-chess/Syzygy/engine-backed
 oracles, then self-scored to verify that the expected answer receives a perfect
 primary metric.
+
+The canonical benchmark schema, gold derivation, prompt rendering, freeze/write
+manifest logic, oracle validation, and scoring now live in
+`chess_llm.evals.benchmark`. The benchmark command-line tools live in
+`chess_llm.evals.freeze_benchmark`, `chess_llm.evals.run_eval_harness`, and
+`chess_llm.evals.run_benchmark`. This legacy folder keeps compatibility imports
+and script wrappers, but benchmark behavior should be changed in the package
+modules first.
+
+Raw eval-split oracle checks now live in `chess_llm.evals.eval_harness`.
+`validation/eval_harness.py` is a compatibility wrapper used by the existing
+scripts. New checks should be added to the package module first so the training
+and future Autodata loops can reuse the same oracles without importing legacy
+generator modules.
 
 ### 4. Generate Training Examples
 
@@ -239,7 +300,7 @@ The tiers are ordered from board literacy to actual chess decision-making.
 
 ### Tier 1: Perception and State
 
-Target volume: about 440K examples.
+Target volume: about 920K examples.
 
 | Task | Target | Supervision |
 | --- | ---: | --- |
@@ -247,9 +308,18 @@ Target volume: about 440K examples.
 | `1.2_board_to_fen` | 80K | Recover FEN from ASCII board |
 | `1.3_piece_identification` | 100K | Identify a square or list pieces |
 | `1.4_piece_counting` | 80K | Count pieces/material |
-| `1.5_state_tracking` | 100K | Apply 1-8 legal moves and return resulting FEN |
+| `1.6_square_lookup` | 100K | Read a single square's contents from FEN |
+| `1.7_rank_lookup` | 80K | Read one compressed rank row from FEN |
+| `1.8_move_square_edits` | 100K | Trace square lookups and rank edits for one move |
+| `1.9_fen_assembly` | 100K | Apply one legal move and assemble the resulting full FEN |
+| `1.10_fen_row_application` | 100K | Rewrite affected compressed rank rows and return Result FEN |
+| `1.5_state_tracking` | 100K | Apply one legal move and return resulting FEN |
 
-This tier teaches the model how to read and update board state.
+This tier teaches the model how to read board state, perform explicit
+square/rank lookup mechanics, and then update board state through moves.
+By default `1.4_piece_counting` uses benchmark-aligned full material-count
+targets; partial color/piece-count prompts remain available with
+`piece_counting_include_partial=True`.
 
 ### Tier 2: Rules
 
@@ -336,8 +406,9 @@ reasoning. Best-move and puzzle tasks require the `<think>`/`<move>` format.
 
 ## Prompt Templates
 
-Training prompts are randomized through `config/templates.py`. Each task has
-multiple phrasings, and many include richer context than raw FEN:
+Training prompts are randomized through `chess_llm.sft.templates`; the legacy
+`config/templates.py` path aliases that package module. Each task has multiple
+phrasings, and many include richer context than raw FEN:
 
 - ASCII board rendering
 - side to move
@@ -365,9 +436,13 @@ tier:
 | 6 | 5% |
 | 7 | 10% |
 
-The code uses `chess.Board(fen, chess960=True)` for Chess960-sensitive
-validation and answer derivation, especially legal moves and castling. The
-pipeline stats report compares actual ratio against target after generation.
+The code uses package row-to-board helpers from `chess_llm.sft.context` for
+Chess960-sensitive validation and answer derivation, especially legal moves and
+castling. Under python-chess, Chess960 castling legality and UCI handling depend
+on constructing the board with `chess960=True`, so generators should use
+`board_from_raw()` instead of calling `chess.Board(fen)` directly when a source
+row may carry `is_chess960` or `metadata.chess960_id`. The pipeline stats report
+compares actual ratio against target after generation.
 
 ## Validation and Quality Gates
 
@@ -387,8 +462,14 @@ Current checks include:
 Run validation only:
 
 ```bash
-python scripts/run_pipeline.py --validate-only
+chess-llm-validate-outputs \
+  --output-dir E:/chess_sft_data/output \
+  --blocklist E:/chess_sft_data/eval_splits/blocklist.txt
 ```
+
+Validation fails when no eval blocklist is available because contamination
+cannot be checked. Use `--skip-decontamination` only for intentional local
+smoke/debug validation.
 
 ## Benchmark and Scoring
 
@@ -407,8 +488,15 @@ prompts and gold answers for held-out splits. Scoring supports:
 Run benchmark scoring against model predictions:
 
 ```bash
-python scripts/run_benchmark.py --predictions predictions.jsonl --benchmark-dir E:/chess_sft_data/benchmark
+chess-llm-run-benchmark --predictions predictions.jsonl --benchmark-dir E:/chess_sft_data/benchmark
 ```
+
+Full benchmark freezes are strict by default and fail when planned task types
+have no frozen examples. Use `chess-llm-freeze-benchmark --split ...` for
+partial refreshes, or pass `--allow-coverage-gaps` for exploratory full freezes.
+
+The legacy `python scripts/run_benchmark.py ...` command still works as a
+compatibility wrapper.
 
 ## Commands
 
@@ -421,26 +509,76 @@ pip install -r requirements.txt
 Small smoke run:
 
 ```bash
-python scripts/run_pipeline.py --volume 100 --all
+chess-llm-make-data --volume 100 --all
+```
+
+`--volume` is intended for smoke and bring-up runs. For those bounded runs the
+Lichess game source uses a fixed small parquet shard instead of discovering the
+full multi-terabyte game dataset. Full generation without `--volume` keeps the
+unrestricted source path.
+
+Environment/data preflight:
+
+```bash
+chess-llm-preflight
+```
+
+Extract local Polyglot book archives:
+
+```bash
+chess-llm-extract-polyglot-books --polyglot-dir polyglot_opening_books
+```
+
+Preview or download Syzygy tablebase files:
+
+```bash
+chess-llm-download-tablebases --pieces 3,4,5 --dry-run
+```
+
+Preview or upload generated datasets to Hugging Face Hub:
+
+```bash
+chess-llm-upload-data --all --dry-run
+chess-llm-upload-data --training --org Chess-Nut-Engine
 ```
 
 Single tier:
 
 ```bash
-python scripts/run_pipeline.py --tier 2
+chess-llm-make-data --tier 2
 ```
 
 Eval split and benchmark only:
 
 ```bash
-python scripts/run_pipeline.py --eval-only
+chess-llm-make-data --eval-only
+```
+
+Standalone eval split refresh:
+
+```bash
+chess-llm-run-eval-split --volume 100
 ```
 
 Full generation:
 
 ```bash
-python scripts/run_pipeline.py --all
+chess-llm-make-data --all
 ```
+
+Write a source-readiness manifest, or continue an exploratory run when a
+selected source family is empty:
+
+```bash
+chess-llm-make-data --all --source-readiness-report readiness.json
+chess-llm-make-data --tier 4 --allow-source-gaps
+```
+
+The legacy `python scripts/run_pipeline.py ...` command still works from this
+directory, but it now aliases the package-owned `chess_llm.sft.pipeline`
+module. Task generators, templates, Syzygy helpers, Polyglot helpers, and the
+annotation cache are package-owned. The legacy `python scripts/push_to_hub.py`
+command also works, but it now aliases `chess_llm.sft.hub_upload`.
 
 ## How This Supports SFT, SDPO, and Self-Distillation
 

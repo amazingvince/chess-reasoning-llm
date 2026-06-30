@@ -1,18 +1,30 @@
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
+$repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+$defaultRuntimeRoot = Join-Path $repoRoot ".runtime"
 $envPath = Join-Path $scriptDir ".env"
 
+function Resolve-HostPath([string]$Value) {
+    if ([System.IO.Path]::IsPathRooted($Value)) {
+        return [System.IO.Path]::GetFullPath($Value)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $scriptDir $Value))
+}
+
 $config = @{
-    CUDA_DEVICE_ID = "1"
-    CHESS_SFT_OUTPUT_HOST = "E:/chess_sft_data"
-    CHESS_SFT_CHECKPOINTS_HOST = "E:/chess_sft_checkpoints"
-    HF_CACHE_HOST = "E:/hf_cache"
-    WANDB_HOST_DIR = "E:/wandb"
-    CHESS_SFT_BASE_MODEL = $(if ([string]::IsNullOrWhiteSpace($env:CHESS_SFT_BASE_MODEL)) { "Qwen/Qwen3-0.6B" } else { $env:CHESS_SFT_BASE_MODEL })
-    HF_TOKEN = $env:HF_TOKEN
-    WANDB_API_KEY = $env:WANDB_API_KEY
+    CUDA_DEVICE_ID = "0"
+    CHESS_SFT_OUTPUT_HOST = Join-Path $defaultRuntimeRoot "chess_sft_data"
+    CHESS_SFT_CHECKPOINTS_HOST = Join-Path $defaultRuntimeRoot "chess_sft_checkpoints"
+    HF_CACHE_HOST = Join-Path $defaultRuntimeRoot "hf_cache"
+    WANDB_HOST_DIR = Join-Path $defaultRuntimeRoot "wandb"
+    CHESS_SFT_BASE_MODEL = "Qwen/Qwen3.5-0.8B"
+    STOCKFISH_PATH = "/usr/games/stockfish"
+    HF_TOKEN = ""
+    WANDB_API_KEY = ""
+    WANDB_MODE = ""
+    WANDB_ENTITY = ""
+    WANDB_BASE_URL = ""
 }
 
 if (Test-Path $envPath) {
@@ -25,11 +37,22 @@ if (Test-Path $envPath) {
         if ($parts.Count -eq 2) {
             $key = $parts[0].Trim()
             $value = $parts[1].Trim()
-            if (-not $config.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($config[$key])) {
+            if ($config.ContainsKey($key)) {
                 $config[$key] = $value
             }
         }
     }
+}
+
+foreach ($key in @($config.Keys)) {
+    $envValue = [Environment]::GetEnvironmentVariable($key)
+    if (-not [string]::IsNullOrWhiteSpace($envValue)) {
+        $config[$key] = $envValue
+    }
+}
+
+foreach ($pathKey in @("CHESS_SFT_OUTPUT_HOST", "CHESS_SFT_CHECKPOINTS_HOST", "HF_CACHE_HOST", "WANDB_HOST_DIR")) {
+    $config[$pathKey] = Resolve-HostPath $config[$pathKey]
 }
 
 foreach ($pathKey in @("CHESS_SFT_OUTPUT_HOST", "CHESS_SFT_CHECKPOINTS_HOST", "HF_CACHE_HOST", "WANDB_HOST_DIR")) {
@@ -42,33 +65,46 @@ if (-not $args -or $args.Count -eq 0) {
     $CommandArgs = @($args)
 }
 
-$dockerArgs = @(
-    "run",
-    "--rm",
-    "--gpus", "all",
+$dockerEnvArgs = @(
     "-e", "CUDA_VISIBLE_DEVICES=$($config["CUDA_DEVICE_ID"])",
     "-e", "CHESS_SFT_OUTPUT=/data/chess_sft_data",
     "-e", "CHESS_SFT_CHECKPOINTS=/data/chess_sft_checkpoints",
     "-e", "CHESS_SFT_BASE_MODEL=$($config["CHESS_SFT_BASE_MODEL"])",
     "-e", "HF_HOME=/cache/huggingface",
-    "-e", "STOCKFISH_PATH=/usr/games/stockfish",
-    "-e", "WANDB_DIR=/data/wandb",
+    "-e", "STOCKFISH_PATH=$($config["STOCKFISH_PATH"])",
+    "-e", "WANDB_DIR=/data/wandb"
+)
+
+if ($config["HF_TOKEN"]) {
+    $dockerEnvArgs += @("-e", "HF_TOKEN=$($config["HF_TOKEN"])")
+}
+
+if ($config["WANDB_API_KEY"]) {
+    $dockerEnvArgs += @("-e", "WANDB_API_KEY=$($config["WANDB_API_KEY"])")
+}
+if ($config["WANDB_MODE"]) {
+    $dockerEnvArgs += @("-e", "WANDB_MODE=$($config["WANDB_MODE"])")
+}
+if ($config["WANDB_ENTITY"]) {
+    $dockerEnvArgs += @("-e", "WANDB_ENTITY=$($config["WANDB_ENTITY"])")
+}
+if ($config["WANDB_BASE_URL"]) {
+    $dockerEnvArgs += @("-e", "WANDB_BASE_URL=$($config["WANDB_BASE_URL"])")
+}
+
+$dockerArgs = @(
+    "run",
+    "--rm",
+    "--gpus", "all"
+) + $dockerEnvArgs + @(
     "-v", "${repoRoot}:/workspace",
     "-v", "$($config["CHESS_SFT_OUTPUT_HOST"]):/data/chess_sft_data",
     "-v", "$($config["CHESS_SFT_CHECKPOINTS_HOST"]):/data/chess_sft_checkpoints",
     "-v", "$($config["HF_CACHE_HOST"]):/cache/huggingface",
     "-v", "$($config["WANDB_HOST_DIR"]):/data/wandb",
-    "-w", "/workspace/sft/training",
+    "-w", "/workspace",
     "chess-sft-training:latest"
 )
-
-if ($config["HF_TOKEN"]) {
-    $dockerArgs += @("-e", "HF_TOKEN=$($config["HF_TOKEN"])")
-}
-
-if ($config["WANDB_API_KEY"]) {
-    $dockerArgs += @("-e", "WANDB_API_KEY=$($config["WANDB_API_KEY"])")
-}
 
 if ($CommandArgs.Count -eq 1 -and $CommandArgs[0] -eq "bash") {
     $dockerArgs = @($dockerArgs[0..1] + @("-it") + $dockerArgs[2..($dockerArgs.Count - 1)])

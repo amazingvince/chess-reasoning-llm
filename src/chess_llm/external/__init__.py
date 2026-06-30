@@ -2,6 +2,7 @@
 
 from chess_llm.external.stockfish import (
     StockfishEngineConfig,
+    StockfishWrapper,
     configure_stockfish_engine,
     open_stockfish,
     stockfish_engine_name,
@@ -9,6 +10,7 @@ from chess_llm.external.stockfish import (
 
 __all__ = [
     "StockfishEngineConfig",
+    "StockfishWrapper",
     "configure_stockfish_engine",
     "open_stockfish",
     "stockfish_engine_name",

@@ -6,12 +6,86 @@ build-backend = "setuptools.build_meta"
 name = "chess_llm"
 version = "0.1.0"
 description = "Chess LLM data, evaluation, and self-guided improvement tooling."
+readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "python-chess>=1.10.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment :: Board Games",
+]
+
+[project.optional-dependencies]
+dev = [
+    "datasets>=3.0.0",
+    "huggingface_hub>=0.24.0",
+    "Pillow>=10.0.0",
+    "py7zr>=0.21.0",
+    "pytest>=8.0.0",
+    "tqdm>=4.66.0",
+]
+data = [
+    "datasets>=3.0.0",
+    "huggingface_hub>=0.24.0",
+    "Pillow>=10.0.0",
+    "py7zr>=0.21.0",
+    "tqdm>=4.66.0",
+]
+ui = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+]
+eval = [
+    "datasets>=3.0.0",
+    "torch>=2.8.0,<2.13.0",
+    "tqdm>=4.66.0",
+    "transformers>=5.3.0,<5.13.0",
+    "wandb>=0.19.0",
+]
+train = [
+    "accelerate>=1.0.0",
+    "datasets>=3.0.0",
+    "kernels>=0.14.0,<0.15.0; platform_system == 'Linux'",
+    "liger-kernel>=0.5.0; platform_system == 'Linux'",
+    "torch>=2.8.0,<2.13.0",
+    "tqdm>=4.66.0",
+    "transformers>=5.3.0,<5.13.0",
+    "trl>=1.7.0,<2.0.0",
+    "wandb>=0.19.0",
+]
+vllm = [
+    "vllm",
+]
+
+[project.scripts]
+chess-llm-batch-judge = "chess_llm.evals.batch_judge:main"
+chess-llm-download-tablebases = "chess_llm.sft.download_tablebases:main"
+chess-llm-evaluate = "chess_llm.training.evaluate:main"
+chess-llm-extract-polyglot-books = "chess_llm.sft.extract_polyglot_books:main"
+chess-llm-freeze-benchmark = "chess_llm.evals.freeze_benchmark:main"
+chess-llm-make-data = "chess_llm.sft.pipeline:cli"
+chess-llm-preflight = "chess_llm.sft.preflight:main"
+chess-llm-run-benchmark = "chess_llm.evals.run_benchmark:main"
+chess-llm-run-curriculum = "chess_llm.training.run_curriculum:main"
+chess-llm-run-eval-split = "chess_llm.sft.run_eval_split:main"
+chess-llm-run-eval-harness = "chess_llm.evals.run_eval_harness:main"
+chess-llm-sft-refresh = "chess_llm.autodata.sft_refresh:main"
+chess-llm-train = "chess_llm.training.train:main"
+chess-llm-upload-data = "chess_llm.sft.hub_upload:main"
+chess-llm-validate-outputs = "chess_llm.sft.validate_outputs:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+chess_llm = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 asyncio_default_fixture_loop_scope = "function"

@@ -1,7 +1,13 @@
 """Single system prompt used across all SFT training examples."""
 
-SYSTEM_PROMPT = (
-    "You are a chess reasoning engine. You understand chess positions "
-    "in FEN notation and express all moves in UCI notation (e.g., e2e4, "
-    "g1f3, a7a8q for promotion). When analyzing positions, think step by step."
-)
+try:
+    from chess_llm.formats.prompts import SYSTEM_PROMPT
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+
+    _SRC_ROOT = Path(__file__).resolve().parents[3] / "src"
+    sys.path.insert(0, str(_SRC_ROOT))
+    from chess_llm.formats.prompts import SYSTEM_PROMPT
+
+__all__ = ["SYSTEM_PROMPT"]

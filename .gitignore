@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.tmp/
+logs/
 
 # Local environment files
 .env
@@ -13,7 +19,19 @@ sft/make_data/polyglot_opening_books/*.bin
 sft/make_data/data/
 
 # Output data (generated, not source)
+chess_sft_data/
+chess_sft_checkpoints/
 E:/chess_sft_data/
+
+# UI local artifacts
+ui/node_modules/
+ui/dist/
+ui/runs/
+ui/*.tsbuildinfo
+ui/vite.config.d.ts
+ui/vite.config.js
+.superpowers/
+.agents/
 
 # Claude Code local settings
 .claude/

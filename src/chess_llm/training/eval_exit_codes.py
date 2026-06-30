@@ -1,0 +1,11 @@
+"""Shared process exit codes for benchmark evaluation."""
+
+EVAL_SUCCESS_EXIT_CODE = 0
+EVAL_METRIC_FAILURE_EXIT_CODE = 1
+EVAL_INFRA_FAILURE_EXIT_CODE = 2
+
+__all__ = [
+    "EVAL_INFRA_FAILURE_EXIT_CODE",
+    "EVAL_METRIC_FAILURE_EXIT_CODE",
+    "EVAL_SUCCESS_EXIT_CODE",
+]

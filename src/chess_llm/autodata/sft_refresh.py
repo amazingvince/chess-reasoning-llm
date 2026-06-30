@@ -13,18 +13,14 @@ from typing import Sequence
 from chess_llm.artifacts.jsonl import read_jsonl
 from chess_llm.artifacts.schemas import JudgmentArtifact, PromptArtifact, RolloutArtifact
 from chess_llm.autodata.failure_buckets import ILLEGAL_MOVE, LEGAL_UNSCORED, MISSING_FEN, PARSE_FAILURE
-from chess_llm.core.board import canonical_fen_key, is_legal_move, validate_fen
+from chess_llm.core.board import is_legal_move, validate_fen, variant_fen_key
+from chess_llm.sft import build_sft_row
 
 
 FORMAT_REPAIR_TASK = "7.4_autodata_format_repair"
 MOVE_CORRECTION_TASK = "7.5_autodata_move_correction"
 DEFAULT_MOVE_TASK_TYPES = frozenset(
     {"best_move", "puzzle_solve", "endgame_best_move", "tactical_patterns"}
-)
-SYSTEM_PROMPT = (
-    "You are a chess reasoning engine. You understand chess positions "
-    "in FEN notation and express all moves in UCI notation (e.g., e2e4, "
-    "g1f3, a7a8q for promotion). When analyzing positions, think step by step."
 )
 _UCI_RE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$")
 
@@ -105,7 +101,7 @@ def build_sft_refresh(
             skip_reasons["missing_target_move"] += 1
             continue
 
-        dedupe_key = (row_task, canonical_fen_key(fen), target_move)
+        dedupe_key = (row_task, variant_fen_key(fen, chess960=chess960), target_move)
         if dedupe_key in seen_keys:
             skip_reasons["duplicate"] += 1
             continue
@@ -325,8 +321,12 @@ def _is_chess960(prompt: PromptArtifact) -> bool:
     benchmark_metadata = prompt.metadata.get("benchmark_metadata")
     if isinstance(benchmark_metadata, dict) and benchmark_metadata.get("is_chess960") is not None:
         return bool(benchmark_metadata["is_chess960"])
+    if isinstance(benchmark_metadata, dict) and benchmark_metadata.get("chess960_id") is not None:
+        return True
     if prompt.metadata.get("is_chess960") is not None:
         return bool(prompt.metadata["is_chess960"])
+    if prompt.metadata.get("chess960_id") is not None:
+        return True
     task_type = str(prompt.task_type or prompt.metadata.get("task_type") or "")
     return task_type.endswith("_960") or task_type == "chess960"
 
@@ -346,32 +346,36 @@ def _build_training_row(
     rollouts_path: Path,
     judgments_path: Path,
 ) -> dict:
-    return {
-        "task": task,
-        "tier": 7,
-        "fen": fen,
-        "is_chess960": chess960,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": _assistant_content(task, target_move)},
-        ],
-        "metadata": {
-            "source": "autodata_sft_refresh",
-            "source_prompt_id": prompt.prompt_id,
-            "source_rollout_id": rollout.rollout_id,
-            "source_judgment_id": judgment.judgment_id,
-            "model_id": rollout.model_id,
-            "failure_bucket": judgment.failure_bucket,
-            "regret_cp": judgment.regret_cp,
-            "parsed_model_move_uci": rollout.parsed_answer.move_uci,
-            "target_move_uci": target_move,
-            "target_source": target_source,
-            "source_prompts_path": str(prompts_path),
-            "source_rollouts_path": str(rollouts_path),
-            "source_judgments_path": str(judgments_path),
-        },
+    benchmark_metadata = prompt.metadata.get("benchmark_metadata")
+    chess960_id = prompt.metadata.get("chess960_id")
+    if chess960_id is None and isinstance(benchmark_metadata, dict):
+        chess960_id = benchmark_metadata.get("chess960_id")
+    metadata = {
+        "source": "autodata_sft_refresh",
+        "source_prompt_id": prompt.prompt_id,
+        "source_rollout_id": rollout.rollout_id,
+        "source_judgment_id": judgment.judgment_id,
+        "model_id": rollout.model_id,
+        "failure_bucket": judgment.failure_bucket,
+        "regret_cp": judgment.regret_cp,
+        "parsed_model_move_uci": rollout.parsed_answer.move_uci,
+        "target_move_uci": target_move,
+        "target_source": target_source,
+        "source_prompts_path": str(prompts_path),
+        "source_rollouts_path": str(rollouts_path),
+        "source_judgments_path": str(judgments_path),
     }
+    if chess960_id is not None:
+        metadata["chess960_id"] = chess960_id
+    return build_sft_row(
+        task=task,
+        tier=7,
+        fen=fen,
+        is_chess960=chess960,
+        user_prompt=user_prompt,
+        assistant_content=_assistant_content(task, target_move),
+        metadata=metadata,
+    )
 
 
 def _assistant_content(task: str, target_move: str) -> str:

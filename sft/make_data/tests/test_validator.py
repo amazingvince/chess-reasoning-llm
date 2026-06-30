@@ -2,6 +2,12 @@
 
 import chess
 import pytest
+import sys
+from pathlib import Path
+
+_SRC_ROOT = Path(__file__).resolve().parents[3] / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 from conftest import (
     CHECKMATE_FEN,
@@ -19,6 +25,14 @@ from validation.validator import (
     validate_template_complete,
     validate_think_move_format,
 )
+from chess_llm.formats.answers import (
+    extract_uci_from_move_tag as package_extract_uci_from_move_tag,
+)
+from chess_llm.formats.answers import (
+    validate_think_move_format as package_validate_think_move_format,
+)
+from chess_llm.sft.validation import validate_example as package_validate_example
+from chess_llm.sft.validation import validate_fen as package_validate_fen
 
 # ── validate_fen ─────────────────────────────────────────────────────
 
@@ -33,6 +47,10 @@ def test_validate_fen_invalid():
 
 def test_validate_fen_empty():
     assert validate_fen("") is False
+
+
+def test_validate_fen_rejects_parseable_impossible_board():
+    assert validate_fen("8/8/8/8/8/8/8/8 w - - 0 1") is False
 
 
 # ── validate_legal_moves ─────────────────────────────────────────────
@@ -124,6 +142,20 @@ def test_think_move_format_missing_think():
 def test_think_move_format_with_promotion():
     text = "<think>Promote to queen.</think>\n<move>a7a8q</move>"
     assert validate_think_move_format(text) is True
+
+
+def test_validator_reuses_package_answer_protocol_helpers():
+    from validation import validator
+
+    assert validate_think_move_format is package_validate_think_move_format
+    assert validator._extract_uci_from_move_tag is package_extract_uci_from_move_tag
+
+
+def test_validator_reuses_package_row_validation_helpers():
+    from validation import validator
+
+    assert validator.validate_example is package_validate_example
+    assert validator.validate_fen is package_validate_fen
 
 
 # ── validate_example — task-aware semantic checks ────────────────────

@@ -1,4 +1,9 @@
-from chess_llm.formats.answers import parse_answer
+from chess_llm.formats.answers import (
+    extract_move,
+    extract_uci_from_move_tag,
+    parse_answer,
+    validate_think_move_format,
+)
 
 
 def test_parse_answer_prefers_move_tag():
@@ -35,3 +40,25 @@ def test_parse_answer_rejects_ambiguous_prose_moves():
     assert parsed.move_uci is None
     assert parsed.format_type == "none"
     assert "ambiguous" in parsed.parse_error
+
+
+def test_parse_answer_allows_flexible_move_tag_without_relaxing_strict_protocol():
+    parsed = parse_answer("<think>Center.</think>\n<move> E2E4 </move>")
+
+    assert parsed.move_uci == "e2e4"
+    assert parsed.format_type == "move_tag"
+    assert validate_think_move_format("<think>Center.</think>\n<move>e2e4</move>") is True
+    assert validate_think_move_format("<think>Center.</think>\n<move> E2E4 </move>") is False
+
+
+def test_strict_move_tag_extraction_is_for_protocol_metrics():
+    assert extract_uci_from_move_tag("<think>x</think><move>a7a8q</move>") == "a7a8q"
+    assert extract_uci_from_move_tag("<move> E2E4 </move>") is None
+    assert extract_uci_from_move_tag("<MOVE>e2e4</MOVE>") is None
+
+
+def test_extract_move_preserves_benchmark_first_uci_semantics():
+    assert extract_move("<move>e2e4</move>") == "e2e4"
+    assert extract_move("e2e4") == "e2e4"
+    assert extract_move("I prefer e2e4 over d2d4.") == "e2e4"
+    assert extract_move("no move") is None

@@ -2,7 +2,7 @@
 
 **Phase**: SFT Stage 1, Phase A
 **Prerequisites**: Stage 0 complete (data preparation, eval splits generated)
-**Data volume**: ~810K examples
+**Data volume**: ~1.19M examples
 **Training**: 2-3 epochs
 **Focus**: FEN comprehension, legal move generation, board manipulation
 
@@ -92,25 +92,73 @@ Count pieces by type and side. Compute material balance.
 
 **Templates**: 6 variants across subtask types
 **Subtask types**:
-- Full count for both sides
-- "How many {piece_type}s does {color} have?"
-- "Total piece count?"
-- "How many minor pieces?" (bishops + knights)
-- "Who has more material?"
+- Default Phase A data: full count for both sides plus material balance
+- Optional partial-count prompts: color totals, piece-type totals, and minor
+  pieces via `piece_counting_include_partial=True`
+
+**Output**: Compact counts and material balance only; detailed square inventories
+belong in the side-piece inventory task.
 
 **Volume**: ~80K
 **Source**: Positions sampled across material-balance spectrum
 
 ### Task 1.5: State Tracking
 
-Given a FEN and a sequence of moves FROM REAL GAMES, predict resulting FEN.
+Given a FEN and a short sequence of legal moves, predict the resulting FEN.
 
 **Templates**: 6 variants
-**Move sequences**: 1-8 moves, extracted from Lichess games (Elo ≥ 2000)
-**Distribution**: ~30% 1-2 moves, ~40% 3-5 moves, ~30% 6-8 moves
+**Move sequences**: one ply by default
+**Output**: `Result FEN: ...` only. The square/rank trace is taught separately
+by Task 1.8 and Task 1.9.
 **Volume**: ~100K
-**Source**: Lichess standard-chess-games, replayed with python-chess
+**Source**: Lichess game positions with FEN-pool fallback, replayed with python-chess
 **Validation**: Every resulting FEN is verified with python-chess
+
+### Task 1.6: Square Lookup
+
+Given a FEN and a square, return the explicit square lookup.
+
+**Output format**: `d1=white queen` or `f3=empty`
+**Volume**: ~100K
+**Purpose**: Teach direct FEN square addressing before full state tracking.
+
+### Task 1.7: Rank Lookup
+
+Given a FEN and a rank, return the compressed FEN row for that rank.
+
+**Output format**: `rank 1: RNBQKBNR`
+**Volume**: ~80K
+**Purpose**: Teach rank-row indexing and compressed empty-square notation.
+
+### Task 1.8: Move Square Edits
+
+Given a FEN and one legal move, return only the square lookup/edit trace.
+
+**Output format**:
+```
+Lookup: d1=white queen; f3=empty.
+Squares: d1 white queen->empty; f3 empty->white queen.
+Ranks: rank 1 d Q->1; rank 3 f 1->Q.
+```
+
+**Volume**: ~100K
+**Purpose**: Teach the edit mechanics used inside state tracking without also
+requiring the final full-FEN reconstruction.
+
+### Task 1.10: FEN Row Application
+
+Given a FEN and one legal move, return the affected compressed FEN rank-row
+rewrite(s), then the final full FEN.
+
+**Output format**:
+```
+Rows: rank 8 3qk3->4k3; rank 4 8->3q4.
+Result FEN: 4k3/8/8/8/3q4/8/8/4K3 w - - 1 2
+```
+
+**Volume**: ~100K
+**Purpose**: Bridge square edits to actual FEN assembly by teaching whole-row
+replacement directly, without repeating the longer lookup trace.
 
 ---
 
@@ -196,7 +244,7 @@ Include a dedicated Chess960 eval split:
 
 ## Training Configuration
 
-**Data**: ~810K examples (440K Tier 1 + 370K Tier 2)
+**Data**: ~1.19M examples (820K Tier 1 + 370K Tier 2)
 **Epochs**: 2-3
 **Mixing**: Shuffle all Tier 1 and Tier 2 examples together. Do not
 train tiers sequentially within the phase.
@@ -215,8 +263,7 @@ Phase A training completes. Key metrics:
 | Board → FEN accuracy (exact match) | > 85% |
 | Piece ID accuracy | > 90% |
 | Piece count accuracy | > 95% |
-| State tracking (1-2 moves, exact FEN) | > 80% |
-| State tracking (3-5 moves, exact FEN) | > 65% |
+| State tracking (1 move, exact FEN) | > 80% |
 | Legal move gen accuracy (exact set) | > 85% |
 | Legality check accuracy (binary) | > 90% |
 | Check/checkmate detection | > 85% |
@@ -230,7 +277,7 @@ All of the following must be met:
 - Board print: > 90% exact match
 - Legal moves: > 85% exact set match
 - Legality check: > 90% accuracy
-- State tracking (1-2 moves): > 80% exact match
+- State tracking (1 move): > 80% exact match
 - No Tier 1-2 metric below 65%
 
 If criteria are not met, extend training for 1-2 additional epochs or
@@ -245,6 +292,9 @@ investigate data quality issues before proceeding.
 - [ ] Generate Task 1.3 data (Piece Identification, ~100K)
 - [ ] Generate Task 1.4 data (Piece Counting, ~80K)
 - [ ] Generate Task 1.5 data (State Tracking, ~100K)
+- [ ] Generate Task 1.6 data (Square Lookup, ~100K)
+- [ ] Generate Task 1.7 data (Rank Lookup, ~80K)
+- [ ] Generate Task 1.8 data (Move Square Edits, ~100K)
 - [ ] Generate Task 2.1 data (Legal Move Gen, ~100K)
 - [ ] Generate Task 2.2 data (Piece-Specific Moves, ~80K)
 - [ ] Generate Task 2.3 data (Legality Verification, ~80K)

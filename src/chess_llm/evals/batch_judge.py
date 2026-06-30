@@ -125,12 +125,13 @@ def judge_prediction_file(
                     "prediction_index": row_index,
                     "source_predictions_path": str(prediction_path),
                 }
+                prompt_chess960 = _prompt_chess960(prompt, default=chess960)
                 if engine is None:
                     judgment = judge_rollout(
                         prompt,
                         rollout,
                         judgment_id=f"judgment-{row_index:06d}-{example_id}",
-                        chess960=chess960,
+                        chess960=prompt_chess960,
                         metadata=judgment_metadata,
                     )
                 else:
@@ -140,7 +141,7 @@ def judge_prediction_file(
                         engine,
                         judgment_id=f"judgment-{row_index:06d}-{example_id}",
                         depth=stockfish_depth,
-                        chess960=chess960,
+                        chess960=prompt_chess960,
                         metadata=judgment_metadata,
                     )
                 judgments.append(judgment)
@@ -296,6 +297,22 @@ def _resolved_splits(
         if prompt.metadata.get("split") is not None
     ]
     return sorted(dict.fromkeys(found))
+
+
+def _prompt_chess960(prompt: PromptArtifact, *, default: bool = False) -> bool:
+    """Return whether this prompt should be judged with Chess960 rules."""
+    benchmark_metadata = prompt.metadata.get("benchmark_metadata")
+    if isinstance(benchmark_metadata, dict) and benchmark_metadata.get("is_chess960") is not None:
+        return bool(benchmark_metadata["is_chess960"])
+    if isinstance(benchmark_metadata, dict) and benchmark_metadata.get("chess960_id") is not None:
+        return True
+    if prompt.metadata.get("is_chess960") is not None:
+        return bool(prompt.metadata["is_chess960"])
+    if prompt.metadata.get("chess960_id") is not None:
+        return True
+
+    task_type = str(prompt.task_type or prompt.metadata.get("task_type") or "")
+    return default or task_type.endswith("_960") or task_type == "chess960"
 
 
 if __name__ == "__main__":

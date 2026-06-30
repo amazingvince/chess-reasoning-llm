@@ -178,6 +178,60 @@ class JudgmentArtifact:
 
 
 @dataclass
+class EvaluationRunArtifact:
+    """Metadata for one benchmark evaluation run."""
+
+    run_id: str
+    created_at_utc: str
+    model_id: str
+    phase: str | None
+    benchmark_dir: str
+    benchmark_manifest_path: str | None
+    benchmark_version: str
+    predictions_path: str
+    results_path: str
+    return_code: int
+    split_counts: dict[str, int]
+    has_acpl: bool = False
+    n_failures: int = 0
+    inference: dict[str, Any] = field(default_factory=dict)
+    scoring: dict[str, Any] = field(default_factory=dict)
+    gate: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = field(default=SCHEMA_VERSION, init=False)
+    artifact_type: str = field(default="evaluation_run", init=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvaluationRunArtifact":
+        _require_artifact(payload, "evaluation_run")
+        return cls(
+            run_id=str(payload["run_id"]),
+            created_at_utc=str(payload["created_at_utc"]),
+            model_id=str(payload["model_id"]),
+            phase=payload.get("phase"),
+            benchmark_dir=str(payload["benchmark_dir"]),
+            benchmark_manifest_path=payload.get("benchmark_manifest_path"),
+            benchmark_version=str(payload.get("benchmark_version", "unknown")),
+            predictions_path=str(payload["predictions_path"]),
+            results_path=str(payload["results_path"]),
+            return_code=int(payload["return_code"]),
+            split_counts={
+                str(key): int(value)
+                for key, value in payload.get("split_counts", {}).items()
+            },
+            has_acpl=bool(payload.get("has_acpl", False)),
+            n_failures=int(payload.get("n_failures", 0)),
+            inference=_metadata(payload.get("inference")),
+            scoring=_metadata(payload.get("scoring")),
+            gate=_metadata(payload.get("gate")),
+            metadata=_metadata(payload.get("metadata")),
+        )
+
+
+@dataclass
 class PreferencePairArtifact:
     """Chosen/rejected pair for preference-style training."""
 

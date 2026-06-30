@@ -1,7 +1,9 @@
 """Tests for pool/eval_split.py — split exclusivity, sizing, blocklist (~7 cases)."""
 
 import pytest
+import chess
 
+from chess_llm.core.board import variant_fen_key
 from pool import eval_split
 
 
@@ -52,9 +54,9 @@ def test_build_blocklist_excludes_empty():
         "b": [{"fen": "f3"}],
     }
     blocklist = eval_split.build_blocklist(splits)
-    assert "f1" in blocklist
-    assert "f2" in blocklist
-    assert "f3" in blocklist
+    assert "std:f1" in blocklist
+    assert "std:f2" in blocklist
+    assert "std:f3" in blocklist
     assert "" not in blocklist
 
 
@@ -66,15 +68,47 @@ def test_blocklist_uses_position_key_not_move_counters():
 
     blocklist = eval_split.build_blocklist(splits)
 
-    assert eval_split.canonical_fen_key(fen_train_same_position) in blocklist
+    assert variant_fen_key(fen_train_same_position) in blocklist
+
+
+def test_blocklist_normalizes_impossible_en_passant_square():
+    """Impossible EP fields should not bypass decontamination."""
+    fen_with_impossible_ep = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq d3 0 1"
+    )
+    fen_without_ep = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"
+    )
+    splits = {"perception": [{"fen": fen_with_impossible_ep}]}
+
+    blocklist = eval_split.build_blocklist(splits)
+
+    assert variant_fen_key(fen_without_ep) in blocklist
+
+
+def test_blocklist_preserves_chess960_castling_rights(tmp_path):
+    board = chess.Board.from_chess960_pos(0)
+    board.chess960 = True
+    fen = board.fen()
+    splits = {"chess960": [{"fen": fen, "is_chess960": True, "chess960_id": 0}]}
+
+    expected_key = variant_fen_key(fen, chess960=True)
+    blocklist = eval_split.build_blocklist(splits)
+
+    assert expected_key in blocklist
+    assert expected_key.removeprefix("960:").split()[2] == "KQkq"
+
+    eval_split.save_eval_splits(splits, str(tmp_path / "splits"))
+    loaded = eval_split.load_blocklist(str(tmp_path / "splits" / "blocklist.txt"))
+    assert expected_key in loaded
 
 
 def test_save_load_blocklist(tmp_path):
     splits = {"test_split": [{"fen": "fen_a"}, {"fen": "fen_b"}]}
     eval_split.save_eval_splits(splits, str(tmp_path / "splits"))
     blocklist = eval_split.load_blocklist(str(tmp_path / "splits" / "blocklist.txt"))
-    assert "fen_a" in blocklist
-    assert "fen_b" in blocklist
+    assert "std:fen_a" in blocklist
+    assert "std:fen_b" in blocklist
 
 
 def test_empty_source(monkeypatch):

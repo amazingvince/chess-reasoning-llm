@@ -1,146 +1,64 @@
-"""
-Global settings for the chess SFT data pipeline.
-
-Paths, volume targets, depth filters, Chess960 mix ratios, eval buckets,
-and reproducibility seeds.
-"""
+"""Compatibility wrapper for package-owned SFT data settings."""
 
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# HuggingFace cache — redirect to E: drive BEFORE any HF import
-# ---------------------------------------------------------------------------
-HF_CACHE_DIR = "E:/hf_cache"
-os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
+try:
+    from chess_llm.sft.settings import SftDataSettings, apply_hf_cache_env
+except ModuleNotFoundError:
+    _SRC_ROOT = Path(__file__).resolve().parents[3] / "src"
+    sys.path.insert(0, str(_SRC_ROOT))
+    from chess_llm.sft.settings import SftDataSettings, apply_hf_cache_env
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # sft/make_data/
 
-STOCKFISH_PATH: str = os.environ.get(
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SETTINGS = SftDataSettings.from_env(_PROJECT_ROOT)
+apply_hf_cache_env(SETTINGS)
+
+HF_CACHE_DIR = SETTINGS.hf_cache_dir
+STOCKFISH_PATH = SETTINGS.stockfish_path
+SYZYGY_PATH = SETTINGS.syzygy_path
+POLYGLOT_DIR = SETTINGS.polyglot_dir
+OUTPUT_DIR = SETTINGS.output_dir
+POOL_DIR = SETTINGS.pool_dir
+EVAL_SPLITS_DIR = SETTINGS.eval_splits_dir
+ANNOTATIONS_DIR = SETTINGS.annotations_dir
+TIER_OUTPUT_DIR = SETTINGS.tier_output_dir
+BENCHMARK_DIR = SETTINGS.benchmark_dir
+
+HF_DATASETS = dict(SETTINGS.hf_datasets)
+VOLUMES = dict(SETTINGS.volumes)
+MIN_ELO_GAMES = SETTINGS.min_elo_games
+MIN_DEPTH_TRAINING = SETTINGS.min_depth_training
+MIN_DEPTH_BESTMOVE = SETTINGS.min_depth_bestmove
+MIN_DEPTH_EVAL_BENCHMARK = SETTINGS.min_depth_eval_benchmark
+CHESS960_RATIOS = dict(SETTINGS.chess960_ratios)
+EVAL_BUCKETS = list(SETTINGS.eval_buckets)
+EVAL_SPLIT_SIZES = dict(SETTINGS.eval_split_sizes)
+MASTER_SEED = SETTINGS.master_seed
+
+__all__ = [
+    "ANNOTATIONS_DIR",
+    "BENCHMARK_DIR",
+    "CHESS960_RATIOS",
+    "EVAL_BUCKETS",
+    "EVAL_SPLIT_SIZES",
+    "EVAL_SPLITS_DIR",
+    "HF_CACHE_DIR",
+    "HF_DATASETS",
+    "MASTER_SEED",
+    "MIN_DEPTH_BESTMOVE",
+    "MIN_DEPTH_EVAL_BENCHMARK",
+    "MIN_DEPTH_TRAINING",
+    "MIN_ELO_GAMES",
+    "OUTPUT_DIR",
+    "POLYGLOT_DIR",
+    "POOL_DIR",
+    "SETTINGS",
     "STOCKFISH_PATH",
-    "C:/Users/amazi/Downloads/stockfish/stockfish/stockfish-windows-x86-64-avx512icl.exe",
-)
-SYZYGY_PATH: str = os.environ.get(
-    "SYZYGY_PATH", str(_PROJECT_ROOT / "data" / "syzygy")
-)
-POLYGLOT_DIR: str = str(_PROJECT_ROOT / "polyglot_opening_books")
-
-OUTPUT_DIR = Path(os.environ.get("CHESS_SFT_OUTPUT", "E:/chess_sft_data"))
-POOL_DIR = OUTPUT_DIR / "pool"
-EVAL_SPLITS_DIR = OUTPUT_DIR / "eval_splits"
-ANNOTATIONS_DIR = OUTPUT_DIR / "annotations"
-TIER_OUTPUT_DIR = OUTPUT_DIR / "output"
-BENCHMARK_DIR = OUTPUT_DIR / "benchmark"
-
-# ---------------------------------------------------------------------------
-# HuggingFace dataset IDs
-# ---------------------------------------------------------------------------
-HF_DATASETS: dict[str, str] = {
-    "lichess_games": "Lichess/standard-chess-games",
-    "lichess_puzzles": "Lichess/chess-puzzles",
-    "lichess_openings": "Lichess/chess-openings",
-    "lichess_evals": "Lichess/chess-position-evaluations",
-    "mate": "OutFlankShu/MATE_DATASET",
-}
-
-# ---------------------------------------------------------------------------
-# Volume targets per task  (task_id -> count)
-# ---------------------------------------------------------------------------
-VOLUMES: dict[str, int] = {
-    # Tier 1 — Perception (~440K)
-    "1.1_fen_to_board": 80_000,
-    "1.2_board_to_fen": 80_000,
-    "1.3_piece_identification": 100_000,
-    "1.4_piece_counting": 80_000,
-    "1.5_state_tracking": 100_000,
-    # Tier 2 — Rules (~370K)
-    "2.1_legal_move_gen": 100_000,
-    "2.2_piece_specific_moves": 80_000,
-    "2.3_move_legality_check": 80_000,
-    "2.4_check_detection": 60_000,
-    "2.5_special_rules": 50_000,
-    # Tier 3 — Tactics (~260K)
-    "3.1_available_captures": 60_000,
-    "3.2_threats": 50_000,
-    "3.3_attacked_defended": 60_000,
-    "3.4_tactical_patterns": 50_000,
-    "3.5_hanging_pieces": 40_000,
-    # Tier 4 — Evaluation (~150K)
-    "4.1_material_balance": 50_000,
-    "4.2_position_evaluation": 60_000,
-    "4.3_pawn_structure": 40_000,
-    # Tier 5 — Openings (~30K; ~3,090 train openings × 3-5 variants each)
-    "5.1_opening_identification": 10_000,
-    "5.2_opening_continuation": 10_000,
-    "5.3_opening_principles": 10_000,
-    # Tier 6 — Endgames (~140K)
-    "6.1_endgame_classification": 30_000,
-    "6.2_endgame_wdl": 40_000,
-    "6.3_endgame_best_move": 40_000,
-    "6.4_endgame_principles": 30_000,
-    # Tier 7 — Planning (~170K)
-    "7.1_best_move_selection": 80_000,
-    "7.2_puzzle_solving": 50_000,
-    "7.3_move_consequence": 40_000,
-}
-
-# ---------------------------------------------------------------------------
-# Elo filters
-# ---------------------------------------------------------------------------
-MIN_ELO_GAMES = 1200  # min Elo for both players in streamed Lichess games
-
-# ---------------------------------------------------------------------------
-# Depth filters
-# ---------------------------------------------------------------------------
-MIN_DEPTH_TRAINING = 20
-MIN_DEPTH_BESTMOVE = 30
-MIN_DEPTH_EVAL_BENCHMARK = 40
-
-# ---------------------------------------------------------------------------
-# Chess960 mix ratios  (tier number -> fraction of examples that are Chess960)
-# ---------------------------------------------------------------------------
-CHESS960_RATIOS: dict[int, float] = {
-    1: 0.20,
-    2: 0.20,
-    3: 0.15,
-    4: 0.10,
-    5: 0.05,
-    6: 0.05,
-    7: 0.10,
-}
-
-# ---------------------------------------------------------------------------
-# Evaluation buckets  (low_cp, high_cp, label)
-# ---------------------------------------------------------------------------
-EVAL_BUCKETS: list[tuple[int, int, str]] = [
-    (0, 50, "equal"),
-    (50, 150, "slight edge"),
-    (150, 300, "clear advantage"),
-    (300, 600, "winning"),
-    (600, 100_000, "decisive"),
+    "SYZYGY_PATH",
+    "TIER_OUTPUT_DIR",
+    "VOLUMES",
 ]
-
-# ---------------------------------------------------------------------------
-# Eval split sizes  (split_name -> count)
-# ---------------------------------------------------------------------------
-EVAL_SPLIT_SIZES: dict[str, int] = {
-    "perception": 2_000,
-    "rules": 2_000,
-    "tactics": 2_000,
-    "evaluation": 1_500,
-    "openings": 500,
-    "endgames": 1_500,
-    "planning": 2_000,
-    "chess960": 500,
-    "mate": 1_000,
-}
-
-# ---------------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------------
-MASTER_SEED = 42

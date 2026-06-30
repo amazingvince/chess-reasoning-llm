@@ -17,12 +17,20 @@ from conftest import (
 def test_gold_board_print():
     from random import Random
     from validation.benchmark import derive_gold_answer
-    from generators.base import _board_to_ascii
+    from chess_llm.formats import render_ascii_board
 
     raw = {"fen": STARTING_FEN}
     gold = derive_gold_answer("board_print", raw, Random(42))
-    expected = _board_to_ascii(chess.Board(STARTING_FEN))
+    expected = render_ascii_board(chess.Board(STARTING_FEN))
     assert gold == expected
+
+
+def test_render_prompt_board_to_fen_bad_fen_preserves_empty_board_fallback():
+    from validation.benchmark import _render_prompt
+
+    assert _render_prompt("board_to_fen", {"fen": "not a fen"}) == (
+        "Here is the current board:\n\nWrite the FEN for this position."
+    )
 
 
 def test_gold_board_to_fen():
@@ -107,7 +115,7 @@ def test_chess960_legal_moves_use_chess960_rules():
     from random import Random
     from validation.benchmark import derive_gold_answer
 
-    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    fen = "bbqnnrkr/pppppppp/8/8/8/8/PPPPPPPP/BBQNNRKR w KQkq - 0 1"
     raw = {"fen": fen, "is_chess960": True}
 
     gold = derive_gold_answer("legal_moves_960", raw, Random(42))
@@ -118,11 +126,23 @@ def test_chess960_legal_moves_use_chess960_rules():
     assert gold == expected
 
 
-def test_chess960_castling_rules_use_chess960_rights():
+def test_chess960_castling_rules_require_legal_castle_moves():
     from random import Random
     from validation.benchmark import derive_gold_answer
 
-    fen = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
+    fen = "bbqnnrkr/pppppppp/8/8/8/8/PPPPPPPP/BBQNNRKR w KQkq - 0 1"
+    raw = {"fen": fen, "is_chess960": True}
+
+    gold = derive_gold_answer("castling_rules_960", raw, Random(42))
+
+    assert gold == "No castling available."
+
+
+def test_chess960_castling_rules_report_legal_castle_sides():
+    from random import Random
+    from validation.benchmark import derive_gold_answer
+
+    fen = "1r4kr/8/8/8/8/8/8/1R4KR w KQkq - 0 1"
     raw = {"fen": fen, "is_chess960": True}
 
     gold = derive_gold_answer("castling_rules_960", raw, Random(42))
@@ -170,7 +190,16 @@ def test_gold_special_rules_matches_training_format():
     gold = derive_gold_answer("special_rules", raw, Random(42))
     # SpecialRules format uses "Castling available:" / "En passant possible:"
     assert "En passant possible:" in gold
-    assert "Castling available:" in gold
+
+
+def test_gold_special_rules_does_not_treat_blocked_rights_as_castling():
+    from random import Random
+    from validation.benchmark import derive_gold_answer
+
+    raw = {"fen": STARTING_FEN}
+    gold = derive_gold_answer("special_rules", raw, Random(42))
+
+    assert gold == "No special moves available."
 
 
 def test_gold_special_rules_no_specials():
@@ -267,9 +296,9 @@ def test_gold_castling_rules_960():
     from random import Random
     from validation.benchmark import derive_gold_answer
 
-    raw = {"fen": STARTING_FEN}
+    raw = {"fen": "1r4kr/8/8/8/8/8/8/1R4KR w KQkq - 0 1", "is_chess960": True}
     gold = derive_gold_answer("castling_rules_960", raw, Random(42))
-    assert "Castling available:" in gold
+    assert gold == "Castling available: kingside, queenside."
 
 
 def test_gold_binary_choice():
@@ -375,6 +404,14 @@ def test_eval_bucket_mismatch():
     assert eval_bucket_accuracy(
         "White has a decisive advantage.",
         "Position is equal."
+    ) == 0.0
+
+
+def test_eval_bucket_wrong_side_mismatch():
+    from validation.benchmark import eval_bucket_accuracy
+    assert eval_bucket_accuracy(
+        "Black has a slight edge.",
+        "White has a slight edge.",
     ) == 0.0
 
 
