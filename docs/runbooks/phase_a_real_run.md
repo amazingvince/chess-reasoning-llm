@@ -50,6 +50,8 @@ Confirm before a real run:
 
 - `.env` is populated with Hugging Face and W&B credentials.
 - `WANDB_MODE` is unset or set to `online`.
+- `WANDB_GIT_COMMIT` is set to the pushed Windows git SHA before train/eval
+  because the WSL source tree may be rsynced without `.git`.
 - WSL repo path is `/home/amazi/code/chess_sft_sdpo` unless intentionally
   changed.
 - Training venv is `/home/amazi/code/chess_sft_sdpo/.venv`.
@@ -119,6 +121,8 @@ Recommended current task emphasis:
 Command template:
 
 ```powershell
+$env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
+
 .\sft\training\run-wsl.ps1 `
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
@@ -162,6 +166,8 @@ On the current Ubuntu 24 WSL setup, vLLM's default V2 runner hit
 model runner:
 
 ```powershell
+$env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
+
 .\sft\training\run-wsl.ps1 `
   -NoSync `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `

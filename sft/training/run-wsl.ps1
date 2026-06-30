@@ -186,6 +186,7 @@ function Get-RuntimeValue([string]$Key) {
         "WANDB_ENTITY" { if ($env:WANDB_ENTITY) { return $env:WANDB_ENTITY } }
         "WANDB_BASE_URL" { if ($env:WANDB_BASE_URL) { return $env:WANDB_BASE_URL } }
         "WANDB_DISABLED" { if ($env:WANDB_DISABLED) { return $env:WANDB_DISABLED } }
+        "WANDB_GIT_COMMIT" { if ($env:WANDB_GIT_COMMIT) { return $env:WANDB_GIT_COMMIT } }
     }
 
     if ($config.ContainsKey($Key)) {
@@ -276,7 +277,8 @@ foreach ($runtimeKey in @(
     "WANDB_MODE",
     "WANDB_ENTITY",
     "WANDB_BASE_URL",
-    "WANDB_DISABLED"
+    "WANDB_DISABLED",
+    "WANDB_GIT_COMMIT"
 )) {
     $runtimeValue = Get-RuntimeValue $runtimeKey
     if (-not [string]::IsNullOrWhiteSpace($runtimeValue)) {

@@ -229,6 +229,7 @@ def test_wsl_launcher_forwards_wandb_runtime_settings() -> None:
         "WANDB_ENTITY",
         "WANDB_BASE_URL",
         "WANDB_DISABLED",
+        "WANDB_GIT_COMMIT",
     ]:
         assert f"$env:{env_name}" in text
         assert f'"{env_name}"' in text
