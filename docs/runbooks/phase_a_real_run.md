@@ -145,7 +145,14 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
 
 With `--skip-trainer-eval`, `best/` is the final exported model, not the
 best-by-eval-loss checkpoint. `--trainer-save-steps` still creates periodic
-recovery checkpoints.
+recovery checkpoints with Trainer state. To resume an interrupted run from the
+latest saved step checkpoint, relaunch the same training command with:
+
+```text
+--resume-from-checkpoint auto
+```
+
+You can also pass an explicit `checkpoint-N` directory.
 
 For a bounded smoke, also add:
 

@@ -191,7 +191,9 @@ def build_sft_config(
         metric_for_best_model="eval_loss" if trainer_eval else None,
         greater_is_better=False if trainer_eval else None,
         save_safetensors=True,
-        save_only_model=True,
+        # Keep optimizer/scheduler/RNG state in step checkpoints so interrupted
+        # long runs can resume from the periodic recovery checkpoints.
+        save_only_model=False,
         # Logging
         logging_steps=50 if logging_steps is None else logging_steps,
         report_to=report_to,

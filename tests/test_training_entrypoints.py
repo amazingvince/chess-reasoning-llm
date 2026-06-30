@@ -180,6 +180,25 @@ def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     assert args.num_train_epochs == 1.0
 
 
+def test_train_cli_accepts_auto_resume_checkpoint(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "a",
+            "--resume-from-checkpoint",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.resume_from_checkpoint == "auto"
+
+
 def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_path: Path):
     sys.modules.setdefault(
         "trl",
@@ -199,6 +218,7 @@ def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_pa
         inference_backend="transformers",
         skip_eval=True,
         attn_implementation="auto",
+        resume_from_checkpoint=None,
         output_root=tmp_path / "checkpoints",
     )
     overrides = train.RunOverrides(
@@ -221,9 +241,36 @@ def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_pa
     assert "Estimated optimizer steps: 22657" in details
     assert "Warmup steps: 680 (ratio 0.03)" in details
     assert "Trainer eval: disabled" in details
-    assert "Checkpoint saves: every 1000 steps, keep 3" in details
+    assert "Checkpoint saves: every 1000 steps, keep 3 (resumable)" in details
     assert "W&B: enabled project=chess-sft group=phase-a-t12-v25000 run=phase-a-t12-v25000-train git=abc123" in details
     assert "Post-training benchmark eval: skipped" in details
+    assert "Resume: disabled" in details
+
+
+def test_resolve_resume_checkpoint_auto_uses_latest_numbered_checkpoint(tmp_path: Path):
+    from chess_llm.training.train import _resolve_resume_checkpoint
+
+    output_dir = tmp_path / "phase_a"
+    (output_dir / "checkpoint-50").mkdir(parents=True)
+    (output_dir / "checkpoint-100").mkdir()
+    (output_dir / "checkpoint-final").mkdir()
+
+    assert _resolve_resume_checkpoint(output_dir, "auto") == str(
+        output_dir / "checkpoint-100",
+    )
+
+
+def test_resolve_resume_checkpoint_rejects_missing_path(tmp_path: Path):
+    from chess_llm.training.train import _resolve_resume_checkpoint
+
+    missing = tmp_path / "missing-checkpoint"
+
+    try:
+        _resolve_resume_checkpoint(tmp_path, str(missing))
+    except FileNotFoundError as exc:
+        assert str(missing) in str(exc)
+    else:
+        raise AssertionError("missing resume checkpoint should fail")
 
 
 def test_package_train_eval_command_supports_full_benchmark_override(tmp_path: Path):
@@ -832,6 +879,7 @@ def test_skip_trainer_eval_can_still_save_periodic_checkpoints(monkeypatch, tmp_
             load_best_model_at_end=None,
             metric_for_best_model=None,
             greater_is_better=None,
+            save_only_model=None,
         ):
             self.kwargs = dict(locals())
             self.kwargs.pop("self")
@@ -854,6 +902,7 @@ def test_skip_trainer_eval_can_still_save_periodic_checkpoints(monkeypatch, tmp_
     assert cfg.kwargs["save_strategy"] == "steps"
     assert cfg.kwargs["save_steps"] == 250
     assert cfg.kwargs["save_total_limit"] == 3
+    assert cfg.kwargs["save_only_model"] is False
     assert cfg.kwargs["load_best_model_at_end"] is False
     assert cfg.kwargs["metric_for_best_model"] is None
     assert cfg.kwargs["greater_is_better"] is None

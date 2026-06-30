@@ -162,6 +162,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable in-training loss eval and save the final checkpoint as best/",
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="PATH|auto",
+        help=(
+            "Resume Trainer state from a checkpoint path. Pass without a value, "
+            "or pass 'auto', to use the latest checkpoint-N directory under "
+            "the phase output directory."
+        ),
+    )
     parser.add_argument("--wandb-project", type=str, default="chess-sft", help="W&B project name")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B reporting (useful for CI)")
     parser.add_argument(
@@ -527,6 +539,16 @@ def main() -> int:
         train_dataset_size=len(train_ds),
         attn_implementation=selected_attn,
     )
+    try:
+        resume_checkpoint = _resolve_resume_checkpoint(
+            output_dir,
+            args.resume_from_checkpoint,
+        )
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return EVAL_INFRA_FAILURE_EXIT_CODE
+    if resume_checkpoint is not None:
+        logger.info("Resuming training from checkpoint: %s", resume_checkpoint)
 
     # --- Train ---
     logger.info("Starting training...")
@@ -541,7 +563,7 @@ def main() -> int:
         processing_class=tokenizer,
     )
 
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
     train_metrics = _augment_train_metrics_with_token_throughput(
         trainer,
         getattr(train_result, "metrics", {}) or {},
@@ -768,7 +790,7 @@ def _build_dry_run_training_details(
         checkpoint_saves = "disabled during training"
     else:
         save_steps = overrides.save_steps or DEFAULT_TRAINER_SAVE_STEPS
-        checkpoint_saves = f"every {save_steps} steps, keep 3"
+        checkpoint_saves = f"every {save_steps} steps, keep 3 (resumable)"
 
     if args.no_wandb:
         wandb_line = "W&B: disabled"
@@ -780,6 +802,17 @@ def _build_dry_run_training_details(
             f"git={os.environ.get('WANDB_GIT_COMMIT') or '<unset>'}"
         )
 
+    resume_arg = getattr(args, "resume_from_checkpoint", None)
+    if resume_arg is None:
+        resume_line = "Resume: disabled"
+    elif resume_arg == "auto":
+        resume_line = (
+            "Resume: auto from latest checkpoint under "
+            f"{args.output_root / f'phase_{phase.name}'}"
+        )
+    else:
+        resume_line = f"Resume: {resume_arg}"
+
     return [
         f"Estimated optimizer steps: {steps}",
         f"Warmup steps: {warmup_steps} (ratio {phase.warmup_ratio:g})",
@@ -787,6 +820,7 @@ def _build_dry_run_training_details(
         f"Checkpoint saves: {checkpoint_saves}",
         wandb_line,
         f"Post-training benchmark eval: {'skipped' if args.skip_eval else 'enabled'}",
+        resume_line,
         f"Requested attention implementation: {args.attn_implementation}",
         (
             "Training microbatch: "
@@ -794,6 +828,45 @@ def _build_dry_run_training_details(
             f"{GRADIENT_ACCUMULATION_STEPS} accumulation"
         ),
     ]
+
+
+def _resolve_resume_checkpoint(output_dir: Path, requested: str | None) -> str | None:
+    if requested is None:
+        return None
+    if requested == "auto":
+        checkpoint = _find_latest_trainer_checkpoint(output_dir)
+        if checkpoint is None:
+            logger.warning(
+                "Resume auto requested, but no checkpoint-N directory exists under %s; starting fresh",
+                output_dir,
+            )
+            return None
+        return str(checkpoint)
+
+    checkpoint = Path(requested).expanduser()
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"Resume checkpoint does not exist: {checkpoint}")
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(f"Resume checkpoint is not a directory: {checkpoint}")
+    return str(checkpoint)
+
+
+def _find_latest_trainer_checkpoint(output_dir: Path) -> Path | None:
+    latest_step = -1
+    latest_path: Path | None = None
+    if not output_dir.exists():
+        return None
+    for candidate in output_dir.iterdir():
+        if not candidate.is_dir() or not candidate.name.startswith("checkpoint-"):
+            continue
+        step_text = candidate.name.removeprefix("checkpoint-")
+        if not step_text.isdigit():
+            continue
+        step = int(step_text)
+        if step > latest_step:
+            latest_step = step
+            latest_path = candidate
+    return latest_path
 
 
 def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:
