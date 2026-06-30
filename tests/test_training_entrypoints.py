@@ -247,6 +247,74 @@ def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_pa
     assert "Resume: disabled" in details
 
 
+def test_train_dry_run_estimates_steps_from_actual_train_split(monkeypatch, tmp_path: Path):
+    from chess_llm.training import train
+    from chess_llm.training.data import mixer
+
+    class FakeDataset:
+        def __init__(self, size: int):
+            self.size = size
+
+        def __len__(self):
+            return self.size
+
+    captured: dict[str, int] = {}
+
+    monkeypatch.setattr(
+        mixer,
+        "summarize_phase_data",
+        lambda *args, **kwargs: {"tier_1": 100, "total": 100},
+    )
+    monkeypatch.setattr(
+        mixer,
+        "build_phase_dataset",
+        lambda *args, **kwargs: (FakeDataset(90), FakeDataset(10)),
+    )
+
+    def fake_details(*args, train_dataset_size: int, **kwargs):
+        captured["train_dataset_size"] = train_dataset_size
+        return []
+
+    monkeypatch.setattr(train, "_build_dry_run_training_details", fake_details)
+    monkeypatch.setattr(
+        train,
+        "parse_args",
+        lambda: Namespace(
+            phase="a",
+            data_root=tmp_path / "data",
+            output_root=tmp_path / "checkpoints",
+            benchmark_dir=tmp_path / "benchmark",
+            base_model=None,
+            dry_run=True,
+            smoke_run=False,
+            eval_only=False,
+            skip_eval=True,
+            require_phase_gate=False,
+            max_train_examples=None,
+            task_upsample=[],
+            max_eval_examples=None,
+            max_benchmark_examples_per_split=None,
+            full_benchmark_eval=False,
+            max_steps=None,
+            num_train_epochs=1,
+            trainer_eval_steps=None,
+            trainer_save_steps=1000,
+            skip_trainer_eval=True,
+            resume_from_checkpoint=None,
+            wandb_project="chess-sft",
+            no_wandb=True,
+            allow_wandb_offline=False,
+            run_name=None,
+            wandb_group=None,
+            inference_backend="transformers",
+            attn_implementation="auto",
+        ),
+    )
+
+    assert train.main() == 0
+    assert captured["train_dataset_size"] == 90
+
+
 def test_resolve_resume_checkpoint_auto_uses_latest_numbered_checkpoint(tmp_path: Path):
     from chess_llm.training.train import _resolve_resume_checkpoint
 

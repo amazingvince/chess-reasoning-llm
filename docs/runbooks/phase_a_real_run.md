@@ -108,9 +108,11 @@ warmups only.
 
 Current defaults are `per_device_train_batch_size=4` and
 `gradient_accumulation_steps=8`. As a rough guide with one GPU and the current
-`1.5`, `1.9`, `1.10` upsampling idea, `--volume 5000` is about 4,532 optimizer
-steps, `--volume 25000` is about 22,657 steps, and the full Phase A target is
-about 82,188 steps.
+`1.5`, `1.9`, `1.10` upsampling idea, `--volume 5000` is about 4.4k optimizer
+steps. The measured `--volume 25000` rehearsal dry-run is 725,000 pre-split
+effective rows, 708,379 train rows, 10,000 eval rows, 22,137 optimizer steps,
+and 665 warmup steps. The full Phase A target should be estimated by the
+dry-run output before launch rather than by hand.
 
 Recommended current task emphasis:
 
@@ -174,11 +176,15 @@ model runner:
 
 ```powershell
 $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
+$env:CUDA_DEVICE_ORDER = 'PCI_BUS_ID'
+$env:VLLM_USE_V2_MODEL_RUNNER = '0'
+$env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
 
 .\sft\training\run-wsl.ps1 `
   -NoSync `
+  -CudaDeviceId 1 `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
-  -- bash -lc 'export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 VLLM_USE_V2_MODEL_RUNNER=0 VLLM_WORKER_MULTIPROC_METHOD=spawn; chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --run-name phase-a-25k-vllm-eval'
+  -- chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --wandb-run-name phase-a-25k-vllm-eval
 ```
 
 Use the second GPU for sidecar eval. With `CUDA_DEVICE_ORDER=PCI_BUS_ID`, the

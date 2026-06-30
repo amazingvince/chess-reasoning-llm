@@ -192,6 +192,58 @@ Working smoke path:
 The first pass compiles kernels; repeated runs should be faster after caches are
 warm.
 
+### Phase A 25k Rehearsal Preflight - 2026-06-30
+
+Data root:
+
+- `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260630`
+
+Generation and validation:
+
+- Generated tiers 1-2 with `--volume 25000`: 20 task files, 500,000 raw rows.
+- Frozen benchmark: 4,000 examples across perception and rules.
+- Validation pass: 500,000 examples, 0 validation errors.
+- Contamination check: no benchmark/FEN blocklist contamination found.
+- Critical task spot checks all matched `metadata.expected_answer` for 25,000
+  rows each: `1.5`, `1.9`, `1.10`, `1.13`, `1.14`, `2.1`, `2.3`.
+- `1.9_fen_assembly` now has lookup, square edit, rank edit, and exactly one
+  final `Result FEN:` line for every checked row.
+- `2.3_move_legality_check` mix: 12,552 legal and 12,448 illegal rows.
+
+Dry-run config:
+
+- Pre-split effective rows after task upsampling: 725,000.
+- Actual train/eval split: 708,379 train rows, 10,000 eval rows.
+- One-pass estimate: 22,137 optimizer steps, 665 warmup steps.
+- Trainer eval disabled; step checkpoints every 1,000 for the real rehearsal.
+- Periodic checkpoints are now resumable: model, optimizer, scheduler, RNG, and
+  `trainer_state.json` are saved.
+
+Warmup:
+
+- Checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260630-warmup-ada6ae4`
+- Part 1 ran 60 optimizer steps from scratch and wrote full-state checkpoints.
+- Part 2 resumed with `--resume-from-checkpoint auto` from `checkpoint-60` and
+  trained through step 120.
+- Training attention: `auto` selected SDPA.
+- Liger applied to Qwen3 with `cross_entropy=False` and
+  `fused_linear_cross_entropy=False`.
+- Observed token throughput:
+  - 60-step fresh segment: about 10.6k input tokens/sec.
+  - 60-step resumed segment: about 20.7k input tokens/sec.
+
+Sidecar eval:
+
+- vLLM eval ran from `.venv-vllm` on the warmup `best/` checkpoint with
+  `VLLM_USE_V2_MODEL_RUNNER=0`, `--vllm-max-model-len 4096`, and 100 examples
+  per split.
+- vLLM used FlashAttention v2 and wrote predictions, analysis, results, and
+  eval-run metadata under the warmup checkpoint root.
+- W&B eval artifact upload succeeded.
+- Metrics were intentionally poor after only 120 training steps, but the
+  sidecar eval path is mechanically proven on the rehearsal artifacts.
+
 ### Current Critique
 
 The project is now closer to a real package than a pile of scripts, but the

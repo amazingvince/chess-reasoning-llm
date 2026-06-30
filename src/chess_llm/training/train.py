@@ -353,6 +353,46 @@ def main() -> int:
         )
         for key, count in sorted(summary.items()):
             logger.info("  %-12s %8d", key, count)
+        train_ds, eval_ds = build_phase_dataset(
+            phase,
+            args.data_root,
+            task_upsample=task_upsample,
+        )
+        train_split_count = len(train_ds)
+        eval_split_count = len(eval_ds)
+        effective_train_count = (
+            min(train_split_count, overrides.max_train_examples)
+            if overrides.max_train_examples is not None
+            else train_split_count
+        )
+        effective_trainer_eval_count = (
+            0
+            if overrides.skip_trainer_eval
+            else (
+                min(eval_split_count, overrides.max_eval_examples)
+                if overrides.max_eval_examples is not None
+                else eval_split_count
+            )
+        )
+        if effective_train_count != train_split_count:
+            logger.info(
+                "Train split: %d examples (%d after cap)",
+                train_split_count,
+                effective_train_count,
+            )
+        else:
+            logger.info("Train split: %d examples", train_split_count)
+        if overrides.skip_trainer_eval:
+            logger.info(
+                "Eval split: %d examples (trainer eval disabled)",
+                eval_split_count,
+            )
+        else:
+            logger.info(
+                "Eval split: %d examples (%d used by trainer)",
+                eval_split_count,
+                effective_trainer_eval_count,
+            )
         logger.info("Learning rate: %s", phase.learning_rate)
         effective_epochs = overrides.num_train_epochs or phase.epochs
         logger.info("Epochs: %s", _format_epoch_count(effective_epochs))
@@ -363,7 +403,7 @@ def main() -> int:
             phase,
             args,
             overrides,
-            train_dataset_size=summary.get("total", 0),
+            train_dataset_size=effective_train_count,
         ):
             logger.info(detail)
         if args.smoke_run or overrides.max_steps is not None or overrides.num_train_epochs is not None:
