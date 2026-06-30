@@ -347,6 +347,13 @@ def main() -> int:
         logger.info("Packing: False, max_length: 2048")
         logger.info("Effective batch size: 32 (4 * 8 accumulation)")
         logger.info("Eval backend: %s", args.inference_backend)
+        for detail in _build_dry_run_training_details(
+            phase,
+            args,
+            overrides,
+            train_dataset_size=summary.get("total", 0),
+        ):
+            logger.info(detail)
         if args.smoke_run or overrides.max_steps is not None or overrides.num_train_epochs is not None:
             logger.info(
                 "Runtime overrides: train<=%s eval<=%s benchmark/split<=%s epochs=%s max_steps=%s",
@@ -728,6 +735,65 @@ def _format_epoch_count(value: float | int | None) -> str:
     if value is None:
         return "None"
     return f"{value:g}"
+
+
+def _build_dry_run_training_details(
+    phase,
+    args: argparse.Namespace,
+    overrides: RunOverrides,
+    *,
+    train_dataset_size: int,
+) -> list[str]:
+    from chess_llm.training.training_args import (
+        DEFAULT_TRAINER_SAVE_STEPS,
+        GRADIENT_ACCUMULATION_STEPS,
+        PER_DEVICE_TRAIN_BATCH_SIZE,
+        estimate_training_steps,
+    )
+
+    steps = estimate_training_steps(
+        phase,
+        train_dataset_size=train_dataset_size,
+        num_train_epochs=overrides.num_train_epochs,
+        max_steps=overrides.max_steps,
+    )
+    warmup_steps = 0
+    if phase.warmup_ratio > 0 and steps > 0:
+        import math
+
+        warmup_steps = max(1, math.ceil(steps * phase.warmup_ratio))
+
+    trainer_eval = "disabled" if overrides.skip_trainer_eval else "enabled"
+    if overrides.skip_trainer_eval and overrides.save_steps is None:
+        checkpoint_saves = "disabled during training"
+    else:
+        save_steps = overrides.save_steps or DEFAULT_TRAINER_SAVE_STEPS
+        checkpoint_saves = f"every {save_steps} steps, keep 3"
+
+    if args.no_wandb:
+        wandb_line = "W&B: disabled"
+    else:
+        wandb_line = (
+            f"W&B: enabled project={args.wandb_project} "
+            f"group={args.wandb_group or '<none>'} "
+            f"run={args.run_name or f'phase-{phase.name}-train'} "
+            f"git={os.environ.get('WANDB_GIT_COMMIT') or '<unset>'}"
+        )
+
+    return [
+        f"Estimated optimizer steps: {steps}",
+        f"Warmup steps: {warmup_steps} (ratio {phase.warmup_ratio:g})",
+        f"Trainer eval: {trainer_eval}",
+        f"Checkpoint saves: {checkpoint_saves}",
+        wandb_line,
+        f"Post-training benchmark eval: {'skipped' if args.skip_eval else 'enabled'}",
+        f"Requested attention implementation: {args.attn_implementation}",
+        (
+            "Training microbatch: "
+            f"{PER_DEVICE_TRAIN_BATCH_SIZE} per device x "
+            f"{GRADIENT_ACCUMULATION_STEPS} accumulation"
+        ),
+    ]
 
 
 def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:

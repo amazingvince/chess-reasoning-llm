@@ -180,6 +180,52 @@ def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     assert args.num_train_epochs == 1.0
 
 
+def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_path: Path):
+    sys.modules.setdefault(
+        "trl",
+        types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+    )
+    sys.modules.pop("chess_llm.training.training_args", None)
+
+    from chess_llm.training import train
+    from chess_llm.training.phases import PHASE_A
+
+    monkeypatch.setenv("WANDB_GIT_COMMIT", "abc123")
+    args = Namespace(
+        no_wandb=False,
+        wandb_project="chess-sft",
+        wandb_group="phase-a-t12-v25000",
+        run_name="phase-a-t12-v25000-train",
+        inference_backend="transformers",
+        skip_eval=True,
+        attn_implementation="auto",
+        output_root=tmp_path / "checkpoints",
+    )
+    overrides = train.RunOverrides(
+        num_train_epochs=1,
+        save_steps=1000,
+        skip_trainer_eval=True,
+    )
+
+    details = train._build_dry_run_training_details(
+        PHASE_A,
+        args,
+        overrides,
+        train_dataset_size=725000,
+    )
+    training_pkg = sys.modules.get("chess_llm.training")
+    if training_pkg is not None and hasattr(training_pkg, "training_args"):
+        delattr(training_pkg, "training_args")
+    sys.modules.pop("chess_llm.training.training_args", None)
+
+    assert "Estimated optimizer steps: 22657" in details
+    assert "Warmup steps: 680 (ratio 0.03)" in details
+    assert "Trainer eval: disabled" in details
+    assert "Checkpoint saves: every 1000 steps, keep 3" in details
+    assert "W&B: enabled project=chess-sft group=phase-a-t12-v25000 run=phase-a-t12-v25000-train git=abc123" in details
+    assert "Post-training benchmark eval: skipped" in details
+
+
 def test_package_train_eval_command_supports_full_benchmark_override(tmp_path: Path):
     from chess_llm.training.train import _build_eval_cmd
 
