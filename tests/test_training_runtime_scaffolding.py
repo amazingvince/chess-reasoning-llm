@@ -182,7 +182,7 @@ def test_wsl_launcher_runs_from_repo_root() -> None:
     assert "$ScriptBoundParameters = @{} + $PSBoundParameters" in text
     assert "$ScriptBoundParameters.ContainsKey($ParameterName)" in text
     assert ". $(Quote-Bash ($VenvPath.TrimEnd('/') + '/bin/activate'))" in text
-    assert "PYTHONUNBUFFERED=1" in text
+    assert 'PYTHONUNBUFFERED = "1"' in text
     assert "run --no-capture-output -n" in text
     assert "--exclude '.venv/'" in text
     assert "--exclude '.tmp/'" in text
@@ -232,7 +232,9 @@ def test_wsl_launcher_forwards_wandb_runtime_settings() -> None:
     ]:
         assert f"$env:{env_name}" in text
         assert f'"{env_name}"' in text
-    assert '$envPairs += "$runtimeKey=$(Quote-Bash $runtimeValue)"' in text
+    assert "Invoke-WslWithRuntimeEnv" in text
+    assert "[Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], \"Process\")" in text
+    assert 'WANDB_API_KEY=$(Quote-Bash $runtimeValue)' not in text
 
 
 def test_wsl_launcher_forwards_hf_runtime_settings() -> None:
@@ -246,7 +248,9 @@ def test_wsl_launcher_forwards_hf_runtime_settings() -> None:
     ]:
         assert f"$env:{env_name}" in text
         assert f'"{env_name}"' in text
-    assert '$envPairs += "$runtimeKey=$(Quote-Bash $runtimeValue)"' in text
+    assert "Invoke-WslWithRuntimeEnv" in text
+    assert "[Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], \"Process\")" in text
+    assert 'HF_TOKEN=$(Quote-Bash $runtimeValue)' not in text
 
 
 def test_wsl_launcher_forwards_attention_runtime_settings() -> None:
@@ -259,7 +263,7 @@ def test_wsl_launcher_forwards_attention_runtime_settings() -> None:
     ]:
         assert f"$env:{env_name}" in text
         assert f'"{env_name}"' in text
-    assert '$envPairs += "$runtimeKey=$(Quote-Bash $runtimeValue)"' in text
+    assert "Invoke-WslWithRuntimeEnv" in text
 
 
 def test_wsl_launcher_reads_training_env_file_for_runtime_config() -> None:

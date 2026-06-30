@@ -66,6 +66,35 @@ function Invoke-Wsl([string[]]$Arguments) {
     }
 }
 
+function Invoke-WslWithRuntimeEnv([string[]]$Arguments, [hashtable]$Environment) {
+    $previousValues = @{}
+    foreach ($key in $Environment.Keys) {
+        $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], "Process")
+    }
+
+    $previousWslEnv = [Environment]::GetEnvironmentVariable("WSLENV", "Process")
+    $wslEnvParts = @()
+    if (-not [string]::IsNullOrWhiteSpace($previousWslEnv)) {
+        $wslEnvParts += $previousWslEnv.Split(":") | Where-Object { $_ }
+    }
+    foreach ($key in $Environment.Keys) {
+        if ($wslEnvParts -notcontains $key) {
+            $wslEnvParts += $key
+        }
+    }
+    [Environment]::SetEnvironmentVariable("WSLENV", ($wslEnvParts -join ":"), "Process")
+
+    try {
+        Invoke-Wsl $Arguments
+    } finally {
+        foreach ($key in $Environment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $previousValues[$key], "Process")
+        }
+        [Environment]::SetEnvironmentVariable("WSLENV", $previousWslEnv, "Process")
+    }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
 $repoRootWsl = ConvertTo-WslPath $repoRoot.Path
@@ -219,15 +248,15 @@ if (-not $CommandArgs -or $CommandArgs.Count -eq 0) {
 }
 
 $command = ($CommandArgs | ForEach-Object { Quote-Bash $_ }) -join " "
-$envPairs = @(
-    "PYTHONUNBUFFERED=1",
-    "CUDA_VISIBLE_DEVICES=$(Quote-Bash $CudaDeviceId)",
-    "CHESS_SFT_OUTPUT=$(Quote-Bash $WslDataRoot)",
-    "CHESS_SFT_CHECKPOINTS=$(Quote-Bash $WslCheckpointRoot)",
-    "HF_HOME=$(Quote-Bash $WslHfCache)",
-    "WANDB_DIR=$(Quote-Bash $WslWandbDir)",
-    "STOCKFISH_PATH=$(Quote-Bash $StockfishPath)"
-)
+$runtimeEnv = [ordered]@{
+    PYTHONUNBUFFERED = "1"
+    CUDA_VISIBLE_DEVICES = $CudaDeviceId
+    CHESS_SFT_OUTPUT = $WslDataRoot
+    CHESS_SFT_CHECKPOINTS = $WslCheckpointRoot
+    HF_HOME = $WslHfCache
+    WANDB_DIR = $WslWandbDir
+    STOCKFISH_PATH = $StockfishPath
+}
 
 foreach ($runtimeKey in @(
     "CHESS_SFT_BASE_MODEL",
@@ -251,14 +280,14 @@ foreach ($runtimeKey in @(
 )) {
     $runtimeValue = Get-RuntimeValue $runtimeKey
     if (-not [string]::IsNullOrWhiteSpace($runtimeValue)) {
-        $envPairs += "$runtimeKey=$(Quote-Bash $runtimeValue)"
+        $runtimeEnv[$runtimeKey] = $runtimeValue
     }
 }
 
 if ([string]::IsNullOrWhiteSpace($VenvPath)) {
-    $runnerCommand = "env $($envPairs -join ' ') $(Quote-Bash $CondaExecutable) run --no-capture-output -n $(Quote-Bash $CondaEnv) $command"
+    $runnerCommand = "$(Quote-Bash $CondaExecutable) run --no-capture-output -n $(Quote-Bash $CondaEnv) $command"
 } else {
-    $runnerCommand = ". $(Quote-Bash ($VenvPath.TrimEnd('/') + '/bin/activate')) && env $($envPairs -join ' ') $command"
+    $runnerCommand = ". $(Quote-Bash ($VenvPath.TrimEnd('/') + '/bin/activate')) && $command"
 }
 
 $runCommand = @(
@@ -272,5 +301,5 @@ if ([string]::IsNullOrWhiteSpace($VenvPath)) {
 } else {
     Write-Host "Running in WSL $distroLabel with venv $VenvPath and CUDA_VISIBLE_DEVICES=$CudaDeviceId" -ForegroundColor Cyan
 }
-Invoke-Wsl @("--", "bash", "-lc", $runCommand)
+Invoke-WslWithRuntimeEnv -Arguments @("--", "bash", "-lc", $runCommand) -Environment $runtimeEnv
 exit $LASTEXITCODE
