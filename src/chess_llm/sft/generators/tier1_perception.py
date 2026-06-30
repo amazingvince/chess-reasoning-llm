@@ -1,4 +1,4 @@
-"""Tier 1: Perception tasks (~820K examples).
+"""Tier 1: Perception and state tasks (~1.32M examples).
 
 1.1 FEN -> ASCII board diagram
 1.2 ASCII board -> FEN

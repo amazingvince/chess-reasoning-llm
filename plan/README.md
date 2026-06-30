@@ -59,10 +59,14 @@ Stage 2: SDPO Handoff              ← 05_sdpo_handoff.md
 
 ## Spec Documents
 
+These files are planning documents. They preserve the original curriculum
+design, but current run commands, exact volumes, and WSL/vLLM operational notes
+live under `docs/` and in `src/chess_llm/sft/settings.py`.
+
 | Document | Contents | Approx. Scope |
 |----------|----------|---------------|
 | **`00_data_preparation.md`** | All data sources, preprocessing, FEN pool, Stockfish annotation, validation, output format | ~1-2 weeks |
-| **`01_phase_a_foundation.md`** | Tiers 1-2: Perception + Rules tasks, prompt templates, training config, pass criteria | ~1.19M examples |
+| **`01_phase_a_foundation.md`** | Tiers 1-2: Perception + Rules tasks, prompt templates, training config, pass criteria | 1.73M current target examples |
 | **`02_phase_b_understanding.md`** | Tiers 3-6: Tactics, Evaluation, Openings, Endgames tasks, training config, pass criteria | ~485K new + 243K review |
 | **`03_phase_c_planning.md`** | Tier 7: Best move selection, puzzle solving, reasoning traces, full curriculum, exit criteria | ~1.6M total |
 | **`04_evaluation_benchmark.md`** | Eval split design, 13K held-out examples, all metrics, reporting format | Frozen before any training |
@@ -147,14 +151,14 @@ forward into SDPO.
 
 | Tier | Focus | Examples | % of Total |
 |------|-------|----------|-----------|
-| T1: Perception | Board, pieces, state mechanics | ~820K | 44% |
-| T2: Rules | Legal moves, special rules | ~370K | 20% |
-| T3: Tactics | Captures, threats, patterns | ~260K | 14% |
-| T4: Evaluation | Material, position, pawns | ~150K | 8% |
-| T5: Openings | Names, plans, continuations | ~30K | 2% |
-| T6: Endgames | Classification, technique | ~140K | 8% |
-| T7: Planning | Best move, puzzles, analysis | ~170K | 9% |
-| **Total** | | **~1.84M** | 100% |
+| T1: Perception | Board, pieces, state mechanics | ~1.32M | 53% |
+| T2: Rules | Legal moves, special rules | ~410K | 17% |
+| T3: Tactics | Captures, threats, patterns | ~260K | 10% |
+| T4: Evaluation | Material, position, pawns | ~150K | 6% |
+| T5: Openings | Names, plans, continuations | ~30K | 1% |
+| T6: Endgames | Classification, technique | ~140K | 6% |
+| T7: Planning | Best move, puzzles, analysis | ~170K | 7% |
+| **Total** | | **~2.48M** | 100% |
 
 ---
 

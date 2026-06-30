@@ -1,4 +1,4 @@
-"""Tier 2: Rules tasks (~370K examples).
+"""Tier 2: Rules tasks (~410K examples).
 
 2.0 Side-to-move piece inventory
 2.1 Legal move generation

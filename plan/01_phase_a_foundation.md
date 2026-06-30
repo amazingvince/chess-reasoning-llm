@@ -2,8 +2,9 @@
 
 **Phase**: SFT Stage 1, Phase A
 **Prerequisites**: Stage 0 complete (data preparation, eval splits generated)
-**Data volume**: ~1.19M examples
-**Training**: 2-3 epochs
+**Data volume**: 1.73M current target examples before task upsampling
+**Training**: Prefer one pass over generated data for the real run; older
+multi-epoch estimates in this plan are historical
 **Focus**: FEN comprehension, legal move generation, board manipulation
 
 ---
@@ -145,6 +146,21 @@ Ranks: rank 1 d Q->1; rank 3 f 1->Q.
 **Purpose**: Teach the edit mechanics used inside state tracking without also
 requiring the final full-FEN reconstruction.
 
+### Task 1.9: FEN Assembly
+
+Given a FEN and one legal move, return a concise square/rank edit trace and the
+final full FEN.
+
+**Output format**:
+```
+d1=white queen; f3=empty.
+rank 1 d Q->1; rank 3 f 1->Q.
+Result FEN: ...
+```
+
+**Volume**: ~100K
+**Purpose**: Teach explicit lookup/edit mechanics for full-FEN reconstruction.
+
 ### Task 1.10: FEN Row Application
 
 Given a FEN and one legal move, return the affected compressed FEN rank-row
@@ -160,6 +176,35 @@ Result FEN: 4k3/8/8/8/3q4/8/8/4K3 w - - 1 2
 **Purpose**: Bridge square edits to actual FEN assembly by teaching whole-row
 replacement directly, without repeating the longer lookup trace.
 
+### Task 1.11: Square Coordinates
+
+Map a UCI square such as `d1` to file/rank coordinates and zero-based board
+indices.
+
+**Volume**: ~100K
+**Purpose**: Reduce square mapping failures before full board edits.
+
+### Task 1.12: FEN Rank Expansion
+
+Expand one compressed FEN rank into eight explicit cells.
+
+**Volume**: ~100K
+**Purpose**: Teach the decompression step needed before rank and board edits.
+
+### Task 1.13: FEN Rank Cell Edit
+
+Apply a cell-level edit inside one rank, then recompress the rank.
+
+**Volume**: ~100K
+**Purpose**: Isolate the smallest FEN edit operation.
+
+### Task 1.14: FEN Board Edit
+
+Apply source and destination square edits to the full board placement field.
+
+**Volume**: ~100K
+**Purpose**: Bridge rank-local edits to the full board-placement string.
+
 ---
 
 ## Tier 2: Rules & Mechanics — "What can I do?"
@@ -172,7 +217,7 @@ List all legal moves for the side to move in UCI notation.
 
 **Templates**: 6 variants
 **Output**: Space-separated UCI moves + total count
-**Volume**: ~100K (includes ~20K Chess960)
+**Volume**: ~80K (includes Chess960 mix)
 **Validation**: Must exactly match `[m.uci() for m in board.legal_moves]`
 
 ### Task 2.2: Piece-Specific Legal Moves
@@ -244,8 +289,10 @@ Include a dedicated Chess960 eval split:
 
 ## Training Configuration
 
-**Data**: ~1.19M examples (820K Tier 1 + 370K Tier 2)
-**Epochs**: 2-3
+**Data**: 1.73M current target examples (1.32M Tier 1 + 410K Tier 2)
+**Epochs**: For the current real run, prefer one approximate pass over a larger
+unique generated dataset. The historical 2-3 epoch plan should not be used
+without an explicit reason.
 **Mixing**: Shuffle all Tier 1 and Tier 2 examples together. Do not
 train tiers sequentially within the phase.
 **Batch**: Include both tiers in each batch for balanced learning.
@@ -270,9 +317,10 @@ Phase A training completes. Key metrics:
 | Chess960 legal moves | > 75% |
 | Chess960 castling rules | > 70% |
 
-### Pass Criteria Before Phase B
+### Telemetry Before Phase B
 
-All of the following must be met:
+Track the following as soft criteria while the model is still learning chess
+state mechanics:
 
 - Board print: > 90% exact match
 - Legal moves: > 85% exact set match
@@ -280,8 +328,9 @@ All of the following must be met:
 - State tracking (1 move): > 80% exact match
 - No Tier 1-2 metric below 65%
 
-If criteria are not met, extend training for 1-2 additional epochs or
-investigate data quality issues before proceeding.
+If criteria are not met, inspect failure examples and adjust data scale,
+upsampling, or mechanics tasks before spending a larger run. Do not default to
+extra epochs over the same generated rows.
 
 ---
 
@@ -303,6 +352,6 @@ investigate data quality issues before proceeding.
 - [ ] Validate Chess960 mix ratio (~20%)
 - [ ] Run python-chess validation on all generated data
 - [ ] Confirm no eval set contamination
-- [ ] Train 2-3 epochs
+- [ ] Train one approximate pass over generated data for the first real run
 - [ ] Run Phase A checkpoint evaluation
 - [ ] Confirm pass criteria met before Phase B

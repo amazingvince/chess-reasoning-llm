@@ -1,5 +1,5 @@
 """
-Prompt templates for all 31 SFT generator tasks.
+Prompt templates for all 38 SFT generator tasks.
 
 Each task has multiple prompt variants. Generators call
 select_template(task_id, rng) to pick one at random. Templates may use

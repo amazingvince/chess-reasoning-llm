@@ -351,7 +351,9 @@ def test_training_docs_are_package_cli_first() -> None:
     ]:
         assert legacy_command not in text
 
-    assert "chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name phase-a-full" in text
+    assert "docs/runbooks/phase_a_real_run.md" in text
+    assert "one-pass max_steps" in text
+    assert "skip-trainer-eval" in text
     assert 'python -m pip install -e ".[data,train,eval]"' in text
     assert "chess-llm-evaluate" in text
     assert "chess-llm-run-curriculum" in text
@@ -400,7 +402,8 @@ def test_training_docs_explain_wsl_wandb_and_persistent_artifact_paths() -> None
     assert "-WslDataRoot /path/to/persistent/chess_sft_data" in text
     assert "-WslCheckpointRoot /path/to/persistent/chess_sft_checkpoints" in text
     assert "-WslWandbDir /path/to/persistent/chess_sft_wandb" in text
-    assert "`-WslDataRoot` should contain the generated `output/` and `benchmark/` directories" in text
+    assert "`-WslDataRoot` is the `CHESS_SFT_OUTPUT` root" in text
+    assert "do not point it at the `output/` directory itself" in text
 
 
 def test_legacy_training_test_runner_is_retired() -> None:

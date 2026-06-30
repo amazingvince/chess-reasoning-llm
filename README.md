@@ -23,6 +23,13 @@ data -> train -> evaluate -> rollout -> judge -> targeted data -> train again
 - `plan/` contains the older design documents. They remain useful historical
   context, but new architecture decisions should land under `docs/`.
 
+## Operational Docs
+
+- `docs/runbooks/phase_a_real_run.md` is the current launch runbook for the
+  first serious Phase A run on WSL with W&B and sidecar eval.
+- `docs/experiments/experiment_log.md` is the committed experiment journal for
+  run results, kernel findings, and current training hypotheses.
+
 ## Install
 
 Install the root package in editable mode before using package CLIs:
@@ -153,8 +160,10 @@ once. It adds shared contracts and the first reusable builders:
   `sft/training/evaluate.py`, and `sft/training/run_curriculum.py` files are
   thin forwarders during migration.
 - `chess_llm.training.model_loading` owns attention backend selection for
-  training and transformers eval loads. `auto` tries CUDA FlashAttention 3,
-  FlashAttention 2, CUDA SDPA, eager, then the Transformers default.
+  training and transformers eval loads. `auto` tries explicitly enabled FA4 or
+  pinned Hugging Face FA2 paths, Hopper FA3, locally installed FA2, then
+  SDPA/eager. Pass `--attn-implementation sdpa` when you want to force the
+  stable SDPA baseline.
 - `chess_llm.training.training_args` owns TRL `SFTConfig` construction for the
   optional training extra, including the measured Qwen3.5 defaults for TF32,
   Liger, trainer eval, and FlashAttention-only packing.

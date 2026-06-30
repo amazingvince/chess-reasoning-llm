@@ -5,8 +5,9 @@ language model chess. The goal is not only to teach syntax like FEN and UCI,
 but to build a curriculum that moves from board perception, to rules, to
 tactics, to evaluation, to planning.
 
-At full target volume the pipeline generates about 1.94M examples across
-7 tiers and 32 generator tasks. It also freezes a held-out benchmark before training
+At full target volume the pipeline generates 2.48M examples across 7 tiers and
+38 generator tasks. Phase A, tiers 1-2, currently targets 1.73M examples before
+any task upsampling. The pipeline freezes a held-out benchmark before training
 data is generated, then uses a canonical FEN blocklist to prevent train/eval
 position leakage.
 
@@ -74,8 +75,9 @@ sft/make_data/
     preflight_check.py   Compatibility alias for chess_llm.sft.preflight
 ```
 
-Large runtime outputs default to `E:/chess_sft_data`, controlled by
-`CHESS_SFT_OUTPUT`. Hugging Face cache defaults to `E:/hf_cache`.
+Large runtime outputs default to `./chess_sft_data`, controlled by
+`CHESS_SFT_OUTPUT`. Hugging Face cache defaults to the platform cache root
+under `chess_llm/huggingface`, controlled by `HF_HOME`.
 
 ## Data Sources
 
@@ -160,6 +162,24 @@ Full-volume runs fail early on missing required families instead of failing
 later as generator underfills. `--volume` and `--allow-source-gaps` keep smoke
 and exploratory runs permissive while still logging the missing inputs.
 
+Source readiness is a zero-row guard, not a guarantee that every generator can
+reach full target volume. The pipeline still validates each generated task file
+against its expected row count after writing. Tier requirements are:
+
+| Tier | Required Source Families |
+| --- | --- |
+| 1 | `fen_pool`, `game_positions` |
+| 2 | `fen_pool` |
+| 3 | `fen_pool`, `puzzles` |
+| 4 | `fen_pool`, `position_evals` |
+| 5 | `openings`, `book_moves` |
+| 6 | `endgame_positions` |
+| 7 | `best_move_evals`, `consequence_evals`, `puzzles` |
+
+Strict eval-split generation also requires the source families needed by the
+selected frozen benchmark splits. Write a run artifact with
+`--source-readiness-report readiness.json`.
+
 ### 2. Freeze Eval Splits First
 
 Before training examples are generated, `run_eval_splits()` creates held-out
@@ -214,7 +234,7 @@ means no ECO holdout.
 ### 3. Freeze the Benchmark
 
 Raw eval splits are converted into a deterministic benchmark under
-`E:/chess_sft_data/benchmark`. Benchmark examples use a fixed schema:
+`<CHESS_SFT_OUTPUT>/benchmark`. Benchmark examples use a fixed schema:
 
 ```json
 {
@@ -276,7 +296,7 @@ Training rows are JSONL objects with a three-message chat format:
   "messages": [
     {"role": "system", "content": "You are a chess reasoning engine..."},
     {"role": "user", "content": "FEN: ...\nList all legal moves."},
-    {"role": "assistant", "content": "a7a5 a7a6 b7b5 b7b6 ..."}
+    {"role": "assistant", "content": "Side to move: black.\nLegal moves: a7a5 a7a6 b7b5 b7b6 ..."}
   ],
   "metadata": {
     "source": "lichess_games"
@@ -300,7 +320,7 @@ The tiers are ordered from board literacy to actual chess decision-making.
 
 ### Tier 1: Perception and State
 
-Target volume: about 920K examples.
+Target volume: about 1.32M examples.
 
 | Task | Target | Supervision |
 | --- | ---: | --- |
@@ -308,12 +328,16 @@ Target volume: about 920K examples.
 | `1.2_board_to_fen` | 80K | Recover FEN from ASCII board |
 | `1.3_piece_identification` | 100K | Identify a square or list pieces |
 | `1.4_piece_counting` | 80K | Count pieces/material |
+| `1.5_state_tracking` | 100K | Apply one legal move and return resulting FEN |
 | `1.6_square_lookup` | 100K | Read a single square's contents from FEN |
 | `1.7_rank_lookup` | 80K | Read one compressed rank row from FEN |
 | `1.8_move_square_edits` | 100K | Trace square lookups and rank edits for one move |
 | `1.9_fen_assembly` | 100K | Apply one legal move and assemble the resulting full FEN |
 | `1.10_fen_row_application` | 100K | Rewrite affected compressed rank rows and return Result FEN |
-| `1.5_state_tracking` | 100K | Apply one legal move and return resulting FEN |
+| `1.11_square_coordinates` | 100K | Map UCI squares to file/rank indices and board coordinates |
+| `1.12_fen_rank_expansion` | 100K | Expand compressed FEN ranks into eight explicit cells |
+| `1.13_fen_rank_cell_edit` | 100K | Apply a single cell edit inside an expanded/compressed rank |
+| `1.14_fen_board_edit` | 100K | Apply board-level square edits and rebuild FEN placement |
 
 This tier teaches the model how to read board state, perform explicit
 square/rank lookup mechanics, and then update board state through moves.
@@ -321,13 +345,27 @@ By default `1.4_piece_counting` uses benchmark-aligned full material-count
 targets; partial color/piece-count prompts remain available with
 `piece_counting_include_partial=True`.
 
+Current mechanics answer contracts:
+
+- `1.8_move_square_edits`: exactly three lines starting `Lookup:`, `Squares:`,
+  and `Ranks:`; no final FEN.
+- `1.9_fen_assembly`: edit trace plus exactly one final
+  `Result FEN: <complete six-field FEN>` line.
+- `1.10_fen_row_application`: first line starts `Rows:` and the final line is
+  `Result FEN: <complete six-field FEN>`.
+- `1.13_fen_rank_cell_edit`: one rank-cell rewrite in the form
+  `rank N: <before> -> <after>`.
+- `1.14_fen_board_edit`: changed-square board assembly ending with
+  `Result board FEN: <piece-placement>`.
+
 ### Tier 2: Rules
 
-Target volume: about 370K examples.
+Target volume: about 410K examples.
 
 | Task | Target | Supervision |
 | --- | ---: | --- |
-| `2.1_legal_move_gen` | 100K | Exact legal move set |
+| `2.0_side_piece_inventory` | 60K | Side-to-move piece inventory and square list |
+| `2.1_legal_move_gen` | 80K | Exact legal move set |
 | `2.2_piece_specific_moves` | 80K | Legal moves from one square |
 | `2.3_move_legality_check` | 80K | Yes/no legality for a candidate move |
 | `2.4_check_detection` | 60K | Check, checkmate, stalemate, or normal |
@@ -463,13 +501,20 @@ Run validation only:
 
 ```bash
 chess-llm-validate-outputs \
-  --output-dir E:/chess_sft_data/output \
-  --blocklist E:/chess_sft_data/eval_splits/blocklist.txt
+  --output-dir chess_sft_data/output \
+  --blocklist chess_sft_data/eval_splits/blocklist.txt
 ```
 
 Validation fails when no eval blocklist is available because contamination
 cannot be checked. Use `--skip-decontamination` only for intentional local
 smoke/debug validation.
+
+Useful validation flags:
+
+- `--expected-volume N` checks smoke outputs generated with `--volume N`.
+- `--tier 1 2` restricts validation and completeness checks to selected tiers.
+- `--task 1.9_fen_assembly` restricts validation to selected task files.
+- `--skip-completeness` skips missing or underfilled task checks.
 
 ## Benchmark and Scoring
 
@@ -488,7 +533,7 @@ prompts and gold answers for held-out splits. Scoring supports:
 Run benchmark scoring against model predictions:
 
 ```bash
-chess-llm-run-benchmark --predictions predictions.jsonl --benchmark-dir E:/chess_sft_data/benchmark
+chess-llm-run-benchmark --predictions predictions.jsonl --benchmark-dir chess_sft_data/benchmark
 ```
 
 Full benchmark freezes are strict by default and fail when planned task types
@@ -503,7 +548,14 @@ compatibility wrapper.
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -e ".[data]"
+```
+
+For a WSL/Linux environment that will also train and evaluate, install the
+combined extras from the repo root:
+
+```bash
+python -m pip install -e ".[data,train,eval]"
 ```
 
 Small smoke run:

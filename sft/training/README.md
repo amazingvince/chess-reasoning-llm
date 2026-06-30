@@ -1,6 +1,7 @@
 # training - Chess SFT Training Harness
 
-Three-phase supervised fine-tuning harness for the chess SFT curriculum in `sft/make_data/output/`.
+Three-phase supervised fine-tuning harness for the chess SFT curriculum in
+`<CHESS_SFT_OUTPUT>/output`.
 
 This folder is now a compatibility layer. The implementation lives under
 `src/chess_llm/training/`; `train.py`, `evaluate.py`, `run_curriculum.py`, and
@@ -45,8 +46,9 @@ chess-llm-train --phase a --dry-run
 # Short end-to-end smoke test
 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name phase-a-smoke
 
-# Full Phase A training
-chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name phase-a-full
+# Real Phase A launch
+# Follow docs/runbooks/phase_a_real_run.md for generation, one-pass max_steps,
+# skip-trainer-eval, and vLLM sidecar eval.
 
 # Full Phase B training (uses Phase A best/ checkpoint if present)
 chess-llm-train --phase b --wandb-project chess-sft --wandb-group phase-b --run-name phase-b-full
@@ -75,10 +77,12 @@ training/
 |-- Dockerfile            # Linux GPU training image
 |-- compose.yaml          # Docker Compose service pinned to one GPU
 |-- .env.example          # Host path and GPU selection template
-|-- tests/                # Unit tests for mixing, gating, helpers
 |-- requirements.txt
 `-- README.md
 ```
+
+Unit tests live under the repo-root `tests/` directory, not under this
+compatibility folder.
 
 ## Data and Checkpoints
 
@@ -187,6 +191,8 @@ Useful controls:
 - `--skip-trainer-eval` to train without in-loop eval; pair it with
   `--trainer-save-steps <N>` when you still want periodic recoverable
   checkpoints plus the final `best/` export
+- with `--skip-trainer-eval`, `best/` is the final exported model, not the
+  best checkpoint selected by eval loss
 - `--gradient-checkpointing` to trade throughput for lower activation memory
   when a larger model or batch no longer fits
 
@@ -374,13 +380,15 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 .\sft\training\run-docker.ps1 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name docker-phase-a-smoke
 ```
 
-### Run Full Training
+### Run Configured-Epoch Training
 
 ```bash
-.\sft\training\run-docker.ps1 chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name docker-phase-a-full
 .\sft\training\run-docker.ps1 chess-llm-train --phase b --wandb-project chess-sft --wandb-group phase-b --run-name docker-phase-b-full
 .\sft\training\run-docker.ps1 chess-llm-train --phase c --wandb-project chess-sft --wandb-group phase-c --run-name docker-phase-c-full
 ```
+
+For the current real Phase A plan, use the WSL one-pass runbook instead of the
+configured 3-epoch Phase A command.
 
 ### Eval in Docker
 
@@ -445,6 +453,17 @@ Stockfish:        stockfish
 PyTorch GPU id:   CUDA_VISIBLE_DEVICES=0
 ```
 
+For Ubuntu 24 WSL, set the launcher default distro in `.env` or pass
+`-Distro Ubuntu-24.04-CUDA` explicitly, then verify the target environment with
+the same launcher path used for training:
+
+```powershell
+.\sft\training\run-wsl.ps1 -Distro Ubuntu-24.04-CUDA -- cat /etc/os-release
+.\sft\training\run-wsl.ps1 -Distro Ubuntu-24.04-CUDA -- uname -r
+.\sft\training\run-wsl.ps1 -Distro Ubuntu-24.04-CUDA -- nvidia-smi
+.\sft\training\run-wsl.ps1 -Distro Ubuntu-24.04-CUDA -- python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
 For real WSL training, pass a persistent cache such as
 `-WslHfCache /path/to/persistent/chess_sft_hf_cache` to avoid repeated Qwen/Qwen3.5-0.8B downloads from the launcher's default `/tmp` cache.
 
@@ -471,7 +490,9 @@ defaults:
   chess-llm-train --phase a --dry-run
 ```
 
-`-WslDataRoot` should contain the generated `output/` and `benchmark/` directories used by training and posthoc evaluation.
+`-WslDataRoot` is the `CHESS_SFT_OUTPUT` root. It should contain the generated
+`output/` and `benchmark/` directories used by training and posthoc evaluation;
+do not point it at the `output/` directory itself.
 
 For the current WSL venv, install the Qwen3.5 fast-path dependencies with:
 
@@ -578,7 +599,7 @@ Run commands from the Windows repo root:
 ```powershell
 .\sft\training\run-wsl.ps1 chess-llm-train --phase a --dry-run
 .\sft\training\run-wsl.ps1 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name wsl-phase-a-smoke
-.\sft\training\run-wsl.ps1 chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name wsl-phase-a-full
+# For the real Phase A one-pass launch, use docs/runbooks/phase_a_real_run.md.
 ```
 
 Use `--` before commands that take single-dash options so PowerShell stops
@@ -627,10 +648,24 @@ square lookup/edit mechanics become reliable:
 ```
 
 For a bounded rehearsal, add `--max-steps 100 --max-train-examples 8192`.
-For a real run, omit those caps and let the phase schedule run its configured
-epochs. A real run expects online W&B by default; unset `WANDB_MODE=offline`
-before launching. Add `--allow-wandb-offline` only for an intentional offline
-W&B rehearsal, and add `--no-wandb` only when local-only logging is desired.
+For a real generated-data run, prefer one pass over more unique generated rows
+rather than repeated epochs over a smaller set. The current Phase A config still
+defines 3 epochs, so do not launch the unchanged phase schedule unless that is
+intentional. Until the CLI exposes a direct one-pass override, compute
+`--max-steps` from the generated row count, effective batch size, and GPU count.
+Current defaults are `per_device_train_batch_size=4` and
+`gradient_accumulation_steps=8`, so use:
+
+```text
+max_steps = ceil(train_dataset_size / (4 * 8 * WORLD_SIZE))
+```
+
+A real run expects online W&B by default; unset `WANDB_MODE=offline` before
+launching. Add `--allow-wandb-offline` only for an intentional offline W&B
+rehearsal, and add `--no-wandb` only when local-only logging is desired.
+
+See `docs/runbooks/phase_a_real_run.md` for the current full-run checklist,
+data scale ladder, vLLM sidecar eval command, and experiment logging process.
 
 The same state-tracking, FEN-assembly, and row-application upsampling can be
 passed through the curriculum runner:
@@ -662,7 +697,9 @@ Benchmark generation supports two backends:
 - `transformers` - default, works with the same stack as training
 - `vllm` - optional eval-only acceleration path
 
-Select the backend from either CLI:
+Select the backend from either CLI for normal eval. Use direct
+`chess-llm-evaluate` for the vLLM sidecar path when you need
+`--vllm-max-model-len`.
 
 ```bash
 chess-llm-train --phase a --eval-only --inference-backend transformers
@@ -670,7 +707,7 @@ chess-llm-train --phase a --eval-only --inference-backend vllm
 ```
 
 ```bash
-chess-llm-evaluate --model <checkpoint> --benchmark-dir <dir> --output preds.jsonl --inference-backend vllm
+chess-llm-evaluate --model <checkpoint> --benchmark-dir <dir> --output preds.jsonl --inference-backend vllm --vllm-max-model-len 4096
 ```
 
 ### `transformers`
@@ -699,6 +736,31 @@ pip install vllm
 ```
 
 If `vllm` is requested but not installed, `chess-llm-evaluate` will raise a clear error.
+
+#### Ubuntu 24 WSL vLLM Sidecar
+
+Keep vLLM in a separate eval-only virtualenv because local vLLM packages can
+pin a different torch stack than the training environment. The current WSL
+path is:
+
+```text
+/home/amazi/code/chess_sft_sdpo/.venv-vllm
+```
+
+On the local Ubuntu 24 WSL setup, vLLM's default V2 model runner failed on both
+GPUs with `RuntimeError: UVA is not available`. The working eval path disables
+that runner and bounds the context length:
+
+```powershell
+.\sft\training\run-wsl.ps1 `
+  -NoSync `
+  -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
+  -- bash -lc 'export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 VLLM_USE_V2_MODEL_RUNNER=0 VLLM_WORKER_MULTIPROC_METHOD=spawn; chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_atomic_20260630/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl'
+```
+
+Re-probe PyTorch device names before launch. With
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, local visible IDs can differ from the default
+WSL CUDA order.
 
 ## Benchmark Behavior
 
@@ -744,7 +806,7 @@ for a non-smoke rehearsal, pass `--allow-wandb-offline`.
 Set the project name with:
 
 ```bash
-chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name phase-a-full
+chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name phase-a-rehearsal
 chess-llm-run-curriculum --wandb-project chess-sft --wandb-group curriculum --run-prefix full-curriculum
 ```
 
@@ -755,15 +817,13 @@ For a new machine or fresh environment:
 ```bash
 chess-llm-train --phase a --dry-run
 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name phase-a-smoke
-chess-llm-train --phase a --wandb-project chess-sft --wandb-group phase-a --run-name phase-a-full
-chess-llm-train --phase b --wandb-project chess-sft --wandb-group phase-b --run-name phase-b-full
-chess-llm-train --phase c --wandb-project chess-sft --wandb-group phase-c --run-name phase-c-full
+# Then follow docs/runbooks/phase_a_real_run.md for the one-pass real run.
 ```
 
 If you want faster eval on a Linux GPU box:
 
 ```bash
-chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name phase-a-vllm-smoke --inference-backend vllm
+chess-llm-evaluate --model chess_sft_checkpoints/phase_a/best --benchmark-dir chess_sft_data/benchmark --output eval_predictions.vllm.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl
 ```
 
 ## Tests
