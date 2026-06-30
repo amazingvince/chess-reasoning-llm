@@ -233,6 +233,21 @@ Warmup:
   - 60-step fresh segment: about 10.6k input tokens/sec.
   - 60-step resumed segment: about 20.7k input tokens/sec.
 
+Forced FA2 smoke:
+
+- Checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260630-fa2-smoke-06eec45`
+- Training attention was forced to the pinned HF
+  `kernels-community/flash-attn2@bcc70a66fbe0445d4484f56167d706134d53633d`
+  implementation on the RTX 5090.
+- TRL packing was enabled and completed quickly, but actual training was far
+  slower than the SDPA baseline.
+- Observed token throughput: about 2.85k input tokens/sec over 20 optimizer
+  steps, with about 31.9 GB of 5090 memory used.
+- Decision: keep the 25k rehearsal on `--attn-implementation auto`/SDPA.
+  Re-test FA2 only with a smaller sequence/batch shape or a different kernel
+  stack.
+
 Sidecar eval:
 
 - vLLM eval ran from `.venv-vllm` on the warmup `best/` checkpoint with
@@ -265,13 +280,13 @@ Main risks:
 
 ### Recommended Next Experiments
 
-1. Generate a 5K-per-task Phase A rehearsal with the current FEN mechanics
-   tasks and targeted task upsampling.
-2. Train one approximate pass, skip trainer eval, and run vLLM sidecar eval on
-   the second GPU every saved checkpoint.
+1. Run the prepared 25K-per-task Phase A rehearsal for exactly one pass with
+   `--num-train-epochs 1`, `--skip-trainer-eval`, and SDPA.
+2. Run vLLM sidecar eval on the second GPU from saved checkpoints and the final
+   `best/` export.
 3. Compare tokens/sec, eval quality, and failure samples against the tiny
-   shakedown.
-4. If square/FEN mapping improves, generate a 25K-per-task run and repeat.
-5. Before the full 1.73M-row Phase A target, use the explicit
-   `--num-train-epochs 1` training override and keep `--max-steps` only for
-   bounded warmups.
+   shakedown and the 120-step warmup.
+4. If square/FEN mapping improves, scale to the full 1.73M-row Phase A target
+   using the same one-pass recipe.
+5. If square/FEN metrics stay flat after a meaningful token budget, inspect
+   predictions before burning the full Phase A pass.

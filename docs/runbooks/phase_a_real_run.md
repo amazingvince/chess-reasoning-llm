@@ -35,6 +35,10 @@ Current target volumes:
   lengths change the number of useful tokens processed.
 - Treat SDPA as the stable baseline. Use FA2/FA4 only after a model-load and
   short train smoke succeeds on the selected GPU.
+- The 2026-06-30 forced HF FA2 smoke on the 25k rehearsal did work and enabled
+  packing, but only reached about 2.85k input tokens/sec on the RTX 5090. The
+  SDPA warmup reached about 10.6k-20.7k input tokens/sec, so keep the 25k
+  rehearsal on `--attn-implementation auto`.
 
 ## Preflight Checklist
 
