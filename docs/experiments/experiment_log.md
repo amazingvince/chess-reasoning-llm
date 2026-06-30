@@ -220,6 +220,6 @@ Main risks:
 3. Compare tokens/sec, eval quality, and failure samples against the tiny
    shakedown.
 4. If square/FEN mapping improves, generate a 25K-per-task run and repeat.
-5. Before the full 1.73M-row Phase A target, add or expose a direct
-   one-epoch/one-pass training override so the command does not rely on
-   hand-computed `--max-steps`.
+5. Before the full 1.73M-row Phase A target, use the explicit
+   `--num-train-epochs 1` training override and keep `--max-steps` only for
+   bounded warmups.

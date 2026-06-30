@@ -55,6 +55,7 @@ class RunOverrides:
     max_train_examples: int | None = None
     max_eval_examples: int | None = None
     max_benchmark_examples_per_split: int | None = None
+    num_train_epochs: float | None = None
     max_steps: int | None = None
     eval_steps: int | None = None
     save_steps: int | None = None
@@ -137,6 +138,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-steps", type=int, default=None,
         help="Override trainer max_steps; also tightens eval/save cadence for short runs",
+    )
+    parser.add_argument(
+        "--num-train-epochs",
+        type=_positive_float,
+        default=None,
+        help="Override trainer num_train_epochs; use 1 for a one-pass generated-data run",
     )
     parser.add_argument(
         "--trainer-eval-steps",
@@ -335,16 +342,22 @@ def main() -> int:
         for key, count in sorted(summary.items()):
             logger.info("  %-12s %8d", key, count)
         logger.info("Learning rate: %s", phase.learning_rate)
-        logger.info("Epochs: %d", phase.epochs)
+        effective_epochs = overrides.num_train_epochs or phase.epochs
+        logger.info("Epochs: %s", _format_epoch_count(effective_epochs))
         logger.info("Packing: False, max_length: 2048")
         logger.info("Effective batch size: 32 (4 * 8 accumulation)")
         logger.info("Eval backend: %s", args.inference_backend)
-        if args.smoke_run or overrides.max_steps is not None:
+        if args.smoke_run or overrides.max_steps is not None or overrides.num_train_epochs is not None:
             logger.info(
-                "Runtime overrides: train<=%s eval<=%s benchmark/split<=%s max_steps=%s",
+                "Runtime overrides: train<=%s eval<=%s benchmark/split<=%s epochs=%s max_steps=%s",
                 overrides.max_train_examples,
                 overrides.max_eval_examples,
                 overrides.max_benchmark_examples_per_split,
+                (
+                    _format_epoch_count(overrides.num_train_epochs)
+                    if overrides.num_train_epochs is not None
+                    else None
+                ),
                 overrides.max_steps,
             )
         return 0
@@ -493,6 +506,7 @@ def main() -> int:
         report_to=report_to,
         model_type=model_type,
         use_liger_kernel=not args.disable_liger_kernel,
+        num_train_epochs=overrides.num_train_epochs,
         liger_fused_linear_cross_entropy=(
             getattr(args, "enable_liger_fused_linear_ce", False)
             and not getattr(args, "disable_liger_fused_linear_ce", False)
@@ -640,6 +654,7 @@ def _resolve_run_overrides(args: argparse.Namespace) -> RunOverrides:
     max_train_examples = args.max_train_examples
     max_eval_examples = args.max_eval_examples
     max_benchmark_examples_per_split = args.max_benchmark_examples_per_split
+    num_train_epochs = getattr(args, "num_train_epochs", None)
     max_steps = args.max_steps
     skip_trainer_eval = args.skip_trainer_eval
 
@@ -688,6 +703,7 @@ def _resolve_run_overrides(args: argparse.Namespace) -> RunOverrides:
         max_train_examples=max_train_examples,
         max_eval_examples=max_eval_examples,
         max_benchmark_examples_per_split=max_benchmark_examples_per_split,
+        num_train_epochs=num_train_epochs,
         max_steps=max_steps,
         eval_steps=eval_steps,
         save_steps=save_steps,
@@ -699,6 +715,19 @@ def _resolve_run_overrides(args: argparse.Namespace) -> RunOverrides:
 def _short_run_logging_steps(max_steps: int) -> int:
     """Keep bounded-run telemetry useful without logging every optimizer step."""
     return max(1, min(25, max_steps // 10))
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed
+
+
+def _format_epoch_count(value: float | int | None) -> str:
+    if value is None:
+        return "None"
+    return f"{value:g}"
 
 
 def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:

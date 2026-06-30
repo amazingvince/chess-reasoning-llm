@@ -352,7 +352,7 @@ def test_training_docs_are_package_cli_first() -> None:
         assert legacy_command not in text
 
     assert "docs/runbooks/phase_a_real_run.md" in text
-    assert "one-pass max_steps" in text
+    assert "--num-train-epochs 1" in text
     assert "skip-trainer-eval" in text
     assert 'python -m pip install -e ".[data,train,eval]"' in text
     assert "chess-llm-evaluate" in text

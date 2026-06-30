@@ -76,14 +76,14 @@ Omit it to use the per-task targets from `src/chess_llm/sft/settings.py`.
 
 ## Generate Data
 
-Example rehearsal generation:
+Example serious rehearsal generation:
 
 ```powershell
 .\sft\training\run-wsl.ps1 `
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
-  -WslDataRoot /home/amazi/chess_sft_data/phase_a_5k `
-  -- chess-llm-make-data --tier 1 2 --volume 5000 --source-readiness-report /home/amazi/chess_sft_data/phase_a_5k/readiness.json
+  -WslDataRoot /home/amazi/chess_sft_data/phase_a_25k `
+  -- chess-llm-make-data --tier 1 2 --volume 25000 --source-readiness-report /home/amazi/chess_sft_data/phase_a_25k/readiness.json
 ```
 
 After generation:
@@ -91,8 +91,8 @@ After generation:
 ```powershell
 .\sft\training\run-wsl.ps1 `
   -NoSync `
-  -WslDataRoot /home/amazi/chess_sft_data/phase_a_5k `
-  -- chess-llm-validate-outputs --output-dir /home/amazi/chess_sft_data/phase_a_5k/output --blocklist /home/amazi/chess_sft_data/phase_a_5k/eval_splits/blocklist.txt --expected-volume 5000 --tier 1 2
+  -WslDataRoot /home/amazi/chess_sft_data/phase_a_25k `
+  -- chess-llm-validate-outputs --output-dir /home/amazi/chess_sft_data/phase_a_25k/output --blocklist /home/amazi/chess_sft_data/phase_a_25k/eval_splits/blocklist.txt --expected-volume 25000 --tier 1 2
 ```
 
 For the full run, omit `--volume` and use a fresh output root.
@@ -100,22 +100,15 @@ For the full run, omit `--volume` and use a fresh output root.
 ## Training Command Shape
 
 The current phase config still defines 3 epochs for Phase A. For a real
-generated-data run, do not launch the unchanged phase schedule unless you
-intentionally want 3 epochs. Until the CLI exposes a direct one-pass override,
-use `--max-steps` sized from the generated row count, batch size, gradient
-accumulation, and GPU count.
+generated-data run, use `--num-train-epochs 1` so the trainer makes one pass
+over the mixed and task-upsampled dataset. Keep `--max-steps` for bounded
+warmups only.
 
 Current defaults are `per_device_train_batch_size=4` and
-`gradient_accumulation_steps=8`, so the one-pass cap is:
-
-```text
-max_steps = ceil(train_dataset_size / (4 * 8 * WORLD_SIZE))
-```
-
-Use the post-mix train row count when available. As a rough guide with one GPU
-and the current `1.5`, `1.9`, `1.10` upsampling idea, `--volume 5000` is about
-4,532 optimizer steps, `--volume 25000` is about 22,657 steps, and the full
-Phase A target is about 82,188 steps.
+`gradient_accumulation_steps=8`. As a rough guide with one GPU and the current
+`1.5`, `1.9`, `1.10` upsampling idea, `--volume 5000` is about 4,532 optimizer
+steps, `--volume 25000` is about 22,657 steps, and the full Phase A target is
+about 82,188 steps.
 
 Recommended current task emphasis:
 
@@ -126,29 +119,24 @@ Recommended current task emphasis:
 Command template:
 
 ```powershell
-$MaxSteps = "<computed-one-pass-steps>"
-
 .\sft\training\run-wsl.ps1 `
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
-  -WslDataRoot /home/amazi/chess_sft_data/phase_a_5k `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase_a_5k `
+  -WslDataRoot /home/amazi/chess_sft_data/phase_a_25k `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase_a_25k `
   -WslHfCache /home/amazi/.cache/huggingface `
   -WslWandbDir /home/amazi/chess_sft_wandb `
   -- chess-llm-train --phase a `
+  --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
   --task-upsample 1.9_fen_assembly=4 `
   --task-upsample 1.10_fen_row_application=4 `
   --skip-trainer-eval `
   --trainer-save-steps 1000 `
-  --max-steps $MaxSteps `
-  --max-benchmark-examples-per-split 100 `
-  --eval-batch-size 16 `
-  --eval-max-new-tokens 192 `
-  --no-acpl `
+  --skip-eval `
   --wandb-project chess-sft `
   --wandb-group phase-a `
-  --run-name phase-a-5k-one-pass
+  --run-name phase-a-25k-one-pass
 ```
 
 With `--skip-trainer-eval`, `best/` is the final exported model, not the
@@ -177,7 +165,7 @@ model runner:
 .\sft\training\run-wsl.ps1 `
   -NoSync `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
-  -- bash -lc 'export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 VLLM_USE_V2_MODEL_RUNNER=0 VLLM_WORKER_MULTIPROC_METHOD=spawn; chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_5k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_5k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_5k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --run-name phase-a-5k-vllm-eval'
+  -- bash -lc 'export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 VLLM_USE_V2_MODEL_RUNNER=0 VLLM_WORKER_MULTIPROC_METHOD=spawn; chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --run-name phase-a-25k-vllm-eval'
 ```
 
 Use the second GPU for sidecar eval. With `CUDA_DEVICE_ORDER=PCI_BUS_ID`, the

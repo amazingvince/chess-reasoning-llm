@@ -59,6 +59,7 @@ def estimate_training_steps(
     phase: PhaseConfig,
     *,
     train_dataset_size: int,
+    num_train_epochs: float | None = None,
     max_steps: int | None = None,
     per_device_train_batch_size: int = PER_DEVICE_TRAIN_BATCH_SIZE,
     gradient_accumulation_steps: int = GRADIENT_ACCUMULATION_STEPS,
@@ -74,7 +75,8 @@ def estimate_training_steps(
     effective_batch = per_device_train_batch_size * resolved_world_size
     batches_per_epoch = math.ceil(train_dataset_size / effective_batch)
     updates_per_epoch = max(1, math.ceil(batches_per_epoch / gradient_accumulation_steps))
-    return updates_per_epoch * phase.epochs
+    effective_epochs = phase.epochs if num_train_epochs is None else num_train_epochs
+    return max(1, math.ceil(updates_per_epoch * effective_epochs))
 
 
 def _warmup_steps_from_ratio(ratio: float, total_steps: int) -> int:
@@ -90,6 +92,7 @@ def build_sft_config(
     report_to: str | list[str] = "wandb",
     model_type: str | None = None,
     use_liger_kernel: bool = True,
+    num_train_epochs: float | None = None,
     max_steps: int | None = None,
     eval_steps: int | None = None,
     save_steps: int | None = None,
@@ -117,6 +120,7 @@ def build_sft_config(
     """
     if run_name is None:
         run_name = f"chess-sft-phase-{phase.name}"
+    effective_num_train_epochs = phase.epochs if num_train_epochs is None else num_train_epochs
     signature = inspect.signature(SFTConfig.__init__).parameters
 
     if "assistant_only_loss" not in signature:
@@ -146,6 +150,7 @@ def build_sft_config(
         warmup_total_steps = estimate_training_steps(
             phase,
             train_dataset_size=train_dataset_size,
+            num_train_epochs=effective_num_train_epochs,
             max_steps=max_steps,
             world_size=world_size,
         )
@@ -160,7 +165,7 @@ def build_sft_config(
         packing=packing_enabled,
         assistant_only_loss=True,
         # Training
-        num_train_epochs=phase.epochs,
+        num_train_epochs=effective_num_train_epochs,
         learning_rate=phase.learning_rate,
         weight_decay=phase.weight_decay,
         lr_scheduler_type="cosine",

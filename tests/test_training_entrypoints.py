@@ -160,6 +160,26 @@ def test_train_cli_parses_task_upsample_overrides(monkeypatch):
     }
 
 
+def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "a",
+            "--num-train-epochs",
+            "1",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.num_train_epochs == 1.0
+
+
 def test_package_train_eval_command_supports_full_benchmark_override(tmp_path: Path):
     from chess_llm.training.train import _build_eval_cmd
 
@@ -634,6 +654,47 @@ def test_training_step_estimate_accounts_for_accumulation_and_world_size():
         max_steps=10,
         world_size=2,
     ) == 10
+    assert estimate_training_steps(
+        PHASE_A,
+        train_dataset_size=3200,
+        num_train_epochs=1,
+        world_size=2,
+    ) == 50
+
+
+def test_build_sft_config_honors_num_train_epochs_override(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            assistant_only_loss=None,
+            num_train_epochs=None,
+            warmup_steps=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    sys.modules.pop("chess_llm.training.training_args", None)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    cfg = build_sft_config(
+        PHASE_A,
+        tmp_path,
+        train_dataset_size=3200,
+        num_train_epochs=1,
+        world_size=2,
+    )
+
+    assert cfg.kwargs["num_train_epochs"] == 1
+    assert cfg.kwargs["warmup_steps"] == 2
 
 
 def test_build_sft_config_prefers_warmup_steps_when_dataset_size_known(
@@ -761,6 +822,7 @@ def test_bounded_skip_trainer_eval_does_not_auto_add_midrun_saves():
         max_eval_examples=None,
         max_benchmark_examples_per_split=None,
         max_steps=50,
+        num_train_epochs=1,
         trainer_eval_steps=None,
         trainer_save_steps=None,
         skip_trainer_eval=True,
@@ -769,6 +831,7 @@ def test_bounded_skip_trainer_eval_does_not_auto_add_midrun_saves():
     overrides = train._resolve_run_overrides(args)
 
     assert overrides.max_steps == 50
+    assert overrides.num_train_epochs == 1
     assert overrides.eval_steps is None
     assert overrides.save_steps is None
     assert overrides.logging_steps == 5

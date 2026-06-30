@@ -47,8 +47,8 @@ chess-llm-train --phase a --dry-run
 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name phase-a-smoke
 
 # Real Phase A launch
-# Follow docs/runbooks/phase_a_real_run.md for generation, one-pass max_steps,
-# skip-trainer-eval, and vLLM sidecar eval.
+# Follow docs/runbooks/phase_a_real_run.md for generation,
+# --num-train-epochs 1, skip-trainer-eval, and vLLM sidecar eval.
 
 # Full Phase B training (uses Phase A best/ checkpoint if present)
 chess-llm-train --phase b --wandb-project chess-sft --wandb-group phase-b --run-name phase-b-full
@@ -650,15 +650,8 @@ square lookup/edit mechanics become reliable:
 For a bounded rehearsal, add `--max-steps 100 --max-train-examples 8192`.
 For a real generated-data run, prefer one pass over more unique generated rows
 rather than repeated epochs over a smaller set. The current Phase A config still
-defines 3 epochs, so do not launch the unchanged phase schedule unless that is
-intentional. Until the CLI exposes a direct one-pass override, compute
-`--max-steps` from the generated row count, effective batch size, and GPU count.
-Current defaults are `per_device_train_batch_size=4` and
-`gradient_accumulation_steps=8`, so use:
-
-```text
-max_steps = ceil(train_dataset_size / (4 * 8 * WORLD_SIZE))
-```
+defines 3 epochs, so use `--num-train-epochs 1` for a one-pass generated-data
+run. Keep `--max-steps` for bounded smoke and warmup runs.
 
 A real run expects online W&B by default; unset `WANDB_MODE=offline` before
 launching. Add `--allow-wandb-offline` only for an intentional offline W&B
@@ -817,7 +810,7 @@ For a new machine or fresh environment:
 ```bash
 chess-llm-train --phase a --dry-run
 chess-llm-train --phase a --smoke-run --wandb-project chess-sft --run-name phase-a-smoke
-# Then follow docs/runbooks/phase_a_real_run.md for the one-pass real run.
+# Then follow docs/runbooks/phase_a_real_run.md for the --num-train-epochs 1 real run.
 ```
 
 If you want faster eval on a Linux GPU box:
