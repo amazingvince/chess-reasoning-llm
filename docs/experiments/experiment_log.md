@@ -259,34 +259,139 @@ Sidecar eval:
 - Metrics were intentionally poor after only 120 training steps, but the
   sidecar eval path is mechanically proven on the rehearsal artifacts.
 
+### Phase A 25k One-Pass Rehearsal - 2026-06-30
+
+Run identity:
+
+- Data root:
+  `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260630`
+- Checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260630`
+- Git SHA: `a48e06c316259be3f63cc55f277ec304cf62b66a`
+- W&B train run: `phase-a-t12-v25000-20260630-train`
+  (`u04sgfma`)
+- W&B final eval run: `phase-a-t12-v25000-20260630-vllm-sidecar-eval`
+  (`id5v6692`)
+
+Training configuration:
+
+- `--num-train-epochs 1`
+- `--skip-trainer-eval`
+- `--skip-eval`
+- `--no-acpl`
+- Task upsampling: `1.5_state_tracking=4`, `1.9_fen_assembly=4`,
+  `1.10_fen_row_application=4`
+- Attention request: `auto`; selected backend: SDPA.
+- Liger applied to Qwen3 with `cross_entropy=False` and
+  `fused_linear_cross_entropy=False`.
+- Step checkpoints every 1,000 steps with full resume state.
+
+Training result:
+
+- Optimizer steps: 22,137.
+- Train rows after split and upsampling: 708,379.
+- Eval holdout rows: 10,000.
+- Input tokens seen: 228,134,416.
+- Train runtime: 4:59:56.
+- Train throughput: 12,676.7 input tokens/sec.
+- Train loss: 0.0493.
+- Final export: `phase_a/best`.
+- `READY`, `train_results.json`, `all_results.json`, final predictions,
+  final analysis, and checkpoint eval artifacts were all written.
+
+Sidecar eval setup:
+
+- vLLM ran from `/home/amazi/code/chess_sft_sdpo/.venv-vllm`.
+- `VLLM_USE_V2_MODEL_RUNNER=0`.
+- `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
+- `--vllm-max-model-len 4096`.
+- Periodic checkpoint evals used 200 examples per split.
+- Final eval used 500 examples per split.
+- Eval ran on the second GPU path (`CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+  `CUDA_VISIBLE_DEVICES=1`, RTX 4090 on this workstation) while training ran on
+  the RTX 5090.
+
+Checkpoint eval trend:
+
+| Step | Perception | State | FEN Assembly | FEN Row | Material | Rules | Legal Moves | Legality |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 46.5% | 14.3% | 7.1% | 7.1% | 6.7% | 51.9% | 11.2% | 57.6% |
+| 5,000 | 84.5% | 78.6% | 78.6% | 78.6% | 0.0% | 65.0% | 13.0% | 78.8% |
+| 10,000 | 90.0% | 85.7% | 85.7% | 85.7% | 20.0% | 68.8% | 19.5% | 75.8% |
+| 15,000 | 91.0% | 85.7% | 85.7% | 85.7% | 26.7% | 70.0% | 25.7% | 75.8% |
+| 20,000 | 91.0% | 85.7% | 85.7% | 85.7% | 20.0% | 70.2% | 24.2% | 75.8% |
+
+Final eval:
+
+| Split | Metric | Score |
+| --- | --- | ---: |
+| Perception | overall | 92.6% |
+| Perception | board_print | 100.0% |
+| Perception | board_to_fen | 100.0% |
+| Perception | square_lookup | 100.0% |
+| Perception | fen_assembly | 85.7% |
+| Perception | fen_row_application | 94.3% |
+| Perception | state_tracking | 91.4% |
+| Perception | material_count | 30.6% |
+| Rules | overall | 68.0% |
+| Rules | legal_moves | 26.1% |
+| Rules | piece_legal_moves | 52.3% |
+| Rules | side_piece_inventory | 87.7% |
+| Rules | legality_check | 77.1% |
+| Rules | check_detection | 91.6% |
+| Rules | special_rules | 73.5% |
+
+Interpretation:
+
+- The square/FEN curriculum worked. By 10k steps, the model crossed the Phase A
+  state-tracking target on the sidecar sample, and the final 500-example eval
+  reached 91.4% state tracking.
+- The main 1.9/1.10 simplification paid off: FEN assembly and row application
+  are no longer random format imitation. Remaining FEN misses are usually
+  capture-square, halfmove-clock, or one-cell placement mistakes.
+- Legal move generation is still the main bottleneck. The model often
+  over-generates pseudo-legal moves, misses blockers/check constraints, or
+  falls back to opening-position pawn/knight templates.
+- Material count is still a weak separate skill. It improved late in the run,
+  but exact count remains poor even when piece-family accuracy is much higher.
+- Later training after about 10k steps produced small but useful rules/material
+  gains while FEN/state mostly plateaued.
+- The final eval still failed the Phase A soft criteria on legal moves,
+  legality check, and the floor check. That is expected for this rehearsal, but
+  it argues against spending the full Phase A budget on the unchanged recipe.
+
 ### Current Critique
 
 The project is now closer to a real package than a pile of scripts, but the
-highest risk is still scientific, not mechanical. We can generate and train,
-but we have not yet proven that the current curriculum produces robust chess
-state tracking at scale. The next run should be sized to answer that question
-directly before spending a full multi-day budget.
+highest risk is still scientific, not mechanical. We can generate, train,
+checkpoint, resume, and sidecar-evaluate. The 25k rehearsal proved that the
+current curriculum can teach square/FEN mechanics at this model scale, but it
+also showed that legal move enumeration and exact material accounting need more
+explicit decomposition before the full Phase A budget is worth spending.
 
 Main risks:
 
-- The model may still overfit textual answer shapes without learning stable
-  board coordinates.
-- Multiple epochs over small generated data would waste time compared with
-  scaling unique examples.
-- Sidecar eval is ready enough to test, but full async checkpoint polling and
-  W&B comparison still need a longer rehearsal.
+- The model can now read and edit boards, but legal move generation remains too
+  unconstrained.
+- Material count exact-match quality is much worse than piece-family accuracy,
+  so the scoring target likely needs a staged count inventory curriculum.
+- More examples of the same mixed recipe may help, but the trend suggests it
+  will be inefficient for the weakest rules tasks.
+- Multiple epochs over small generated data would still waste time compared
+  with scaling unique examples.
 - Fast kernels are useful only if tokens/sec improves on the actual workload;
-  SDPA remains the baseline to beat.
+  SDPA remains the baseline to beat for training.
 
 ### Recommended Next Experiments
 
-1. Run the prepared 25K-per-task Phase A rehearsal for exactly one pass with
-   `--num-train-epochs 1`, `--skip-trainer-eval`, and SDPA.
-2. Run vLLM sidecar eval on the second GPU from saved checkpoints and the final
-   `best/` export.
-3. Compare tokens/sec, eval quality, and failure samples against the tiny
-   shakedown and the 120-step warmup.
-4. If square/FEN mapping improves, scale to the full 1.73M-row Phase A target
-   using the same one-pass recipe.
-5. If square/FEN metrics stay flat after a meaningful token budget, inspect
-   predictions before burning the full Phase A pass.
+1. Add targeted material-count decomposition: side inventory, per-piece counts,
+   piece values, subtotal arithmetic, and final material sentence as separate
+   tasks.
+2. Add targeted legal-move decomposition before full enumeration: side-piece
+   inventory, piece-ray blockers, attacked king filtering, pinned pieces, and
+   legal-vs-pseudo-legal contrast sets.
+3. Run a smaller targeted rules/material rehearsal before scaling the full
+   Phase A recipe.
+4. Keep the FEN/state tasks in the mix, but reduce their upsampling once they
+   consistently stay above the target.
+5. Use the final 25k rehearsal eval as the baseline for the next run.

@@ -40,6 +40,21 @@ Current target volumes:
   SDPA warmup reached about 10.6k-20.7k input tokens/sec, so keep the 25k
   rehearsal on `--attn-implementation auto`.
 
+## Latest Rehearsal Outcome
+
+The 2026-06-30 25k-per-task rehearsal completed one pass successfully on SDPA:
+
+- 22,137 optimizer steps.
+- 228.1M input tokens.
+- 4:59:56 train runtime.
+- 12.7k input tokens/sec.
+- Final vLLM sidecar eval: 92.6% perception overall, 68.0% rules overall.
+- State tracking reached 91.4%; legal move generation remained low at 26.1%.
+
+Decision: do not scale the unchanged recipe directly to the full 1.73M-row
+Phase A target. Add targeted material-count and legal-move decomposition first,
+then run a smaller focused rehearsal and compare against the 25k baseline.
+
 ## Preflight Checklist
 
 From the Windows repo root:
