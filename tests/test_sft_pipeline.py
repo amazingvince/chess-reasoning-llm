@@ -78,6 +78,62 @@ def test_package_run_tier_regenerates_incomplete_existing_output(monkeypatch, tm
     assert len(rows) == 2
 
 
+def test_package_run_tier_extends_valid_output_without_reusing_examples(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.output import PipelineStats
+
+    def example(idx: int) -> dict:
+        row = _valid_example("9.4_fake_append", 9, idx)
+        row["metadata"] = {"example_identity": f"fake-{idx}"}
+        return row
+
+    class ExtendingGenerator:
+        def __init__(self, config=None, *args, **kwargs):
+            self.config = config or {}
+
+        def task_id(self) -> str:
+            return "9.4_fake_append"
+
+        def target_volume(self) -> int:
+            return int(self.config.get("volume_override", 0))
+
+        def generate(self):
+            for idx in range(self.target_volume()):
+                yield example(idx)
+
+    tier_dir = tmp_path / "tier9"
+    tier_dir.mkdir()
+    output_path = tier_dir / "9.4_fake_append.jsonl"
+    output_path.write_text(json.dumps(example(0)) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path)
+    monkeypatch.setitem(pipeline.TIER_GENERATORS, 9, [ExtendingGenerator])
+
+    pipeline.run_tier(9, {}, frozenset(), PipelineStats(), volume_override=3)
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["metadata"]["example_identity"] for row in rows] == [
+        "fake-0",
+        "fake-1",
+        "fake-2",
+    ]
+    assert [row["messages"][2]["content"] for row in rows] == [
+        "answer 0",
+        "answer 1",
+        "answer 2",
+    ]
+    manifest = json.loads(
+        (tier_dir / "9.4_fake_append.manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["previous_count"] == 1
+    assert manifest["target_count"] == 3
+    assert manifest["appended_count"] == 2
+    assert manifest["skipped_duplicate_count"] >= 1
+
+
 def test_pipeline_stats_for_volume_override_reports_effective_targets():
     from chess_llm.sft import pipeline
 
@@ -306,6 +362,8 @@ def test_pipeline_help_lists_source_readiness_controls():
 
     assert "--allow-source-gaps" in help_text
     assert "--source-readiness-report" in help_text
+    assert "--eval-split-volume" in help_text
+    assert "--refresh-eval-splits" in help_text
     assert "--tier" in help_text
 
 
@@ -648,6 +706,42 @@ def test_run_eval_splits_rebuilds_existing_blocklist_without_manifest(
 
     assert blocklist == frozenset({"new-fen"})
     assert captured["split_sizes"] is not None
+
+
+def test_run_eval_splits_refuses_manifest_change_when_outputs_exist(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+
+    monkeypatch.setattr(pipeline, "EVAL_SPLITS_DIR", tmp_path / "eval_splits")
+    monkeypatch.setattr(pipeline, "BENCHMARK_DIR", tmp_path / "benchmark")
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path / "output")
+    pipeline.EVAL_SPLITS_DIR.mkdir()
+    (pipeline.EVAL_SPLITS_DIR / "blocklist.txt").write_text("old-fen\n", encoding="utf-8")
+    output_dir = pipeline.TIER_OUTPUT_DIR / "tier1"
+    output_dir.mkdir(parents=True)
+    (output_dir / "1.1_fen_to_board.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def fail_generate(*_args, **_kwargs):
+        raise AssertionError("eval split generation should not run")
+
+    monkeypatch.setattr(pipeline, "generate_all_eval_splits", fail_generate)
+
+    with pytest.raises(RuntimeError, match="eval split manifest changed"):
+        pipeline.run_eval_splits(
+            {
+                "fen_pool": [{"fen": STARTING_FEN, "is_chess960": False}],
+                "openings": [],
+                "position_evals": [],
+                "puzzles": [],
+                "best_move_evals": [],
+                "endgame_positions": [],
+                "mate_rows": [],
+            },
+            volume_override=20,
+            tiers=[1],
+        )
 
 
 def test_run_eval_splits_reuses_existing_blocklist_when_manifest_matches(

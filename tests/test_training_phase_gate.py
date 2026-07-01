@@ -71,6 +71,10 @@ def test_package_phase_gate_excludes_diagnostic_mechanics_from_floor_checks():
             "rank_lookup": 0.0,
             "move_square_edits": 0.0,
             "fen_assembly": 0.0,
+            "material_inventory": 0.0,
+            "material_piece_counts": 0.0,
+            "material_value_totals": 0.0,
+            "material_balance_trace": 0.0,
         },
         "rules": {
             "legal_moves": 0.90,
@@ -78,6 +82,10 @@ def test_package_phase_gate_excludes_diagnostic_mechanics_from_floor_checks():
             "legality_check_legality_reason_accuracy": 0.0,
             "side_piece_inventory": 0.0,
             "piece_legal_moves": 0.0,
+            "piece_pseudo_legal_moves": 0.0,
+            "piece_legal_filter": 0.0,
+            "king_safety_filter": 0.0,
+            "legal_moves_by_piece": 0.0,
         },
     }
 
@@ -88,9 +96,13 @@ def test_package_phase_gate_excludes_diagnostic_mechanics_from_floor_checks():
     assert "perception/rank_lookup" not in output
     assert "perception/move_square_edits" not in output
     assert "perception/fen_assembly" not in output
+    assert "perception/material_inventory" not in output
+    assert "perception/material_balance_trace" not in output
     assert "rules/legality_check_legality_reason_accuracy" not in output
     assert "rules/side_piece_inventory" not in output
     assert "rules/piece_legal_moves" not in output
+    assert "rules/piece_pseudo_legal_moves" not in output
+    assert "rules/king_safety_filter" not in output
 
 
 def test_package_phase_gate_excludes_diagnostic_mechanics_from_regression_checks():

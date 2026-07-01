@@ -1,5 +1,5 @@
 """
-Prompt templates for all 38 SFT generator tasks.
+Prompt templates for all 57 SFT generator tasks.
 
 Each task has multiple prompt variants. Generators call
 select_template(task_id, rng) to pick one at random. Templates may use
@@ -98,6 +98,38 @@ ANSWER_CONTRACTS: dict[str, str] = {
     "fen_board_edit": (
         'Answer format: return exactly "Result board FEN: <piece-placement-field>".'
     ),
+    "1.15_material_inventory": (
+        'Answer format: return exactly two lines starting "White inventory:" '
+        'and "Black inventory:".'
+    ),
+    "material_inventory": (
+        'Answer format: return exactly two lines starting "White inventory:" '
+        'and "Black inventory:".'
+    ),
+    "1.16_material_piece_counts": (
+        'Answer format: return exactly two lines starting "White counts:" '
+        'and "Black counts:".'
+    ),
+    "material_piece_counts": (
+        'Answer format: return exactly two lines starting "White counts:" '
+        'and "Black counts:".'
+    ),
+    "1.17_material_value_totals": (
+        'Answer format: return exactly two lines starting "White values:" '
+        'and "Black values:".'
+    ),
+    "material_value_totals": (
+        'Answer format: return exactly two lines starting "White values:" '
+        'and "Black values:".'
+    ),
+    "1.18_material_balance_trace": (
+        'Answer format: return exactly four lines starting "Inventory:", '
+        '"Counts:", "Values:", and "Final:".'
+    ),
+    "material_balance_trace": (
+        'Answer format: return exactly four lines starting "Inventory:", '
+        '"Counts:", "Values:", and "Final:".'
+    ),
     "2.1_legal_move_gen": (
         'Answer format: return exactly two lines: "Side to move: <white|black>." '
         'then "Legal moves: <space-separated UCI moves>".'
@@ -105,6 +137,38 @@ ANSWER_CONTRACTS: dict[str, str] = {
     "legal_moves": (
         'Answer format: return exactly two lines: "Side to move: <white|black>." '
         'then "Legal moves: <space-separated UCI moves>".'
+    ),
+    "2.6_piece_pseudo_legal_moves": (
+        'Answer format: return exactly "Pseudo-legal moves from <square>: '
+        '<space-separated UCI moves>".'
+    ),
+    "piece_pseudo_legal_moves": (
+        'Answer format: return exactly "Pseudo-legal moves from <square>: '
+        '<space-separated UCI moves>".'
+    ),
+    "2.7_piece_legal_filter": (
+        'Answer format: return exactly three lines starting "Pseudo-legal from", '
+        '"Legal:", and "Rejected:".'
+    ),
+    "piece_legal_filter": (
+        'Answer format: return exactly three lines starting "Pseudo-legal from", '
+        '"Legal:", and "Rejected:".'
+    ),
+    "2.8_king_safety_filter": (
+        'Answer format: return exactly four lines starting "Move:", '
+        '"Pseudo-legal:", "King safe after move:", and "Final:".'
+    ),
+    "king_safety_filter": (
+        'Answer format: return exactly four lines starting "Move:", '
+        '"Pseudo-legal:", "King safe after move:", and "Final:".'
+    ),
+    "2.9_legal_moves_by_piece": (
+        'Answer format: include "Side to move:", "Pieces:", "Moves by piece:", '
+        'one line per side-to-move piece, and "All legal moves:".'
+    ),
+    "legal_moves_by_piece": (
+        'Answer format: include "Side to move:", "Pieces:", "Moves by piece:", '
+        'one line per side-to-move piece, and "All legal moves:".'
     ),
 }
 
@@ -227,6 +291,26 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nMove {move} creates board edits: {edit_text}\nWhat is the new piece-placement field?",
         "Starting board FEN: {board_fen_before}\nChanged squares: {edit_text}\nAssemble the updated board FEN.",
     ],
+    "1.15_material_inventory": [
+        "FEN: {fen}\nList the material inventory by side and piece type.",
+        "Position: {fen}\nInventory white and black pieces by type.",
+        "Board:\n{board}\nGive the material inventory for both sides.",
+    ],
+    "1.16_material_piece_counts": [
+        "FEN: {fen}\nCount each piece type for both sides.",
+        "Position: {fen}\nReturn the white and black material count vectors.",
+        "Board:\n{board}\nCount kings, queens, rooks, bishops, knights, and pawns for each side.",
+    ],
+    "1.17_material_value_totals": [
+        "FEN: {fen}\nConvert the piece counts into material value totals.",
+        "Position: {fen}\nUse standard piece values and total the material for both sides.",
+        "Board:\n{board}\nCalculate material value totals for white and black.",
+    ],
+    "1.18_material_balance_trace": [
+        "FEN: {fen}\nTrace inventory, counts, values, and final material balance.",
+        "Position: {fen}\nShow a structured material-count trace ending with the balance.",
+        "Board:\n{board}\nWork through material inventory, counts, value totals, and final balance.",
+    ],
 
     # ---- Tier 2: Rules ----
     "2.0_side_piece_inventory": [
@@ -284,6 +368,26 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nIdentify any special rules that apply here.",
         "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nWhat special rules apply here?",
         "Board:\n{board}\nFEN: {fen}\nWhat promotion options are available for the pawn on {square}?",
+    ],
+    "2.6_piece_pseudo_legal_moves": [
+        "FEN: {fen}\nList pseudo-legal moves from {square}.",
+        "Position: {fen}\nFor the piece on {square}, list pseudo-legal UCI moves before king-safety filtering.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nList pseudo-legal moves from {square}.",
+    ],
+    "2.7_piece_legal_filter": [
+        "FEN: {fen}\nFor the piece on {square}, split pseudo-legal moves into legal and rejected moves.",
+        "Position: {fen}\nFilter the pseudo-legal moves from {square} by king safety.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nShow pseudo-legal, legal, and rejected moves from {square}.",
+    ],
+    "2.8_king_safety_filter": [
+        "FEN: {fen}\nFor move {move}, decide whether king safety allows it.",
+        "Position: {fen}\nCheck the pseudo-legal move {move} against king-safety rules.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nMove: {move}\nDoes this leave the king safe?",
+    ],
+    "2.9_legal_moves_by_piece": [
+        "FEN: {fen}\nGroup all legal moves by side-to-move piece.",
+        "Position: {fen}\nList side-to-move pieces and their legal UCI moves, then all legal moves.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nReturn legal moves grouped by piece.",
     ],
 
     # ---- Tier 3: Tactics ----

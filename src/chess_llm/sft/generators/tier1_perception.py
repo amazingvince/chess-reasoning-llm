@@ -123,6 +123,122 @@ def _piece_count_vector(counts: dict[str, int]) -> dict[str, int]:
     }
 
 
+def _material_summary(board: chess.Board) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    for color_name, color in (("white", chess.WHITE), ("black", chess.BLACK)):
+        inventory: dict[str, list[str]] = {name: [] for name in _PIECE_NAMES.values()}
+        counts: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        values: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        total = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is None or piece.color != color:
+                continue
+            name = _PIECE_NAMES[piece.piece_type]
+            value = _PIECE_VALUES[piece.piece_type]
+            inventory[name].append(chess.square_name(square))
+            counts[name] += 1
+            values[name] += value
+            total += value
+        summary[color_name] = {
+            "inventory": inventory,
+            "counts": counts,
+            "values": values,
+            "total": total,
+        }
+    return summary
+
+
+def _material_inventory_vector(summary: dict[str, object]) -> str:
+    inventory = summary["inventory"]
+    assert isinstance(inventory, dict)
+    parts = []
+    for piece_type in _PIECE_INVENTORY_ORDER:
+        name = _PIECE_NAMES[piece_type]
+        squares = inventory.get(name, [])
+        square_text = ",".join(squares) if squares else "none"
+        parts.append(f"{name}={square_text}")
+    return "; ".join(parts)
+
+
+def _material_count_vector_text(summary: dict[str, object]) -> str:
+    counts = summary["counts"]
+    assert isinstance(counts, dict)
+    return "; ".join(
+        f"{_PIECE_NAMES[piece_type]}={counts.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_INVENTORY_ORDER
+    )
+
+
+def _material_value_vector_text(summary: dict[str, object]) -> str:
+    values = summary["values"]
+    assert isinstance(values, dict)
+    total = int(summary["total"])
+    parts = [
+        f"{_PIECE_NAMES[piece_type]}={values.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_INVENTORY_ORDER
+    ]
+    parts.append(f"total={total}")
+    return "; ".join(parts)
+
+
+def _material_balance_sentence(white_total: int, black_total: int) -> str:
+    balance = white_total - black_total
+    if balance > 0:
+        return f"White is up {balance} point(s) of material."
+    if balance < 0:
+        return f"Black is up {abs(balance)} point(s) of material."
+    return "Material is equal."
+
+
+def _format_material_inventory_answer(board: chess.Board) -> str:
+    summary = _material_summary(board)
+    return (
+        f"White inventory: {_material_inventory_vector(summary['white'])}.\n"
+        f"Black inventory: {_material_inventory_vector(summary['black'])}."
+    )
+
+
+def _format_material_piece_counts_answer(board: chess.Board) -> str:
+    summary = _material_summary(board)
+    return (
+        f"White counts: {_material_count_vector_text(summary['white'])}.\n"
+        f"Black counts: {_material_count_vector_text(summary['black'])}."
+    )
+
+
+def _format_material_value_totals_answer(board: chess.Board) -> str:
+    summary = _material_summary(board)
+    return (
+        f"White values: {_material_value_vector_text(summary['white'])}.\n"
+        f"Black values: {_material_value_vector_text(summary['black'])}."
+    )
+
+
+def _format_material_balance_trace_answer(board: chess.Board) -> str:
+    summary = _material_summary(board)
+    white = summary["white"]
+    black = summary["black"]
+    white_total = int(white["total"])
+    black_total = int(black["total"])
+    return "\n".join(
+        [
+            (
+                "Inventory: "
+                f"white {_material_inventory_vector(white)} | "
+                f"black {_material_inventory_vector(black)}"
+            ),
+            (
+                "Counts: "
+                f"white {_material_count_vector_text(white)} | "
+                f"black {_material_count_vector_text(black)}"
+            ),
+            f"Values: white total={white_total}; black total={black_total}",
+            f"Final: {_material_balance_sentence(white_total, black_total)}",
+        ]
+    )
+
+
 def _state_tracking_changed_squares(
     before: chess.Board,
     after: chess.Board,
@@ -760,6 +876,93 @@ class PieceCounting(TaskGenerator):
             raw["metadata"] = metadata
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
+
+
+class _MaterialDecompositionTask(TaskGenerator):
+    """Base for compact material-count decomposition tasks."""
+
+    query_kind = "material_decomposition"
+
+    def tier(self) -> int:
+        return 1
+
+    def answer_for_board(self, board: chess.Board) -> str:
+        raise NotImplementedError
+
+    def generate(self) -> Iterator[dict]:
+        pool = self.config.get("fen_pool", [])
+        target = self.target_volume()
+        count = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+
+            answer = self.answer_for_board(board)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "query_kind": self.query_kind,
+                    "expected_answer": answer,
+                }
+            )
+            raw["metadata"] = metadata
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class MaterialInventory(_MaterialDecompositionTask):
+    """Task 1.15: List material inventory by side and piece type."""
+
+    query_kind = "material_inventory"
+
+    def task_id(self) -> str:
+        return "1.15_material_inventory"
+
+    def answer_for_board(self, board: chess.Board) -> str:
+        return _format_material_inventory_answer(board)
+
+
+class MaterialPieceCounts(_MaterialDecompositionTask):
+    """Task 1.16: Count each piece type for both sides."""
+
+    query_kind = "material_piece_counts"
+
+    def task_id(self) -> str:
+        return "1.16_material_piece_counts"
+
+    def answer_for_board(self, board: chess.Board) -> str:
+        return _format_material_piece_counts_answer(board)
+
+
+class MaterialValueTotals(_MaterialDecompositionTask):
+    """Task 1.17: Convert piece counts into material value totals."""
+
+    query_kind = "material_value_totals"
+
+    def task_id(self) -> str:
+        return "1.17_material_value_totals"
+
+    def answer_for_board(self, board: chess.Board) -> str:
+        return _format_material_value_totals_answer(board)
+
+
+class MaterialBalanceTrace(_MaterialDecompositionTask):
+    """Task 1.18: Structured material trace ending in the balance sentence."""
+
+    query_kind = "material_balance_trace"
+
+    def task_id(self) -> str:
+        return "1.18_material_balance_trace"
+
+    def answer_for_board(self, board: chess.Board) -> str:
+        return _format_material_balance_trace_answer(board)
 
 
 def _select_square_lookup_square(

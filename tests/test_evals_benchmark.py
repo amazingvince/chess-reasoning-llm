@@ -391,6 +391,50 @@ def test_package_rules_benchmark_derives_move_mechanics_tasks():
     assert packaged.score_prediction(legality, legality.gold_answer)["legality_reason_accuracy"] == 1.0
 
 
+def test_package_benchmark_derives_material_decomposition_diagnostics():
+    raw_examples = [{"fen": "8/8/8/8/8/8/6p1/4K2k w - - 0 1"} for _ in range(18)]
+
+    examples = packaged.freeze_split("perception", raw_examples, seed=42)
+    by_task = {example.task_type: example for example in examples}
+
+    for task_type in (
+        "material_inventory",
+        "material_piece_counts",
+        "material_value_totals",
+        "material_balance_trace",
+    ):
+        example = by_task[task_type]
+        assert example.metric_type == "text_exact_match"
+        assert example.metadata["diagnostic"] is True
+        assert example.metadata["hard_gate"] is False
+        assert packaged.score_prediction(example, example.gold_answer)["primary"] == 1.0
+
+    assert by_task["material_balance_trace"].gold_answer.endswith(
+        "Final: Black is up 1 point(s) of material."
+    )
+
+
+def test_package_benchmark_derives_legal_decomposition_diagnostics():
+    raw_examples = [{"fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"} for _ in range(11)]
+
+    examples = packaged.freeze_split("rules", raw_examples, seed=42)
+    by_task = {example.task_type: example for example in examples}
+
+    for task_type in (
+        "piece_pseudo_legal_moves",
+        "piece_legal_filter",
+        "king_safety_filter",
+        "legal_moves_by_piece",
+    ):
+        example = by_task[task_type]
+        assert example.metric_type == "text_exact_match"
+        assert example.metadata["diagnostic"] is True
+        assert example.metadata["hard_gate"] is False
+        assert packaged.score_prediction(example, example.gold_answer)["primary"] == 1.0
+
+    assert "Rejected:" in by_task["piece_legal_filter"].gold_answer
+
+
 def test_package_piece_legal_moves_benchmark_can_score_no_move_piece():
     raw = {"fen": STARTING_FEN}
 

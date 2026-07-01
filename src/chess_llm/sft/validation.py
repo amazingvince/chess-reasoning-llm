@@ -30,6 +30,22 @@ _PIECE_NAMES = {
     chess.QUEEN: "queen",
     chess.KING: "king",
 }
+_PIECE_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 0,
+}
+_PIECE_ORDER = (
+    chess.KING,
+    chess.QUEEN,
+    chess.ROOK,
+    chess.BISHOP,
+    chess.KNIGHT,
+    chess.PAWN,
+)
 
 
 def validate_fen(fen: str, chess960: bool = False) -> bool:
@@ -202,6 +218,223 @@ def _side_piece_inventory_answer(board: chess.Board) -> tuple[str, list[dict[str
     if not pieces:
         pieces = "none"
     return f"Side to move: {side}.\nPieces: {pieces}.", inventory
+
+
+def _material_summary(board: chess.Board) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    for color_name, color in (("white", chess.WHITE), ("black", chess.BLACK)):
+        inventory: dict[str, list[str]] = {name: [] for name in _PIECE_NAMES.values()}
+        counts: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        values: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        total = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is None or piece.color != color:
+                continue
+            name = _PIECE_NAMES[piece.piece_type]
+            value = _PIECE_VALUES[piece.piece_type]
+            inventory[name].append(chess.square_name(square))
+            counts[name] += 1
+            values[name] += value
+            total += value
+        summary[color_name] = {
+            "inventory": inventory,
+            "counts": counts,
+            "values": values,
+            "total": total,
+        }
+    return summary
+
+
+def _material_inventory_vector(summary: dict[str, object]) -> str:
+    inventory = summary["inventory"]
+    assert isinstance(inventory, dict)
+    parts = []
+    for piece_type in _PIECE_ORDER:
+        name = _PIECE_NAMES[piece_type]
+        squares = inventory.get(name, [])
+        square_text = ",".join(squares) if squares else "none"
+        parts.append(f"{name}={square_text}")
+    return "; ".join(parts)
+
+
+def _material_count_vector_text(summary: dict[str, object]) -> str:
+    counts = summary["counts"]
+    assert isinstance(counts, dict)
+    return "; ".join(
+        f"{_PIECE_NAMES[piece_type]}={counts.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_ORDER
+    )
+
+
+def _material_value_vector_text(summary: dict[str, object]) -> str:
+    values = summary["values"]
+    assert isinstance(values, dict)
+    parts = [
+        f"{_PIECE_NAMES[piece_type]}={values.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_ORDER
+    ]
+    parts.append(f"total={int(summary['total'])}")
+    return "; ".join(parts)
+
+
+def _material_balance_sentence(white_total: int, black_total: int) -> str:
+    balance = white_total - black_total
+    if balance > 0:
+        return f"White is up {balance} point(s) of material."
+    if balance < 0:
+        return f"Black is up {abs(balance)} point(s) of material."
+    return "Material is equal."
+
+
+def _material_decomposition_answer(task: str, board: chess.Board) -> str:
+    summary = _material_summary(board)
+    white = summary["white"]
+    black = summary["black"]
+    if task == "1.15_material_inventory":
+        return (
+            f"White inventory: {_material_inventory_vector(white)}.\n"
+            f"Black inventory: {_material_inventory_vector(black)}."
+        )
+    if task == "1.16_material_piece_counts":
+        return (
+            f"White counts: {_material_count_vector_text(white)}.\n"
+            f"Black counts: {_material_count_vector_text(black)}."
+        )
+    if task == "1.17_material_value_totals":
+        return (
+            f"White values: {_material_value_vector_text(white)}.\n"
+            f"Black values: {_material_value_vector_text(black)}."
+        )
+    white_total = int(white["total"])
+    black_total = int(black["total"])
+    return "\n".join(
+        [
+            (
+                "Inventory: "
+                f"white {_material_inventory_vector(white)} | "
+                f"black {_material_inventory_vector(black)}"
+            ),
+            (
+                "Counts: "
+                f"white {_material_count_vector_text(white)} | "
+                f"black {_material_count_vector_text(black)}"
+            ),
+            f"Values: white total={white_total}; black total={black_total}",
+            f"Final: {_material_balance_sentence(white_total, black_total)}",
+        ]
+    )
+
+
+def _move_text(moves: list[str], *, empty: str = "none") -> str:
+    return " ".join(moves) if moves else empty
+
+
+def _pseudo_legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.pseudo_legal_moves
+        if move.from_square == square
+    )
+
+
+def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.legal_moves
+        if move.from_square == square
+    )
+
+
+def _legal_moves_by_piece(board: chess.Board) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece is not None and piece.color == board.turn:
+            grouped[chess.square_name(square)] = []
+    for move in sorted(board.legal_moves, key=lambda item: item.uci()):
+        grouped.setdefault(chess.square_name(move.from_square), []).append(move.uci())
+    return grouped
+
+
+def _legal_moves_by_piece_answer(board: chess.Board) -> str:
+    side = "white" if board.turn == chess.WHITE else "black"
+    grouped = _legal_moves_by_piece(board)
+    pieces = []
+    move_lines = []
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece is None or piece.color != board.turn:
+            continue
+        square_name = chess.square_name(square)
+        phrase = _piece_phrase(piece)
+        pieces.append(f"{square_name} {phrase}")
+        moves = grouped.get(square_name, [])
+        move_lines.append(f"{square_name} {phrase}: {_move_text(moves, empty='no legal moves')}")
+    legal_moves = sorted(move.uci() for move in board.legal_moves)
+    return (
+        f"Side to move: {side}.\n"
+        f"Pieces: {'; '.join(pieces) if pieces else 'none'}.\n"
+        "Moves by piece:\n"
+        + "\n".join(move_lines)
+        + f"\nAll legal moves: {_move_text(legal_moves)}"
+    )
+
+
+def _king_safety_answer(board: chess.Board, move_uci: str) -> str:
+    classification = classify_move_legality(board, move_uci)
+    try:
+        move = chess.Move.from_uci(move_uci)
+        pseudo = board.is_pseudo_legal(move)
+    except (TypeError, ValueError):
+        pseudo = False
+    return "\n".join(
+        [
+            f"Move: {move_uci}.",
+            f"Pseudo-legal: {'yes' if pseudo else 'no'}.",
+            f"King safe after move: {'yes' if classification.is_legal else 'no'}.",
+            (
+                "Final: legal; legal."
+                if classification.is_legal
+                else f"Final: illegal; {classification.reason_label}."
+            ),
+        ]
+    )
+
+
+def _legal_decomposition_answer(
+    task: str,
+    board: chess.Board,
+    metadata: Mapping,
+) -> str | None:
+    if task in {"2.6_piece_pseudo_legal_moves", "2.7_piece_legal_filter"}:
+        source_square = metadata.get("source_square") or metadata.get("square")
+        if not source_square:
+            return None
+        try:
+            square = chess.parse_square(str(source_square))
+        except ValueError:
+            return None
+        pseudo = _pseudo_legal_moves_from_square(board, square)
+        if task == "2.6_piece_pseudo_legal_moves":
+            return f"Pseudo-legal moves from {source_square}: {_move_text(pseudo)}"
+        legal = _legal_moves_from_square(board, square)
+        rejected = sorted(set(pseudo) - set(legal))
+        return "\n".join(
+            [
+                f"Pseudo-legal from {source_square}: {_move_text(pseudo)}.",
+                f"Legal: {_move_text(legal)}.",
+                f"Rejected: {_move_text(rejected)}.",
+            ]
+        )
+    if task == "2.8_king_safety_filter":
+        tested_move = metadata.get("tested_move") or metadata.get("move")
+        if not tested_move:
+            return None
+        return _king_safety_answer(board, str(tested_move))
+    if task == "2.9_legal_moves_by_piece":
+        return _legal_moves_by_piece_answer(board)
+    return None
 
 
 def _piece_fen_char(piece: chess.Piece | None) -> str:
@@ -579,6 +812,27 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 )
             )
 
+    if task in {
+        "1.15_material_inventory",
+        "1.16_material_piece_counts",
+        "1.17_material_value_totals",
+        "1.18_material_balance_trace",
+    } and validate_fen(fen, chess960=is_960):
+        board = chess.Board(fen, chess960=is_960)
+        actual_answer = _material_decomposition_answer(task, board)
+        expected_answer = metadata.get("expected_answer", "")
+        if not expected_answer:
+            errors.append("Missing expected_answer metadata for material decomposition")
+        elif str(expected_answer) != actual_answer:
+            errors.append("Material decomposition expected_answer metadata does not match actual FEN")
+        errors.extend(
+            _require_exact_assistant_answer(
+                messages,
+                actual_answer,
+                "Material decomposition",
+            )
+        )
+
     if task == "1.6_square_lookup":
         expected_answer = metadata.get("expected_answer", "")
         square = metadata.get("square", "")
@@ -930,6 +1184,30 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 for content in _assistant_contents(messages):
                     if _parse_uci_list_or_no_moves(content) != actual_moves:
                         errors.append("Piece-specific move list does not match actual legal moves")
+
+    if task in {
+        "2.6_piece_pseudo_legal_moves",
+        "2.7_piece_legal_filter",
+        "2.8_king_safety_filter",
+        "2.9_legal_moves_by_piece",
+    } and validate_fen(fen, chess960=is_960):
+        board = chess.Board(fen, chess960=is_960)
+        actual_answer = _legal_decomposition_answer(task, board, metadata)
+        expected_answer = metadata.get("expected_answer", "")
+        if actual_answer is None:
+            errors.append("Missing or invalid metadata for legal decomposition")
+        else:
+            if not expected_answer:
+                errors.append("Missing expected_answer metadata for legal decomposition")
+            elif str(expected_answer) != actual_answer:
+                errors.append("Legal decomposition expected_answer metadata does not match actual FEN")
+            errors.extend(
+                _require_exact_assistant_answer(
+                    messages,
+                    actual_answer,
+                    "Legal decomposition",
+                )
+            )
 
     if task == "2.3_move_legality_check" and validate_fen(fen, chess960=is_960):
         tested_move = metadata.get("tested_move", "")

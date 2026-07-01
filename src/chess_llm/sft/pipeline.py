@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 from random import Random
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from chess_llm.evals.benchmark import freeze_and_save
 from chess_llm.sft.completeness import audit_output_completeness
@@ -359,9 +359,12 @@ def run_eval_splits(
     volume_override: int | None = None,
     *,
     tiers: Sequence[int] | None = None,
+    eval_split_volume: int | None = None,
+    refresh_eval_splits: bool = False,
 ) -> frozenset[str]:
     """Generate eval splits, freeze benchmark, and return the blocklist."""
     selected_splits = set(eval_splits_for_tiers(list(tiers or [])))
+    split_volume = eval_split_volume if eval_split_volume is not None else volume_override
     all_openings_count = len(config.get("openings", []))
     prepared_sources = build_eval_split_sources(
         config,
@@ -379,7 +382,7 @@ def run_eval_splits(
     blocklist_path = EVAL_SPLITS_DIR / "blocklist.txt"
     split_sizes = effective_eval_split_sizes(
         EVAL_SPLIT_SIZES,
-        volume_override=volume_override,
+        volume_override=split_volume,
     )
     split_sizes = {
         split_name: split_size
@@ -393,12 +396,13 @@ def run_eval_splits(
     split_sizes = reserve_training_rows_for_volume(
         split_sizes,
         prepared_sources,
-        volume_override=volume_override,
+        volume_override=split_volume,
     )
     expected_manifest = build_eval_split_manifest(
         prepared_sources,
         split_sizes=split_sizes,
         volume_override=volume_override,
+        eval_split_volume=eval_split_volume,
     )
     if blocklist_path.exists() and eval_split_manifest_matches(
         EVAL_SPLITS_DIR,
@@ -411,6 +415,11 @@ def run_eval_splits(
             _freeze_from_disk(split_names=split_sizes)
         return blocklist
     if blocklist_path.exists():
+        if _has_existing_tier_outputs(tiers) and not refresh_eval_splits:
+            raise RuntimeError(
+                "eval split manifest changed while tier outputs already exist; "
+                "use --refresh-eval-splits or a fresh output root"
+            )
         logger.info(
             "Existing eval blocklist does not match current generation settings; "
             "rebuilding eval splits."
@@ -432,7 +441,7 @@ def run_eval_splits(
         splits,
         BENCHMARK_DIR,
         seed=MASTER_SEED,
-        strict_coverage=(volume_override is None),
+        strict_coverage=(volume_override is None and eval_split_volume is None),
     )
     return build_blocklist(splits)
 
@@ -442,6 +451,7 @@ def build_eval_split_manifest(
     *,
     split_sizes: dict[str, int],
     volume_override: int | None,
+    eval_split_volume: int | None = None,
 ) -> dict:
     """Build a deterministic manifest for deciding eval split reuse."""
     return {
@@ -449,6 +459,7 @@ def build_eval_split_manifest(
         "schema_version": "1.0",
         "master_seed": MASTER_SEED,
         "volume_override": volume_override,
+        "eval_split_volume": eval_split_volume,
         "min_depth_eval_benchmark": MIN_DEPTH_EVAL_BENCHMARK,
         "split_sizes": dict(sorted(split_sizes.items())),
         "source_counts": {
@@ -562,6 +573,186 @@ def _scan_task_output(
     return count, errors
 
 
+def _task_manifest_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".manifest.json")
+
+
+def _example_identity(example: dict) -> str | None:
+    metadata = example.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    identity = metadata.get("example_identity")
+    return str(identity) if identity else None
+
+
+def _scan_task_output_identities(
+    output_path: Path,
+    task_id: str,
+    blocklist: frozenset[str] | None = None,
+) -> tuple[int, int, set[str], bool]:
+    """Return count, error count, identities, and whether any valid row lacks one."""
+    count = 0
+    errors = 0
+    identities: set[str] = set()
+    missing_identity = False
+    with output_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            count += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                errors += 1
+                continue
+
+            passed, _ = validate_example(obj)
+            if obj.get("task") != task_id:
+                passed = False
+            fen = obj.get("fen", "")
+            if passed and blocklist is not None and fen:
+                passed = check_no_contamination(
+                    fen,
+                    blocklist,
+                    chess960=raw_is_chess960(obj),
+                )
+            if not passed:
+                errors += 1
+                continue
+            identity = _example_identity(obj)
+            if identity is None:
+                missing_identity = True
+            elif identity in identities:
+                errors += 1
+            else:
+                identities.add(identity)
+    return count, errors, identities, missing_identity
+
+
+def _generation_source_fingerprint(config: dict) -> str:
+    digest = hashlib.sha256()
+    for key in (
+        "fen_pool",
+        "game_positions",
+        "puzzles",
+        "openings",
+        "position_evals",
+        "best_move_evals",
+        "endgame_positions",
+        "mate_rows",
+    ):
+        rows = config.get(key, [])
+        digest.update(key.encode("utf-8"))
+        digest.update(str(len(rows)).encode("utf-8"))
+        digest.update(b"\n")
+        for row in rows[:1000]:
+            if isinstance(row, Mapping):
+                digest.update(raw_fen_identity_key(row).encode("utf-8"))
+            else:
+                digest.update(str(row).encode("utf-8"))
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _write_task_generation_manifest(
+    output_path: Path,
+    *,
+    task_id: str,
+    target_count: int,
+    previous_count: int,
+    final_count: int,
+    appended_count: int,
+    skipped_duplicate_count: int,
+    source_fingerprint: str,
+) -> None:
+    payload = {
+        "artifact_type": "sft_task_generation_manifest",
+        "schema_version": "1.0",
+        "task_id": task_id,
+        "target_count": target_count,
+        "previous_count": previous_count,
+        "final_count": final_count,
+        "appended_count": appended_count,
+        "skipped_duplicate_count": skipped_duplicate_count,
+        "source_fingerprint": source_fingerprint,
+    }
+    manifest_path = _task_manifest_path(output_path)
+    with manifest_path.open("w", encoding="utf-8", newline="\n") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
+def _extend_task_output(
+    output_path: Path,
+    gen_cls: type,
+    gen_config: dict,
+    blocklist: frozenset[str],
+    *,
+    task_id: str,
+    target: int,
+    existing_count: int,
+    existing_identities: set[str],
+) -> tuple[int, int, int]:
+    """Append unseen generated rows to an existing valid task file."""
+    candidate_config = dict(gen_config)
+    if candidate_config.get("volume_override") is not None:
+        candidate_config["volume_override"] = target + existing_count
+    gen = gen_cls(config=candidate_config, blocklist=blocklist, rng=Random(MASTER_SEED + int(task_id.split(".", 1)[0])))
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    appended = 0
+    skipped_duplicate = 0
+    errors = 0
+    identities = set(existing_identities)
+
+    try:
+        with output_path.open(encoding="utf-8") as src, tmp_path.open(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as dst:
+            for line in src:
+                dst.write(line)
+            final_count = existing_count
+            for example in gen.generate():
+                identity = _example_identity(example)
+                if identity is None:
+                    errors += 1
+                    continue
+                if identity in identities:
+                    skipped_duplicate += 1
+                    continue
+                passed, _ = validate_example(example)
+                if example.get("task") != task_id:
+                    passed = False
+                fen = example.get("fen", "")
+                if passed and fen:
+                    passed = check_no_contamination(
+                        fen,
+                        blocklist,
+                        chess960=raw_is_chess960(example),
+                    )
+                if not passed:
+                    errors += 1
+                    continue
+                dst.write(json.dumps(example, ensure_ascii=False) + "\n")
+                identities.add(identity)
+                appended += 1
+                final_count += 1
+                if final_count >= target:
+                    break
+        if errors:
+            raise RuntimeError(f"{task_id} has {errors} validation error(s) while extending")
+        if final_count < target:
+            raise RuntimeError(f"{task_id} underfilled: wrote {final_count} / {target}")
+        tmp_path.replace(output_path)
+        return final_count, appended, skipped_duplicate
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
 def _assert_task_complete(task_id: str, count: int, errors: int, target: int) -> None:
     """Fail generation when the task file is invalid or below target volume."""
     if errors:
@@ -590,6 +781,7 @@ def run_tier(
     gen_config = dict(config)
     if volume_override is not None:
         gen_config["volume_override"] = volume_override
+    source_fingerprint = _generation_source_fingerprint(gen_config)
 
     for gen_cls in generators:
         gen = gen_cls(config=gen_config, blocklist=blocklist, rng=rng)
@@ -598,13 +790,25 @@ def run_tier(
         output_path = tier_dir / f"{task_id}.jsonl"
 
         if output_path.exists() and output_path.stat().st_size > 0:
-            existing, existing_errors = _scan_task_output(
-                output_path,
-                task_id,
-                blocklist=blocklist,
+            existing, existing_errors, existing_identities, missing_identity = (
+                _scan_task_output_identities(
+                    output_path,
+                    task_id,
+                    blocklist=blocklist,
+                )
             )
             if existing_errors == 0 and existing >= target:
                 _scan_task_output(output_path, task_id, stats, blocklist=blocklist)
+                _write_task_generation_manifest(
+                    output_path,
+                    task_id=task_id,
+                    target_count=target,
+                    previous_count=existing,
+                    final_count=existing,
+                    appended_count=0,
+                    skipped_duplicate_count=0,
+                    source_fingerprint=source_fingerprint,
+                )
                 logger.info(
                     "Skipping %s - output exists at %s (%d examples)",
                     task_id,
@@ -612,11 +816,52 @@ def run_tier(
                     existing,
                 )
                 continue
+            if existing_errors == 0 and not missing_identity and existing < target:
+                logger.info(
+                    "Extending %s - existing output has %d / %d examples",
+                    task_id,
+                    existing,
+                    target,
+                )
+                final_count, appended_count, skipped_duplicate_count = _extend_task_output(
+                    output_path,
+                    gen_cls,
+                    gen_config,
+                    blocklist,
+                    task_id=task_id,
+                    target=target,
+                    existing_count=existing,
+                    existing_identities=existing_identities,
+                )
+                _scan_task_output(output_path, task_id, stats, blocklist=blocklist)
+                _write_task_generation_manifest(
+                    output_path,
+                    task_id=task_id,
+                    target_count=target,
+                    previous_count=existing,
+                    final_count=final_count,
+                    appended_count=appended_count,
+                    skipped_duplicate_count=skipped_duplicate_count,
+                    source_fingerprint=source_fingerprint,
+                )
+                logger.info(
+                    "  %s: %d final, %d appended, %d duplicate candidate(s) skipped",
+                    task_id,
+                    final_count,
+                    appended_count,
+                    skipped_duplicate_count,
+                )
+                continue
+            existing_count, existing_errors = _scan_task_output(
+                output_path,
+                task_id,
+                blocklist=blocklist,
+            )
             logger.info(
                 "Regenerating %s - existing output incomplete or invalid "
                 "(%d / %d examples, %d error(s))",
                 task_id,
-                existing,
+                existing_count,
                 target,
                 existing_errors,
             )
@@ -636,6 +881,16 @@ def run_tier(
                 )
             _assert_task_complete(task_id, writer.count, writer.error_count, target)
             writer.commit()
+            _write_task_generation_manifest(
+                output_path,
+                task_id=task_id,
+                target_count=target,
+                previous_count=0,
+                final_count=writer.count,
+                appended_count=writer.count,
+                skipped_duplicate_count=0,
+                source_fingerprint=source_fingerprint,
+            )
 
         logger.info(
             "  %s: %d written, %d errors",
@@ -726,6 +981,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tier", type=int, nargs="+", help="Run specific tier(s)")
     parser.add_argument("--eval-only", action="store_true", help="Only generate eval splits")
     parser.add_argument("--volume", type=int, help="Override volume per task for testing")
+    parser.add_argument(
+        "--eval-split-volume",
+        type=int,
+        help=(
+            "Reserve eval splits as if this per-task volume were used; useful "
+            "when extending a small data root toward a larger run."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-eval-splits",
+        action="store_true",
+        help="Allow rebuilding eval splits even when tier outputs already exist.",
+    )
     parser.add_argument("--validate-only", action="store_true", help="Re-validate existing outputs")
     parser.add_argument(
         "--allow-source-gaps",
@@ -747,6 +1015,14 @@ def _output_file_matches_tiers(jsonl_path: Path, tiers: Sequence[int]) -> bool:
     except ValueError:
         relative = jsonl_path
     return bool(relative.parts) and relative.parts[0] in selected
+
+
+def _has_existing_tier_outputs(tiers: Sequence[int] | None = None) -> bool:
+    for jsonl_path in iter_jsonl_artifacts(TIER_OUTPUT_DIR):
+        if tiers is not None and not _output_file_matches_tiers(jsonl_path, tiers):
+            continue
+        return True
+    return False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -798,7 +1074,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    blocklist = run_eval_splits(config, volume_override=args.volume, tiers=tiers)
+    eval_split_kwargs = {
+        "volume_override": args.volume,
+        "tiers": tiers,
+    }
+    if args.eval_split_volume is not None:
+        eval_split_kwargs["eval_split_volume"] = args.eval_split_volume
+    if args.refresh_eval_splits:
+        eval_split_kwargs["refresh_eval_splits"] = args.refresh_eval_splits
+    blocklist = run_eval_splits(config, **eval_split_kwargs)
     logger.info("Eval blocklist: %d FENs", len(blocklist))
 
     if args.eval_only:

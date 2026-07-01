@@ -74,8 +74,16 @@ DIAGNOSTIC_TASK_TYPES = frozenset({
     "move_square_edits",
     "fen_assembly",
     "fen_row_application",
+    "material_inventory",
+    "material_piece_counts",
+    "material_value_totals",
+    "material_balance_trace",
     "side_piece_inventory",
     "piece_legal_moves",
+    "piece_pseudo_legal_moves",
+    "piece_legal_filter",
+    "king_safety_filter",
+    "legal_moves_by_piece",
 })
 FULL_FEN_STATE_PROMPT_TASK_TYPES = frozenset({
     "board_to_fen",
@@ -105,6 +113,10 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "fen_assembly",
         "fen_row_application",
         "state_tracking",
+        "material_inventory",
+        "material_piece_counts",
+        "material_value_totals",
+        "material_balance_trace",
     ],
     "rules": [
         "legal_moves",
@@ -114,6 +126,10 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "captures",
         "special_rules",
         "legality_check",
+        "piece_pseudo_legal_moves",
+        "piece_legal_filter",
+        "king_safety_filter",
+        "legal_moves_by_piece",
     ],
     "tactics": ["capture_id", "hanging_pieces", "threats", "tactical_patterns"],
     "evaluation": ["material_balance", "eval_bucket", "pawn_structure"],
@@ -129,6 +145,10 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "board_to_fen": "Here is the current board:\n{board}\nWrite the FEN for this position.",
     "piece_id": "FEN: {fen}\nWhat piece is on {square}?",
     "material_count": "FEN: {fen}\nWhat is the material count for both sides?",
+    "material_inventory": "FEN: {fen}\nList the material inventory by side and piece type.",
+    "material_piece_counts": "FEN: {fen}\nCount each piece type for both sides.",
+    "material_value_totals": "FEN: {fen}\nConvert the piece counts into material value totals.",
+    "material_balance_trace": "FEN: {fen}\nTrace inventory, counts, values, and final material balance.",
     "square_lookup": "FEN: {fen}\nWhat is on {square}?",
     "rank_lookup": "FEN: {fen}\nWhat is the compressed FEN row for rank {rank}?",
     "square_coordinates": "FEN: {fen}\nFor square {square}, give the FEN row-from-top and file index.",
@@ -142,6 +162,10 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "legal_moves": "FEN: {fen}\nList all legal moves.",
     "side_piece_inventory": "FEN: {fen}\nList the side-to-move pieces and their squares.",
     "piece_legal_moves": "FEN: {fen}\nWhat legal moves does the piece on {source_square} have?",
+    "piece_pseudo_legal_moves": "FEN: {fen}\nList pseudo-legal moves from {source_square}.",
+    "piece_legal_filter": "FEN: {fen}\nFor the piece on {source_square}, split pseudo-legal moves into legal and rejected moves.",
+    "king_safety_filter": "FEN: {fen}\nFor move {move}, decide whether king safety allows it.",
+    "legal_moves_by_piece": "FEN: {fen}\nGroup all legal moves by side-to-move piece.",
     "check_detection": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
     "captures": "FEN: {fen}\nList all capture moves available.",
     "special_rules": "Given FEN: {fen}\nList any special moves available (castling, en passant, promotion).",
@@ -171,6 +195,10 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "board_to_fen": "fen_exact_match",
     "piece_id": "exact_match",
     "material_count": "material_count",
+    "material_inventory": "text_exact_match",
+    "material_piece_counts": "text_exact_match",
+    "material_value_totals": "text_exact_match",
+    "material_balance_trace": "text_exact_match",
     "square_lookup": "text_exact_match",
     "rank_lookup": "text_exact_match",
     "square_coordinates": "text_exact_match",
@@ -184,6 +212,10 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "legal_moves": "uci_set_jaccard",
     "side_piece_inventory": "side_piece_inventory",
     "piece_legal_moves": "uci_set_jaccard",
+    "piece_pseudo_legal_moves": "text_exact_match",
+    "piece_legal_filter": "text_exact_match",
+    "king_safety_filter": "text_exact_match",
+    "legal_moves_by_piece": "text_exact_match",
     "check_detection": "check_state",
     "captures": "uci_set_jaccard",
     "special_rules": "special_rules",
@@ -234,6 +266,14 @@ _PIECE_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
 }
+_PIECE_ORDER = (
+    chess.KING,
+    chess.QUEEN,
+    chess.ROOK,
+    chess.BISHOP,
+    chess.KNIGHT,
+    chess.PAWN,
+)
 _WDL_LABELS = {
     2: "Win for the side to move.",
     1: "Cursed win (win but 50-move rule may prevent it).",
@@ -1092,6 +1132,117 @@ def _derive_material_count(fen: str, chess960: bool = False) -> str:
     )
 
 
+def _material_summary(board: chess.Board) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    for color_name, color in (("white", chess.WHITE), ("black", chess.BLACK)):
+        inventory: dict[str, list[str]] = {name: [] for name in _PIECE_NAMES.values()}
+        counts: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        values: dict[str, int] = {name: 0 for name in _PIECE_NAMES.values()}
+        total = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is None or piece.color != color:
+                continue
+            name = _PIECE_NAMES[piece.piece_type]
+            value = _PIECE_VALUES[piece.piece_type]
+            inventory[name].append(chess.square_name(square))
+            counts[name] += 1
+            values[name] += value
+            total += value
+        summary[color_name] = {
+            "inventory": inventory,
+            "counts": counts,
+            "values": values,
+            "total": total,
+        }
+    return summary
+
+
+def _material_inventory_vector(summary: dict[str, object]) -> str:
+    inventory = summary["inventory"]
+    assert isinstance(inventory, dict)
+    parts = []
+    for piece_type in _PIECE_ORDER:
+        name = _PIECE_NAMES[piece_type]
+        squares = inventory.get(name, [])
+        square_text = ",".join(squares) if squares else "none"
+        parts.append(f"{name}={square_text}")
+    return "; ".join(parts)
+
+
+def _material_count_vector_text(summary: dict[str, object]) -> str:
+    counts = summary["counts"]
+    assert isinstance(counts, dict)
+    return "; ".join(
+        f"{_PIECE_NAMES[piece_type]}={counts.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_ORDER
+    )
+
+
+def _material_value_vector_text(summary: dict[str, object]) -> str:
+    values = summary["values"]
+    assert isinstance(values, dict)
+    parts = [
+        f"{_PIECE_NAMES[piece_type]}={values.get(_PIECE_NAMES[piece_type], 0)}"
+        for piece_type in _PIECE_ORDER
+    ]
+    parts.append(f"total={int(summary['total'])}")
+    return "; ".join(parts)
+
+
+def _material_balance_sentence(white_total: int, black_total: int) -> str:
+    balance = white_total - black_total
+    if balance > 0:
+        return f"White is up {balance} point(s) of material."
+    if balance < 0:
+        return f"Black is up {abs(balance)} point(s) of material."
+    return "Material is equal."
+
+
+def _derive_material_decomposition(
+    task_type: str,
+    fen: str,
+    chess960: bool = False,
+) -> str:
+    board = _board_from_fen(fen, chess960=chess960)
+    summary = _material_summary(board)
+    white = summary["white"]
+    black = summary["black"]
+    if task_type == "material_inventory":
+        return (
+            f"White inventory: {_material_inventory_vector(white)}.\n"
+            f"Black inventory: {_material_inventory_vector(black)}."
+        )
+    if task_type == "material_piece_counts":
+        return (
+            f"White counts: {_material_count_vector_text(white)}.\n"
+            f"Black counts: {_material_count_vector_text(black)}."
+        )
+    if task_type == "material_value_totals":
+        return (
+            f"White values: {_material_value_vector_text(white)}.\n"
+            f"Black values: {_material_value_vector_text(black)}."
+        )
+    white_total = int(white["total"])
+    black_total = int(black["total"])
+    return "\n".join(
+        [
+            (
+                "Inventory: "
+                f"white {_material_inventory_vector(white)} | "
+                f"black {_material_inventory_vector(black)}"
+            ),
+            (
+                "Counts: "
+                f"white {_material_count_vector_text(white)} | "
+                f"black {_material_count_vector_text(black)}"
+            ),
+            f"Values: white total={white_total}; black total={black_total}",
+            f"Final: {_material_balance_sentence(white_total, black_total)}",
+        ]
+    )
+
+
 def _derive_special_rules(fen: str, chess960: bool = False) -> str:
     board = _board_from_fen(fen, chess960=chess960)
     parts: list[str] = []
@@ -1234,6 +1385,160 @@ def _derive_piece_legal_moves(
     answer = " ".join(moves) if moves else "No legal moves."
     piece_name = _PIECE_NAMES.get(piece.piece_type, "piece") if piece else "piece"
     return square_name, piece_name, answer
+
+
+def _move_text(moves: list[str], *, empty: str = "none") -> str:
+    return " ".join(moves) if moves else empty
+
+
+def _pseudo_legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.pseudo_legal_moves
+        if move.from_square == square
+    )
+
+
+def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.legal_moves
+        if move.from_square == square
+    )
+
+
+def _select_decomposition_square(
+    board: chess.Board,
+    *,
+    prefer_rejected: bool = False,
+) -> int | None:
+    candidates: list[tuple[int, list[str], list[str]]] = []
+    for square in _side_piece_squares(board):
+        pseudo = _pseudo_legal_moves_from_square(board, square)
+        if not pseudo:
+            continue
+        legal = _legal_moves_from_square(board, square)
+        candidates.append((square, pseudo, legal))
+    if prefer_rejected:
+        rejected = [
+            item
+            for item in candidates
+            if sorted(set(item[1]) - set(item[2]))
+        ]
+        if rejected:
+            return rejected[0][0]
+    if candidates:
+        return candidates[0][0]
+    return None
+
+
+def _derive_piece_pseudo_legal_moves(
+    fen: str,
+    chess960: bool = False,
+) -> tuple[str, str]:
+    board = _board_from_fen(fen, chess960=chess960)
+    square = _select_decomposition_square(board)
+    if square is None:
+        return "", ""
+    square_name = chess.square_name(square)
+    moves = _pseudo_legal_moves_from_square(board, square)
+    return square_name, f"Pseudo-legal moves from {square_name}: {_move_text(moves)}"
+
+
+def _derive_piece_legal_filter(
+    fen: str,
+    chess960: bool = False,
+) -> tuple[str, str]:
+    board = _board_from_fen(fen, chess960=chess960)
+    square = _select_decomposition_square(board, prefer_rejected=True)
+    if square is None:
+        return "", ""
+    square_name = chess.square_name(square)
+    pseudo = _pseudo_legal_moves_from_square(board, square)
+    legal = _legal_moves_from_square(board, square)
+    rejected = sorted(set(pseudo) - set(legal))
+    return square_name, "\n".join(
+        [
+            f"Pseudo-legal from {square_name}: {_move_text(pseudo)}.",
+            f"Legal: {_move_text(legal)}.",
+            f"Rejected: {_move_text(rejected)}.",
+        ]
+    )
+
+
+def _select_king_safety_move(board: chess.Board) -> str | None:
+    rejected: list[str] = []
+    legal: list[str] = []
+    for square in _side_piece_squares(board):
+        for move_uci in _pseudo_legal_moves_from_square(board, square):
+            classification = classify_move_legality(board, move_uci)
+            if classification.is_legal:
+                legal.append(move_uci)
+            else:
+                rejected.append(move_uci)
+    if rejected:
+        return sorted(rejected)[0]
+    if legal:
+        return sorted(legal)[0]
+    return None
+
+
+def _derive_king_safety_filter(
+    fen: str,
+    chess960: bool = False,
+) -> tuple[str, str, str, bool]:
+    board = _board_from_fen(fen, chess960=chess960)
+    move_uci = _select_king_safety_move(board)
+    if move_uci is None:
+        return "", "", "", False
+    classification = classify_move_legality(board, move_uci)
+    answer = "\n".join(
+        [
+            f"Move: {move_uci}.",
+            "Pseudo-legal: yes.",
+            f"King safe after move: {'yes' if classification.is_legal else 'no'}.",
+            (
+                "Final: legal; legal."
+                if classification.is_legal
+                else f"Final: illegal; {classification.reason_label}."
+            ),
+        ]
+    )
+    return move_uci, classification.reason_label, answer, classification.is_legal
+
+
+def _derive_legal_moves_by_piece(
+    fen: str,
+    chess960: bool = False,
+) -> tuple[str, dict[str, list[str]], str]:
+    board = _board_from_fen(fen, chess960=chess960)
+    grouped = {
+        chess.square_name(square): []
+        for square in _side_piece_squares(board)
+    }
+    for move in sorted(board.legal_moves, key=lambda item: item.uci()):
+        grouped.setdefault(chess.square_name(move.from_square), []).append(move.uci())
+
+    pieces = []
+    move_lines = []
+    for square in _side_piece_squares(board):
+        square_name = chess.square_name(square)
+        piece = board.piece_at(square)
+        if piece is None:
+            continue
+        phrase = _piece_phrase(piece)
+        pieces.append(f"{square_name} {phrase}")
+        moves = grouped.get(square_name, [])
+        move_lines.append(f"{square_name} {phrase}: {_move_text(moves, empty='no legal moves')}")
+    legal_moves = sorted(move.uci() for move in board.legal_moves)
+    answer = (
+        f"Side to move: {_side_name(board.turn)}.\n"
+        f"Pieces: {'; '.join(pieces) if pieces else 'none'}.\n"
+        "Moves by piece:\n"
+        + "\n".join(move_lines)
+        + f"\nAll legal moves: {_move_text(legal_moves)}"
+    )
+    return answer, grouped, _move_text(legal_moves)
 
 
 def _piece_fen_char(piece: chess.Piece | None) -> str:
@@ -1898,6 +2203,13 @@ def _derive_gold_answer_inner(
         return f"{color_name} {chess.piece_name(piece.piece_type)}"
     if task_type == "material_count":
         return _derive_material_count(fen, chess960=is_960)
+    if task_type in {
+        "material_inventory",
+        "material_piece_counts",
+        "material_value_totals",
+        "material_balance_trace",
+    }:
+        return _derive_material_decomposition(task_type, fen, chess960=is_960)
     if task_type == "square_lookup":
         square, answer = _derive_square_lookup(fen, rng, chess960=is_960)
         raw["_square_lookup_square"] = square
@@ -1968,6 +2280,28 @@ def _derive_gold_answer_inner(
         square, piece_name, answer = _derive_piece_legal_moves(fen, rng, chess960=is_960)
         raw["_piece_legal_moves_square"] = square
         raw["_piece_legal_moves_piece"] = piece_name
+        return answer
+    if task_type == "piece_pseudo_legal_moves":
+        square, answer = _derive_piece_pseudo_legal_moves(fen, chess960=is_960)
+        raw["_piece_pseudo_legal_moves_square"] = square
+        return answer
+    if task_type == "piece_legal_filter":
+        square, answer = _derive_piece_legal_filter(fen, chess960=is_960)
+        raw["_piece_legal_filter_square"] = square
+        return answer
+    if task_type == "king_safety_filter":
+        move_uci, reason_label, answer, is_legal = _derive_king_safety_filter(
+            fen,
+            chess960=is_960,
+        )
+        raw["_king_safety_filter_move"] = move_uci
+        raw["_king_safety_filter_reason_label"] = reason_label
+        raw["_king_safety_filter_is_legal"] = is_legal
+        return answer
+    if task_type == "legal_moves_by_piece":
+        answer, grouped, final_moves = _derive_legal_moves_by_piece(fen, chess960=is_960)
+        raw["_legal_moves_by_piece_grouped"] = grouped
+        raw["_legal_moves_by_piece_moves"] = final_moves
         return answer
     if task_type in ("check_detection", "check_detection_960"):
         return _derive_check_detection(fen, chess960=is_960)
@@ -2070,6 +2404,12 @@ def _render_prompt(task_type: str, raw: dict) -> str:
         ctx.setdefault("moves", raw.get("_state_tracking_moves", ""))
     if task_type == "piece_legal_moves":
         ctx.setdefault("source_square", raw.get("_piece_legal_moves_square", "e1"))
+    if task_type == "piece_pseudo_legal_moves":
+        ctx.setdefault("source_square", raw.get("_piece_pseudo_legal_moves_square", "e1"))
+    if task_type == "piece_legal_filter":
+        ctx.setdefault("source_square", raw.get("_piece_legal_filter_square", "e1"))
+    if task_type == "king_safety_filter":
+        ctx.setdefault("move", raw.get("_king_safety_filter_move", ""))
     if task_type == "legality_check":
         ctx.setdefault("move", raw.get("_legality_check_move", ""))
     if task_type == "threats":
@@ -2171,6 +2511,20 @@ def freeze_split(
             elif task_type == "piece_legal_moves":
                 metadata["source_square"] = raw.get("_piece_legal_moves_square", "")
                 metadata["piece"] = raw.get("_piece_legal_moves_piece", "")
+            elif task_type == "piece_pseudo_legal_moves":
+                metadata["source_square"] = raw.get("_piece_pseudo_legal_moves_square", "")
+            elif task_type == "piece_legal_filter":
+                metadata["source_square"] = raw.get("_piece_legal_filter_square", "")
+            elif task_type == "king_safety_filter":
+                metadata["move"] = raw.get("_king_safety_filter_move", "")
+                metadata["legality_reason_label"] = raw.get(
+                    "_king_safety_filter_reason_label",
+                    "",
+                )
+                metadata["expected_is_legal"] = raw.get("_king_safety_filter_is_legal", False)
+            elif task_type == "legal_moves_by_piece":
+                metadata["legal_moves_by_piece"] = raw.get("_legal_moves_by_piece_grouped", {})
+                metadata["legal_moves"] = raw.get("_legal_moves_by_piece_moves", "")
         if task_type == "legality_check":
             metadata["move"] = raw.get("_legality_check_move", "")
             metadata["legality_reason_label"] = raw.get("_legality_check_reason_label", "")

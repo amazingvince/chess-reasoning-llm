@@ -126,6 +126,160 @@ def _format_grouped_legal_moves(board: chess.Board) -> tuple[str, dict[str, list
     return answer, grouped, final_moves
 
 
+_LEGAL_DECOMPOSITION_FALLBACK_FENS: tuple[str, ...] = (
+    "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+    "4r2k/8/8/8/8/8/8/R3K3 w - - 0 1",
+    "7k/8/8/8/8/8/8/R3K3 w - - 0 1",
+)
+
+
+def _move_text(moves: list[str], *, empty: str = "none") -> str:
+    return " ".join(moves) if moves else empty
+
+
+def _pseudo_legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.pseudo_legal_moves
+        if move.from_square == square
+    )
+
+
+def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
+    return sorted(
+        move.uci()
+        for move in board.legal_moves
+        if move.from_square == square
+    )
+
+
+def _candidate_piece_squares(
+    board: chess.Board,
+    *,
+    prefer_rejected: bool = False,
+) -> list[int]:
+    candidates: list[tuple[int, list[str], list[str]]] = []
+    for square in _side_piece_squares(board):
+        pseudo = _pseudo_legal_moves_from_square(board, square)
+        if not pseudo:
+            continue
+        legal = _legal_moves_from_square(board, square)
+        candidates.append((square, pseudo, legal))
+    if prefer_rejected:
+        rejected = [
+            item
+            for item in candidates
+            if sorted(set(item[1]) - set(item[2]))
+        ]
+        if rejected:
+            return [item[0] for item in rejected]
+    return [item[0] for item in candidates]
+
+
+def _select_piece_square(
+    board: chess.Board,
+    *,
+    prefer_rejected: bool = False,
+) -> int | None:
+    candidates = _candidate_piece_squares(board, prefer_rejected=prefer_rejected)
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def _format_piece_pseudo_legal_answer(board: chess.Board, square: int) -> str:
+    square_name = chess.square_name(square)
+    pseudo = _pseudo_legal_moves_from_square(board, square)
+    return f"Pseudo-legal moves from {square_name}: {_move_text(pseudo)}"
+
+
+def _format_piece_legal_filter_answer(board: chess.Board, square: int) -> str:
+    square_name = chess.square_name(square)
+    pseudo = _pseudo_legal_moves_from_square(board, square)
+    legal = _legal_moves_from_square(board, square)
+    rejected = sorted(set(pseudo) - set(legal))
+    return "\n".join(
+        [
+            f"Pseudo-legal from {square_name}: {_move_text(pseudo)}.",
+            f"Legal: {_move_text(legal)}.",
+            f"Rejected: {_move_text(rejected)}.",
+        ]
+    )
+
+
+def _select_king_safety_move(board: chess.Board) -> str | None:
+    rejected: list[str] = []
+    legal: list[str] = []
+    for square in _side_piece_squares(board):
+        for move_uci in _pseudo_legal_moves_from_square(board, square):
+            classification = classify_move_legality(board, move_uci)
+            if classification.is_legal:
+                legal.append(move_uci)
+            else:
+                rejected.append(move_uci)
+    if rejected:
+        return sorted(rejected)[0]
+    if legal:
+        return sorted(legal)[0]
+    return None
+
+
+def _format_king_safety_filter_answer(board: chess.Board, move_uci: str) -> str:
+    classification = classify_move_legality(board, move_uci)
+    pseudo = False
+    try:
+        move = chess.Move.from_uci(move_uci)
+        pseudo = board.is_pseudo_legal(move)
+    except (TypeError, ValueError):
+        pseudo = False
+    return "\n".join(
+        [
+            f"Move: {move_uci}.",
+            f"Pseudo-legal: {'yes' if pseudo else 'no'}.",
+            f"King safe after move: {'yes' if classification.is_legal else 'no'}.",
+            (
+                "Final: legal; legal."
+                if classification.is_legal
+                else f"Final: illegal; {classification.reason_label}."
+            ),
+        ]
+    )
+
+
+def _format_legal_moves_by_piece_answer(
+    board: chess.Board,
+) -> tuple[str, dict[str, list[str]], str]:
+    legal_moves = sorted(move.uci() for move in board.legal_moves)
+    grouped = _legal_moves_by_piece(board)
+    pieces = []
+    move_lines = []
+    for square in _side_piece_squares(board):
+        square_name = chess.square_name(square)
+        piece = board.piece_at(square)
+        if piece is None:
+            continue
+        phrase = _piece_phrase(piece)
+        pieces.append(f"{square_name} {phrase}")
+        piece_moves = grouped.get(square_name, [])
+        move_lines.append(f"{square_name} {phrase}: {_move_text(piece_moves, empty='no legal moves')}")
+
+    final_moves = _move_text(legal_moves)
+    answer = (
+        f"Side to move: {_side_name(board.turn)}.\n"
+        f"Pieces: {'; '.join(pieces) if pieces else 'none'}.\n"
+        "Moves by piece:\n"
+        + "\n".join(move_lines)
+        + f"\nAll legal moves: {final_moves}"
+    )
+    return answer, grouped, final_moves
+
+
+def _legal_decomposition_pool(config: dict) -> list[dict]:
+    pool = list(config.get("fen_pool", []))
+    pool.extend({"fen": fen, "source": "synthetic_legal_decomposition"} for fen in _LEGAL_DECOMPOSITION_FALLBACK_FENS)
+    return pool
+
+
 class SidePieceInventory(TaskGenerator):
     """Task 2.0: List side-to-move pieces before move generation."""
 
@@ -270,6 +424,180 @@ class PieceSpecificMoves(TaskGenerator):
             raw.update({"square": square_name, "piece": pname, "metadata": metadata})
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class PiecePseudoLegalMoves(TaskGenerator):
+    """Task 2.6: List pseudo-legal moves for one side-to-move piece."""
+
+    def task_id(self) -> str:
+        return "2.6_piece_pseudo_legal_moves"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = _legal_decomposition_pool(self.config)
+        target = self.target_volume()
+        count = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            square = _select_piece_square(board)
+            if square is None:
+                continue
+            square_name = chess.square_name(square)
+            piece = board.piece_at(square)
+            answer = _format_piece_pseudo_legal_answer(board, square)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source_square": square_name,
+                    "piece": _PIECE_NAMES.get(piece.piece_type, "piece") if piece else "piece",
+                    "pseudo_legal_moves": _move_text(_pseudo_legal_moves_from_square(board, square)),
+                    "expected_answer": answer,
+                }
+            )
+            raw.update({"square": square_name, "metadata": metadata})
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class PieceLegalFilter(TaskGenerator):
+    """Task 2.7: Split one piece's pseudo-legal moves into legal/rejected."""
+
+    def task_id(self) -> str:
+        return "2.7_piece_legal_filter"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = _legal_decomposition_pool(self.config)
+        target = self.target_volume()
+        count = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            square = _select_piece_square(board, prefer_rejected=True)
+            if square is None:
+                continue
+            square_name = chess.square_name(square)
+            pseudo = _pseudo_legal_moves_from_square(board, square)
+            legal = _legal_moves_from_square(board, square)
+            rejected = sorted(set(pseudo) - set(legal))
+            answer = _format_piece_legal_filter_answer(board, square)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source_square": square_name,
+                    "pseudo_legal_moves": _move_text(pseudo),
+                    "legal_moves": _move_text(legal),
+                    "rejected_moves": _move_text(rejected),
+                    "expected_answer": answer,
+                }
+            )
+            raw.update({"square": square_name, "metadata": metadata})
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class KingSafetyFilter(TaskGenerator):
+    """Task 2.8: Decide whether one pseudo-legal move leaves the king safe."""
+
+    def task_id(self) -> str:
+        return "2.8_king_safety_filter"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = _legal_decomposition_pool(self.config)
+        target = self.target_volume()
+        count = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            move_uci = _select_king_safety_move(board)
+            if move_uci is None:
+                continue
+            classification = classify_move_legality(board, move_uci)
+            answer = _format_king_safety_filter_answer(board, move_uci)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "tested_move": move_uci,
+                    "expected_is_legal": classification.is_legal,
+                    "legality_reason_label": classification.reason_label,
+                    "expected_answer": answer,
+                }
+            )
+            raw.update({"move": move_uci, "metadata": metadata})
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class LegalMovesByPiece(TaskGenerator):
+    """Task 2.9: Group full legal move generation by side-to-move piece."""
+
+    def task_id(self) -> str:
+        return "2.9_legal_moves_by_piece"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = list(self.config.get("fen_pool", []))
+        self.rng.shuffle(pool)
+        target = self.target_volume()
+        count = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            legal_moves = sorted(move.uci() for move in board.legal_moves)
+            if not legal_moves:
+                continue
+            answer, grouped, final_moves = _format_legal_moves_by_piece_answer(board)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "legal_move_count": len(legal_moves),
+                    "legal_moves": final_moves,
+                    "legal_moves_by_piece": grouped,
+                    "side_to_move": _side_name(board.turn),
+                    "expected_answer": answer,
+                }
+            )
+            raw["metadata"] = metadata
+            user_text = self.render_template(raw)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
 

@@ -152,6 +152,58 @@ def test_package_piece_counting_full_material_teaches_compact_count(monkeypatch)
     )
 
 
+def test_package_material_decomposition_generators_emit_structured_traces():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier1_perception import (
+        MaterialBalanceTrace,
+        MaterialInventory,
+        MaterialPieceCounts,
+        MaterialValueTotals,
+    )
+
+    fen = "8/8/8/8/8/8/6p1/4K2k w - - 0 1"
+    config = {"fen_pool": [{"fen": fen} for _ in range(4)], "volume_override": 1}
+    expected = {
+        "1.15_material_inventory": (
+            "White inventory: king=e1; queen=none; rook=none; bishop=none; "
+            "knight=none; pawn=none.\n"
+            "Black inventory: king=h1; queen=none; rook=none; bishop=none; "
+            "knight=none; pawn=g2."
+        ),
+        "1.16_material_piece_counts": (
+            "White counts: king=1; queen=0; rook=0; bishop=0; knight=0; pawn=0.\n"
+            "Black counts: king=1; queen=0; rook=0; bishop=0; knight=0; pawn=1."
+        ),
+        "1.17_material_value_totals": (
+            "White values: king=0; queen=0; rook=0; bishop=0; knight=0; pawn=0; total=0.\n"
+            "Black values: king=0; queen=0; rook=0; bishop=0; knight=0; pawn=1; total=1."
+        ),
+        "1.18_material_balance_trace": (
+            "Inventory: white king=e1; queen=none; rook=none; bishop=none; "
+            "knight=none; pawn=none | black king=h1; queen=none; rook=none; "
+            "bishop=none; knight=none; pawn=g2\n"
+            "Counts: white king=1; queen=0; rook=0; bishop=0; knight=0; pawn=0 | "
+            "black king=1; queen=0; rook=0; bishop=0; knight=0; pawn=1\n"
+            "Values: white total=0; black total=1\n"
+            "Final: Black is up 1 point(s) of material."
+        ),
+    }
+
+    for generator_cls in (
+        MaterialInventory,
+        MaterialPieceCounts,
+        MaterialValueTotals,
+        MaterialBalanceTrace,
+    ):
+        row = next(generator_cls(config=config, rng=Random(0)).generate())
+
+        assert row["messages"][2]["content"] == expected[row["task"]]
+        assert row["metadata"]["expected_answer"] == expected[row["task"]]
+        assert row["metadata"]["example_identity"]
+        passed, errors = validate_example(row)
+        assert passed is True, errors
+
+
 def test_package_piece_identification_square_queries_balance_empty_and_occupied():
     from chess_llm.sft.generators.tier1_perception import PieceIdentification
 
@@ -438,6 +490,10 @@ def test_package_atomic_fen_edit_tasks_are_registered_for_tier1_generation():
         FENBoardEdit,
         FENRankCellEdit,
         FENRankExpansion,
+        MaterialBalanceTrace,
+        MaterialInventory,
+        MaterialPieceCounts,
+        MaterialValueTotals,
         SquareCoordinates,
     )
     from chess_llm.sft.settings import DEFAULT_VOLUMES
@@ -450,6 +506,10 @@ def test_package_atomic_fen_edit_tasks_are_registered_for_tier1_generation():
         (FENRankExpansion, "1.12_fen_rank_expansion"),
         (FENRankCellEdit, "1.13_fen_rank_cell_edit"),
         (FENBoardEdit, "1.14_fen_board_edit"),
+        (MaterialInventory, "1.15_material_inventory"),
+        (MaterialPieceCounts, "1.16_material_piece_counts"),
+        (MaterialValueTotals, "1.17_material_value_totals"),
+        (MaterialBalanceTrace, "1.18_material_balance_trace"),
     ]:
         assert generator in tier1_generators
         assert DEFAULT_VOLUMES[task_id] > 0
@@ -630,6 +690,86 @@ def test_package_side_piece_inventory_generator_lists_side_to_move_pieces():
     assert passed is True, errors
 
 
+def test_package_legal_decomposition_generators_emit_structured_traces():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import (
+        KingSafetyFilter,
+        LegalMovesByPiece,
+        PieceLegalFilter,
+        PiecePseudoLegalMoves,
+    )
+
+    quiet_rook_fen = "7k/8/8/8/8/8/8/R3K3 w - - 0 1"
+    pinned_rook_fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    checked_fen = "4r2k/8/8/8/8/8/8/R3K3 w - - 0 1"
+
+    pseudo = next(
+        PiecePseudoLegalMoves(
+            config={"fen_pool": [{"fen": quiet_rook_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    assert pseudo["task"] == "2.6_piece_pseudo_legal_moves"
+    assert pseudo["metadata"]["source_square"] == "a1"
+    assert pseudo["messages"][2]["content"] == (
+        "Pseudo-legal moves from a1: "
+        "a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1"
+    )
+
+    legal_filter = next(
+        PieceLegalFilter(
+            config={"fen_pool": [{"fen": pinned_rook_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    assert legal_filter["task"] == "2.7_piece_legal_filter"
+    assert legal_filter["metadata"]["source_square"] == "e2"
+    assert legal_filter["messages"][2]["content"] == (
+        "Pseudo-legal from e2: "
+        "e2a2 e2b2 e2c2 e2d2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2f2 e2g2 e2h2.\n"
+        "Legal: e2e3 e2e4 e2e5 e2e6 e2e7 e2e8.\n"
+        "Rejected: e2a2 e2b2 e2c2 e2d2 e2f2 e2g2 e2h2."
+    )
+
+    safety = next(
+        KingSafetyFilter(
+            config={"fen_pool": [{"fen": checked_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    assert safety["task"] == "2.8_king_safety_filter"
+    assert safety["metadata"]["tested_move"] == "a1a2"
+    assert safety["messages"][2]["content"] == (
+        "Move: a1a2.\n"
+        "Pseudo-legal: yes.\n"
+        "King safe after move: no.\n"
+        "Final: illegal; does_not_resolve_check."
+    )
+
+    grouped = next(
+        LegalMovesByPiece(
+            config={"fen_pool": [{"fen": quiet_rook_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    assert grouped["task"] == "2.9_legal_moves_by_piece"
+    assert grouped["messages"][2]["content"] == (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook; e1 white king.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1\n"
+        "e1 white king: e1d1 e1d2 e1e2 e1f1 e1f2\n"
+        "All legal moves: a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1 "
+        "e1d1 e1d2 e1e2 e1f1 e1f2"
+    )
+
+    for row in (pseudo, legal_filter, safety, grouped):
+        assert row["metadata"]["expected_answer"] == row["messages"][2]["content"]
+        assert row["metadata"]["example_identity"]
+        passed, errors = validate_example(row)
+        assert passed is True, errors
+
+
 def test_package_piece_specific_generator_includes_blocked_no_move_pieces():
     from chess_llm.sft import validate_example
     from chess_llm.sft.generators.tier2_rules import PieceSpecificMoves
@@ -652,6 +792,12 @@ def test_package_piece_specific_generator_includes_blocked_no_move_pieces():
 
 def test_package_rules_mechanics_tasks_are_registered_for_tier2_generation():
     from chess_llm.sft import pipeline
+    from chess_llm.sft.generators import (
+        KingSafetyFilter,
+        LegalMovesByPiece,
+        PieceLegalFilter,
+        PiecePseudoLegalMoves,
+    )
     from chess_llm.sft.generators import SidePieceInventory
     from chess_llm.sft.settings import DEFAULT_VOLUMES
     from chess_llm.sft.templates import TEMPLATES
@@ -659,8 +805,20 @@ def test_package_rules_mechanics_tasks_are_registered_for_tier2_generation():
     tier2_generators = pipeline.TIER_GENERATORS[2]
 
     assert SidePieceInventory in tier2_generators
+    assert PiecePseudoLegalMoves in tier2_generators
+    assert PieceLegalFilter in tier2_generators
+    assert KingSafetyFilter in tier2_generators
+    assert LegalMovesByPiece in tier2_generators
     assert DEFAULT_VOLUMES["2.0_side_piece_inventory"] > 0
     assert TEMPLATES["2.0_side_piece_inventory"]
+    for task_id in (
+        "2.6_piece_pseudo_legal_moves",
+        "2.7_piece_legal_filter",
+        "2.8_king_safety_filter",
+        "2.9_legal_moves_by_piece",
+    ):
+        assert DEFAULT_VOLUMES[task_id] > 0
+        assert TEMPLATES[task_id]
 
 
 def test_package_state_tracking_generator_defaults_to_one_ply():

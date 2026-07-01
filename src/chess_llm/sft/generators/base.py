@@ -17,6 +17,7 @@ from chess_llm.sft import (
     raw_fen_identity_key,
     raw_is_chess960,
 )
+from chess_llm.sft.identity import build_example_identity
 from chess_llm.sft.settings import DEFAULT_CHESS960_RATIOS, DEFAULT_VOLUMES
 from chess_llm.sft.templates import append_answer_contract, select_template
 
@@ -136,7 +137,8 @@ class TaskGenerator(ABC):
         raw = normalize_chess_variant_metadata(raw)
         fen = raw["fen"]
         is_chess960 = raw_is_chess960(raw)
-        metadata = raw.get("metadata", {})
+        metadata = dict(raw.get("metadata", {}))
+        metadata.setdefault("example_identity", build_example_identity(self.task_id(), raw))
 
         if template_text is None:
             template_text = self.render_template(raw)

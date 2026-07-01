@@ -13,9 +13,17 @@ DIAGNOSTIC_METRICS = frozenset({
     "move_square_edits",
     "fen_assembly",
     "fen_row_application",
+    "material_inventory",
+    "material_piece_counts",
+    "material_value_totals",
+    "material_balance_trace",
     "legality_check_legality_reason_accuracy",
     "side_piece_inventory",
     "piece_legal_moves",
+    "piece_pseudo_legal_moves",
+    "piece_legal_filter",
+    "king_safety_filter",
+    "legal_moves_by_piece",
 })
 
 
