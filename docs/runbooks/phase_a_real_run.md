@@ -18,9 +18,9 @@ Current target volumes:
 
 | Scope | Tasks | Target Rows |
 | --- | ---: | ---: |
-| Tier 1 perception/state | 14 | 1,320,000 |
-| Tier 2 rules | 6 | 410,000 |
-| Phase A total | 20 | 1,730,000 |
+| Tier 1 perception/state/material mechanics | 18 | 1,520,000 |
+| Tier 2 rules/legal-move decomposition | 10 | 650,000 |
+| Phase A total | 28 | 2,170,000 |
 | All tiers | 38 | 2,480,000 |
 
 ## Launch Principles
@@ -35,10 +35,13 @@ Current target volumes:
   lengths change the number of useful tokens processed.
 - Treat SDPA as the stable baseline. Use FA2/FA4 only after a model-load and
   short train smoke succeeds on the selected GPU.
-- The 2026-06-30 forced HF FA2 smoke on the 25k rehearsal did work and enabled
-  packing, but only reached about 2.85k input tokens/sec on the RTX 5090. The
-  SDPA warmup reached about 10.6k-20.7k input tokens/sec, so keep the 25k
-  rehearsal on `--attn-implementation auto`.
+- Use `--attn-implementation sdpa --packing on --max-length 1024` for the
+  current rehearsal and full Phase A launch. The older `auto` path did not pack
+  and was stopped after 93/28,221 steps because it only reached about 2.7k
+  actual train tokens/sec.
+- The 2026-07-01 HF FA2 smoke did not complete 100 steps in 40 minutes on this
+  stack. Keep FA2 disabled until a short capped smoke proves it is faster than
+  the SDPA packed path.
 
 ## Latest Rehearsal Outcome
 
@@ -51,9 +54,22 @@ The 2026-06-30 25k-per-task rehearsal completed one pass successfully on SDPA:
 - Final vLLM sidecar eval: 92.6% perception overall, 68.0% rules overall.
 - State tracking reached 91.4%; legal move generation remained low at 26.1%.
 
-Decision: do not scale the unchanged recipe directly to the full 1.73M-row
-Phase A target. Add targeted material-count and legal-move decomposition first,
-then run a smaller focused rehearsal and compare against the 25k baseline.
+Decision: do not scale the unchanged 2026-06-30 recipe directly to the old
+1.73M-row Phase A target. Add targeted material-count and legal-move
+decomposition first, then run a smaller focused rehearsal and compare against
+the 25k baseline.
+
+Latest 2026-07-01 packed-path smoke on the new decomposition data:
+
+- Data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
+- Train config: `--attn-implementation sdpa --packing on --max-length 1024`
+- Token-length sample: 28,000 examples, p50 212, p95 366, p99 649, max 816.
+- 8,192 raw train examples packed to about 2,056 train sequences.
+- 50 optimizer steps finished in 198.1s training runtime.
+- Measured training throughput: about 8.0k actual train tokens/sec.
+
+Use the new packed-path rehearsal before committing to the full 2.17M-row
+Phase A target.
 
 ## Preflight Checklist
 
@@ -127,11 +143,13 @@ warmups only.
 
 Current defaults are `per_device_train_batch_size=4` and
 `gradient_accumulation_steps=8`. As a rough guide with one GPU and the current
-`1.5`, `1.9`, `1.10` upsampling idea, `--volume 5000` is about 4.4k optimizer
-steps. The measured `--volume 25000` rehearsal dry-run is 725,000 pre-split
-effective rows, 708,379 train rows, 10,000 eval rows, 22,137 optimizer steps,
-and 665 warmup steps. The full Phase A target should be estimated by the
-dry-run output before launch rather than by hand.
+`1.5`, `1.9`, `1.10` upsampling idea, dry-run row counts are pre-packing and
+therefore overstate optimizer steps when `--packing on` is enabled. The
+2026-07-01 decomposition rehearsal dry-run reported 925,000 pre-split effective
+rows and 903,059 train rows, but the capped packed smoke reduced raw rows to
+roughly one quarter as many packed train sequences. Estimate wall time from a
+capped smoke on the exact data root, not from the pre-packing dry-run step count
+alone.
 
 Recommended current task emphasis:
 
@@ -152,6 +170,9 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   -WslHfCache /home/amazi/.cache/huggingface `
   -WslWandbDir /home/amazi/chess_sft_wandb `
   -- chess-llm-train --phase a `
+  --attn-implementation sdpa `
+  --packing on `
+  --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
   --task-upsample 1.9_fen_assembly=4 `
@@ -181,6 +202,11 @@ For a bounded smoke, also add:
 --max-train-examples 8192 --max-steps 100
 ```
 
+Keep `--packing auto` only for smoke comparisons. In the current TRL stack,
+`auto` packs only for flash-attention backends. The production path should pass
+`--packing on` explicitly so SDPA still gets sequence packing while avoiding the
+HF FA2 slowdown observed on 2026-07-01.
+
 ## vLLM Sidecar Eval
 
 Keep vLLM in its separate venv:
@@ -201,15 +227,15 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
 
 .\sft\training\run-wsl.ps1 `
   -NoSync `
-  -CudaDeviceId 1 `
+  -CudaDeviceId 0 `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
   -- chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --wandb-run-name phase-a-25k-vllm-eval
 ```
 
-Use the second GPU for sidecar eval. With `CUDA_DEVICE_ORDER=PCI_BUS_ID`, the
-local probe has mapped `CUDA_VISIBLE_DEVICES=1` to the RTX 4090 and
-`CUDA_VISIBLE_DEVICES=0` to the RTX 5090. Re-probe before launch because CUDA
-device ordering is environment-sensitive.
+Use the second GPU for sidecar eval. In the current launch-wrapper probe,
+`-CudaDeviceId 1` exposes the RTX 5090 to PyTorch for training and
+`-CudaDeviceId 0` exposes the RTX 4090 for eval. Re-probe before launch because
+CUDA device ordering is environment-sensitive.
 
 Sidecar eval can poll saved checkpoints in a separate terminal, but the first
 real rehearsal should keep this simple: evaluate each saved checkpoint manually

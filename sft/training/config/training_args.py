@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import sys
+from importlib import import_module
 from pathlib import Path
 
 
 def _load_training_args_module():
     try:
-        from chess_llm.training import training_args as module
+        module = import_module("chess_llm.training.training_args")
     except ModuleNotFoundError:
         src_root = Path(__file__).resolve().parents[3] / "src"
         sys.path.insert(0, str(src_root))
-        from chess_llm.training import training_args as module
+        module = import_module("chess_llm.training.training_args")
     return module
 
 

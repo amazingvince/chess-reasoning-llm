@@ -29,6 +29,7 @@ FLASH_ATTENTION_VARIANTS = {
     "kernels-community/flash-attn4",
     "kernels-community/vllm-flash-attn3",
 }
+PACKING_CHOICES = ("auto", "on", "off")
 
 
 def _is_qwen3_family(model_type: str | None) -> bool:
@@ -46,6 +47,21 @@ def _supports_flash_attention_packing(attn_implementation: str | None) -> bool:
         return False
     base_implementation = attn_implementation.split("@", 1)[0]
     return bool(base_implementation in FLASH_ATTENTION_VARIANTS)
+
+
+def resolve_packing_settings(
+    attn_implementation: str | None,
+    packing: str = "auto",
+) -> tuple[bool, bool]:
+    """Return ``(packing, padding_free)`` for the requested train settings."""
+    if packing not in PACKING_CHOICES:
+        raise ValueError(f"Unknown packing mode {packing!r}; expected one of {PACKING_CHOICES}")
+    flash_packing_supported = _supports_flash_attention_packing(attn_implementation)
+    if packing == "off":
+        return False, False
+    if packing == "on":
+        return True, flash_packing_supported
+    return flash_packing_supported, flash_packing_supported
 
 
 def _default_world_size() -> int:
@@ -103,6 +119,8 @@ def build_sft_config(
     attn_implementation: str | None = None,
     liger_fused_linear_cross_entropy: bool = False,
     gradient_checkpointing: bool = False,
+    packing: str = "auto",
+    max_length: int = 2048,
 ) -> SFTConfig:
     """Build a TRL SFTConfig for the given phase.
 
@@ -130,7 +148,10 @@ def build_sft_config(
         )
 
     is_qwen3_family = _is_qwen3_family(model_type)
-    packing_enabled = _supports_flash_attention_packing(attn_implementation)
+    packing_enabled, padding_free_enabled = resolve_packing_settings(
+        attn_implementation,
+        packing=packing,
+    )
 
     if use_liger_kernel and is_qwen3_family and "liger_kernel_config" not in signature:
         logger.warning(
@@ -206,7 +227,7 @@ def build_sft_config(
         dataset_num_proc=DEFAULT_DATASET_NUM_PROC,
         include_num_input_tokens_seen=True,
         pad_to_multiple_of=8,
-        padding_free=packing_enabled,
+        padding_free=padding_free_enabled,
     )
 
     if packing_enabled:
@@ -214,9 +235,9 @@ def build_sft_config(
 
     # TRL has renamed a few SFTConfig fields across versions.
     if "max_seq_length" in signature:
-        config_kwargs["max_seq_length"] = 2048
+        config_kwargs["max_seq_length"] = max_length
     elif "max_length" in signature:
-        config_kwargs["max_length"] = 2048
+        config_kwargs["max_length"] = max_length
 
     if "eos_token" in signature:
         config_kwargs["eos_token"] = "<|im_end|>"

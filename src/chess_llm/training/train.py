@@ -43,6 +43,7 @@ SMOKE_MAX_TRAIN_EXAMPLES = 128
 SMOKE_MAX_EVAL_EXAMPLES = 64
 SMOKE_MAX_BENCHMARK_EXAMPLES_PER_SPLIT = 32
 SMOKE_MAX_STEPS = 10
+PACKING_CHOICES = ("auto", "on", "off")
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -226,6 +227,22 @@ def parse_args() -> argparse.Namespace:
         help="Attention backend for training and transformers eval model loads",
     )
     parser.add_argument(
+        "--packing",
+        choices=PACKING_CHOICES,
+        default="auto",
+        help=(
+            "SFT sequence packing mode. auto enables packing only for selected "
+            "flash-attention backends; on forces standard packing for any "
+            "attention backend; off disables packing."
+        ),
+    )
+    parser.add_argument(
+        "--max-length",
+        type=_positive_int,
+        default=2048,
+        help="Maximum tokenized sequence length for SFT training examples.",
+    )
+    parser.add_argument(
         "--eval-batch-size",
         type=int,
         default=16,
@@ -396,7 +413,19 @@ def main() -> int:
         logger.info("Learning rate: %s", phase.learning_rate)
         effective_epochs = overrides.num_train_epochs or phase.epochs
         logger.info("Epochs: %s", _format_epoch_count(effective_epochs))
-        logger.info("Packing: False, max_length: 2048")
+        from chess_llm.training.training_args import resolve_packing_settings
+
+        dry_run_packing, dry_run_padding_free = resolve_packing_settings(
+            None if args.attn_implementation == "auto" else args.attn_implementation,
+            packing=getattr(args, "packing", "auto"),
+        )
+        logger.info(
+            "Packing: %s (mode=%s, padding_free=%s), max_length: %d",
+            dry_run_packing,
+            getattr(args, "packing", "auto"),
+            dry_run_padding_free,
+            getattr(args, "max_length", 2048),
+        )
         logger.info("Effective batch size: 32 (4 * 8 accumulation)")
         logger.info("Eval backend: %s", args.inference_backend)
         for detail in _build_dry_run_training_details(
@@ -571,6 +600,8 @@ def main() -> int:
             and not getattr(args, "disable_liger_fused_linear_ce", False)
         ),
         gradient_checkpointing=getattr(args, "gradient_checkpointing", False),
+        packing=getattr(args, "packing", "auto"),
+        max_length=getattr(args, "max_length", 2048),
         max_steps=overrides.max_steps,
         eval_steps=overrides.eval_steps,
         save_steps=overrides.save_steps,
@@ -788,6 +819,13 @@ def _short_run_logging_steps(max_steps: int) -> int:
 
 def _positive_float(value: str) -> float:
     parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than 0")
     return parsed

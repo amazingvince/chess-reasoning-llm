@@ -180,6 +180,29 @@ def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     assert args.num_train_epochs == 1.0
 
 
+def test_train_cli_accepts_packing_and_max_length_overrides(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "a",
+            "--packing",
+            "on",
+            "--max-length",
+            "1024",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.packing == "on"
+    assert args.max_length == 1024
+
+
 def test_train_cli_accepts_auto_resume_checkpoint(monkeypatch):
     from chess_llm.training import train
 
@@ -760,6 +783,80 @@ def test_build_sft_config_uses_flash_attention_packing_when_available(
         assert cfg.kwargs["padding_free"] is True
         assert cfg.kwargs["pad_to_multiple_of"] == 8
         assert cfg.kwargs["tf32"] is True
+
+
+def test_build_sft_config_can_force_packing_without_padding_free(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            packing_strategy=None,
+            padding_free=None,
+            max_length=None,
+            pad_to_multiple_of=None,
+            assistant_only_loss=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    sys.modules.pop("chess_llm.training.training_args", None)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    cfg = build_sft_config(
+        PHASE_A,
+        tmp_path,
+        attn_implementation="sdpa",
+        packing="on",
+        max_length=1024,
+    )
+
+    assert cfg.kwargs["packing"] is True
+    assert cfg.kwargs["packing_strategy"] == "bfd"
+    assert cfg.kwargs["padding_free"] is False
+    assert cfg.kwargs["max_length"] == 1024
+
+
+def test_build_sft_config_can_disable_flash_attention_packing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            packing_strategy=None,
+            padding_free=None,
+            assistant_only_loss=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    sys.modules.pop("chess_llm.training.training_args", None)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    cfg = build_sft_config(
+        PHASE_A,
+        tmp_path,
+        attn_implementation="flash_attention_2",
+        packing="off",
+    )
+
+    assert cfg.kwargs["packing"] is False
+    assert cfg.kwargs["padding_free"] is False
+    assert "packing_strategy" not in cfg.kwargs or cfg.kwargs["packing_strategy"] is None
 
 
 def test_qwen35_can_opt_into_liger_fused_linear_ce(monkeypatch, tmp_path: Path):
