@@ -19,7 +19,7 @@ Current default volumes in `src/chess_llm/sft/settings.py`:
 - Phase A raw rows: 2,170,000
 - One-pass effective rows with `1.5`, `1.9`, and `1.10` upsampled to factor 4: about 3,070,000 rows before train/eval split
 
-Use the trainer dry-run output as the source of truth for row counts before packing. Use a capped packed smoke on the exact data root as the source of truth for optimizer step time and wall-clock estimates. The working 2026-07-02 training path is `--attn-implementation sdpa --packing on --max-length 1024`; the older `auto` path did not pack and was stopped because it projected to a multi-day run.
+Use the trainer dry-run output as the source of truth for row counts, and use capped smokes on the exact data root as the source of truth for optimizer step time and wall-clock estimates. The current 2026-07-02 prelaunch path is `--attn-implementation sdpa --packing off --max-length 1024`; a controlled 100-step comparison on the refreshed legal/material data measured about 5.1k train tokens/sec unpacked versus about 1.2k train tokens/sec packed.
 
 ## Active Goal State - 2026-07-02
 
@@ -77,9 +77,9 @@ Decision: do not launch the full Phase A pass on the unchanged recipe. The full-
 - Rehearsal data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
 - Rehearsal checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024`
 - Next targeted rehearsal data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702`
-- Next targeted rehearsal checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-legal-material-20260702-pack1024`
+- Next targeted rehearsal checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-legal-material-20260702-sdpa-unpacked`
 - Full data root: `/home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702`
-- Full checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024`
+- Full checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked`
 
 ### Task 1: Freeze The Code State
 
@@ -159,7 +159,7 @@ Expected: each command exits `0`.
 ```powershell
 .\sft\training\run-wsl.ps1 `
   -Distro Ubuntu-24.04-CUDA `
-  -- chess-llm-train --phase a --attn-implementation sdpa --packing on --max-length 1024 --num-train-epochs 1 --skip-trainer-eval --skip-eval --dry-run
+  -- chess-llm-train --phase a --attn-implementation sdpa --packing off --max-length 1024 --num-train-epochs 1 --skip-trainer-eval --skip-eval --dry-run
 ```
 
 Expected: command exits `0` and prints Phase A config. If W&B is enabled but credentials are missing, fix `.env` or `wandb login` inside WSL before continuing.
@@ -213,7 +213,7 @@ Expected: validation exits `0` with completeness satisfied for tiers 1-2.
   --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024 `
   --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp/benchmark `
   --attn-implementation sdpa `
-  --packing on `
+  --packing off `
   --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
@@ -255,7 +255,7 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024 `
   --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp/benchmark `
   --attn-implementation sdpa `
-  --packing on `
+  --packing off `
   --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
@@ -273,6 +273,10 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
 Expected: training writes `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024/phase_a/READY` and exports `phase_a/best`.
 
 - [ ] **Step 2: Run vLLM eval on the second GPU**
+
+`chess-llm-evaluate` auto-exports local Qwen3.5 text-only SFT checkpoints to
+`best/vllm_qwen35_wrapper` before constructing vLLM, so keep `--model` pointed
+at the normal `phase_a/best` directory.
 
 ```powershell
 $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
@@ -294,7 +298,7 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
   --soft-gate `
   --max-examples-per-split 500 `
   --batch-size 32 `
-  --max-new-tokens 192 `
+  --max-new-tokens 384 `
   --attn-implementation auto `
   --inference-backend vllm `
   --vllm-gpu-memory-utilization 0.70 `
@@ -316,7 +320,7 @@ git rev-parse HEAD
 .\sft\training\run-wsl.ps1 -NoSync -- bash -lc "ls -lh /home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024/phase_a && find /home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024/phase_a -maxdepth 1 -type f -name '*result*' -o -name '*analysis*'"
 ```
 
-Then add a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B or the eval result JSON: git commit, data root, checkpoint root, W&B train run, W&B eval run, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, state tracking, FEN assembly, legal move generation, piece legal filter, legal moves by piece, and the decision on whether to continue to full Phase A. Do not commit the log until each field has a concrete value.
+Then add a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B or the eval result JSON: git commit, data root, checkpoint root, W&B train run, W&B eval run, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, state tracking, FEN assembly, legal move generation, piece legal filter, legal moves by piece exact score, legal moves by piece partial diagnostics (`all_moves_jaccard`, `all_moves_precision`, `all_moves_recall`, `per_piece_group_jaccard`, `section_completeness`, `illegal_extra_count`, `missing_move_count`), and the decision on whether to continue to full Phase A. Do not commit the log until each field has a concrete value.
 
 ### Task 5: Patch Targeted Material And Legal Curriculum
 
@@ -443,9 +447,9 @@ Expected: all targeted generator, validation, and eval tests pass.
 
 Expected: generation exits `0` and validation can be run on the new root.
 
-- [ ] **Step 6: Run a packed rehearsal before full launch**
+- [ ] **Step 6: Run an unpacked SDPA rehearsal before full launch**
 
-Use the same packed training recipe as the July 2 run, but point it at `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702` and `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-legal-material-20260702-pack1024`.
+Use the current unpacked SDPA recipe, but point it at `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702` and a fresh checkpoint root for the legal/material rehearsal.
 
 Expected: W&B logs train throughput and vLLM sidecar eval writes result JSON. The key question is whether `material_count`, `piece_legal_filter`, `legal_moves`, and `legal_moves_by_piece` improve relative to the July 2 rehearsal without regressing FEN/state mechanics.
 
@@ -488,14 +492,14 @@ Expected: validation exits `0` with no completeness or contamination errors.
 .\sft\training\run-wsl.ps1 `
   -NoSync `
   -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
   -- chess-llm-train `
   --phase a `
   --data-root /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/output `
-  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
   --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
   --attn-implementation sdpa `
-  --packing on `
+  --packing off `
   --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
@@ -506,8 +510,8 @@ Expected: validation exits `0` with no completeness or contamination errors.
   --skip-eval `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024 `
-  --run-name phase-a-t12-full-legal-material-20260702-pack1024-dry-run `
+  --wandb-group phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
+  --run-name phase-a-t12-full-legal-material-20260702-sdpa-unpacked-dry-run `
   --dry-run
 ```
 
@@ -516,7 +520,7 @@ Expected: dry-run exits `0` and prints the true full-run optimizer step estimate
 ### Task 7: Launch Full Phase A And Sidecar Eval
 
 **Files:**
-- Create external artifact: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024`
+- Create external artifact: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked`
 - Update after run: `docs/experiments/experiment_log.md`
 
 - [ ] **Step 1: Launch full one-pass Phase A training**
@@ -528,16 +532,16 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
   -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
   -WslHfCache /home/amazi/.cache/huggingface `
   -WslWandbDir /home/amazi/chess_sft_wandb `
   -- chess-llm-train `
   --phase a `
   --data-root /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/output `
-  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
   --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
   --attn-implementation sdpa `
-  --packing on `
+  --packing off `
   --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
@@ -548,11 +552,11 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   --skip-eval `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024 `
-  --run-name phase-a-t12-full-legal-material-20260702-pack1024-train
+  --wandb-group phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
+  --run-name phase-a-t12-full-legal-material-20260702-sdpa-unpacked-train
 ```
 
-Expected: training writes `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/READY`, exports `phase_a/best`, and logs online to W&B.
+Expected: training writes `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a/READY`, exports `phase_a/best`, and logs online to W&B.
 
 - [ ] **Step 2: Resume if interrupted**
 
@@ -562,9 +566,13 @@ Run the same command as Step 1 with this extra argument appended:
 --resume-from-checkpoint auto
 ```
 
-Expected: the trainer resumes from the latest `checkpoint-N` under `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a`.
+Expected: the trainer resumes from the latest `checkpoint-N` under `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a`.
 
 - [ ] **Step 3: Launch final vLLM sidecar eval**
+
+`chess-llm-evaluate` auto-exports local Qwen3.5 text-only SFT checkpoints to
+`best/vllm_qwen35_wrapper` before constructing vLLM, so keep `--model` pointed
+at the normal `phase_a/best` directory.
 
 ```powershell
 $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
@@ -577,23 +585,23 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
   -CudaDeviceId 0 `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
   -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked `
   -- chess-llm-evaluate `
-  --model /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/best `
+  --model /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a/best `
   --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
-  --output /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/eval_predictions.vllm.jsonl `
+  --output /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a/eval_predictions.vllm.jsonl `
   --phase a `
   --soft-gate `
   --batch-size 32 `
-  --max-new-tokens 192 `
+  --max-new-tokens 384 `
   --attn-implementation auto `
   --inference-backend vllm `
   --vllm-gpu-memory-utilization 0.70 `
   --vllm-max-model-len 4096 `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-run-name phase-a-t12-full-legal-material-20260702-pack1024-vllm-eval `
-  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024
+  --wandb-run-name phase-a-t12-full-legal-material-20260702-sdpa-unpacked-vllm-eval `
+  --wandb-group phase-a-t12-full-legal-material-20260702-sdpa-unpacked
 ```
 
 Expected: eval exits `0`, logs to W&B, and writes prediction/result artifacts in `phase_a`.
@@ -602,7 +610,7 @@ Expected: eval exits `0`, logs to W&B, and writes prediction/result artifacts in
 
 **Files:**
 - Modify: `docs/experiments/experiment_log.md`
-- Read: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/eval_predictions.vllm.jsonl`
+- Read: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a/eval_predictions.vllm.jsonl`
 - Read generated result/analysis JSON files next to the eval output
 
 - [ ] **Step 1: Add full run entry to the experiment log**
@@ -611,10 +619,10 @@ Collect the exact commit and result files:
 
 ```powershell
 git rev-parse HEAD
-.\sft\training\run-wsl.ps1 -NoSync -- bash -lc "ls -lh /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a && find /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a -maxdepth 1 -type f -name '*result*' -o -name '*analysis*'"
+.\sft\training\run-wsl.ps1 -NoSync -- bash -lc "ls -lh /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a && find /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-sdpa-unpacked/phase_a -maxdepth 1 -type f -name '*result*' -o -name '*analysis*'"
 ```
 
-Then append a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B, the training dry-run output, eval result JSON, and prediction analysis: git commit, data root, checkpoint root, W&B train run, W&B eval run, raw generated rows, effective rows after task upsampling, optimizer steps, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, board to FEN, state tracking, FEN assembly, FEN row application, legal move generation, move legality, piece legal filter, legal moves by piece, main failure modes, and decision for next run. Do not commit the log until each field has a concrete value.
+Then append a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B, the training dry-run output, eval result JSON, and prediction analysis: git commit, data root, checkpoint root, W&B train run, W&B eval run, raw generated rows, effective rows after task upsampling, optimizer steps, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, board to FEN, state tracking, FEN assembly, FEN row application, legal move generation, move legality, piece legal filter, legal moves by piece exact score, legal moves by piece partial diagnostics (`all_moves_jaccard`, `all_moves_precision`, `all_moves_recall`, `per_piece_group_jaccard`, `section_completeness`, `illegal_extra_count`, `missing_move_count`), main failure modes, and decision for next run. Do not commit the log until each field has a concrete value.
 
 - [ ] **Step 2: Commit the experiment log**
 

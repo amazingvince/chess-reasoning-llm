@@ -21,6 +21,17 @@ _PREDICTION_FAILURE_EXAMPLE_LIMIT = 5
 _PREDICTION_FORMAT_BLEED_LIMIT = 20
 _PREDICTION_PREFIX_LIMIT = 10
 _PREDICTION_EXCERPT_CHARS = 240
+_LEGAL_MOVES_BY_PIECE_DIAGNOSTIC_KEYS = frozenset({
+    "section_completeness",
+    "all_legal_line_present",
+    "piece_inventory_accuracy",
+    "all_moves_precision",
+    "all_moves_recall",
+    "all_moves_jaccard",
+    "per_piece_group_jaccard",
+    "illegal_extra_count",
+    "missing_move_count",
+})
 _MOVE_EDIT_TRACE_TASK_TYPES = frozenset({
     "move_square_edits",
     "fen_assembly",
@@ -171,12 +182,24 @@ def _enrich_prediction_row(
     enriched.setdefault("fen", example.fen)
     enriched.setdefault("prompt", example.prompt)
     enriched.setdefault("gold_answer", example.gold_answer)
-    if "score" not in enriched:
+    if "score" not in enriched or _prediction_score_needs_refresh(enriched, example):
         enriched["score"] = score_prediction(
             example,
             str(enriched.get("raw_prediction", enriched.get("prediction", ""))),
         )
     return enriched
+
+
+def _prediction_score_needs_refresh(
+    row: Mapping[str, Any],
+    example: BenchmarkExample,
+) -> bool:
+    score = row.get("score")
+    if not isinstance(score, Mapping):
+        return True
+    if example.task_type != "legal_moves_by_piece":
+        return False
+    return not _LEGAL_MOVES_BY_PIECE_DIAGNOSTIC_KEYS.issubset(score.keys())
 
 
 def _new_prediction_analysis_bucket() -> dict[str, Any]:
@@ -185,6 +208,8 @@ def _new_prediction_analysis_bucket() -> dict[str, Any]:
         "example_ids": set(),
         "score_sum": 0.0,
         "scored_count": 0,
+        "score_metric_sums": defaultdict(float),
+        "score_metric_counts": defaultdict(int),
         "failure_count": 0,
         "format_bleed_count": 0,
         "format_families": Counter(),
@@ -210,6 +235,13 @@ def _update_prediction_analysis_bucket(
     if primary_score is not None:
         bucket["score_sum"] += primary_score
         bucket["scored_count"] += 1
+    score = row.get("score")
+    if isinstance(score, Mapping):
+        for key, value in score.items():
+            if key == "primary" or not isinstance(value, (int, float)):
+                continue
+            bucket["score_metric_sums"][str(key)] += float(value)
+            bucket["score_metric_counts"][str(key)] += 1
     if is_failure:
         bucket["failure_count"] += 1
         if len(bucket["failure_examples"]) < _PREDICTION_FAILURE_EXAMPLE_LIMIT:
@@ -223,6 +255,8 @@ def _update_prediction_analysis_bucket(
 
 def _finalize_prediction_analysis_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     scored_count = int(bucket["scored_count"])
+    metric_sums: Mapping[str, float] = bucket["score_metric_sums"]
+    metric_counts: Mapping[str, int] = bucket["score_metric_counts"]
     return {
         "row_count": int(bucket["row_count"]),
         "example_count": len(bucket["example_ids"]),
@@ -230,6 +264,11 @@ def _finalize_prediction_analysis_bucket(bucket: dict[str, Any]) -> dict[str, An
         "primary_accuracy": (
             bucket["score_sum"] / scored_count if scored_count else None
         ),
+        "score_metrics": {
+            key: metric_sums[key] / metric_counts[key]
+            for key in sorted(metric_sums)
+            if metric_counts[key]
+        },
         "failure_count": int(bucket["failure_count"]),
         "format_bleed_count": int(bucket["format_bleed_count"]),
         "format_families": dict(sorted(bucket["format_families"].items())),
@@ -258,6 +297,8 @@ def _prediction_report_example(
     }
     if row.get("diagnostics"):
         result["diagnostics"] = row["diagnostics"]
+    if row.get("score"):
+        result["score"] = row["score"]
     return result
 
 

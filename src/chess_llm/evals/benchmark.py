@@ -56,6 +56,13 @@ class BenchmarkExample:
 
 
 _UCI_RE = re.compile(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b")
+_LEGAL_MOVES_BY_PIECE_LINE_RE = re.compile(
+    r"^\s*([a-h][1-8])\s+"
+    r"(white|black)\s+"
+    r"(king|queen|rook|bishop|knight|pawn):\s*"
+    r"(.*?)\s*$",
+    re.IGNORECASE,
+)
 _ANY_MOVE_TAG_RE = re.compile(r"<move\b[^>]*>.*?</move>", re.DOTALL | re.IGNORECASE)
 _NEGATION_RE: re.Pattern[str] | None = None
 _FEN_RE = re.compile(
@@ -423,6 +430,100 @@ def side_piece_inventory_accuracy(prediction: str, gold: str) -> float:
     if precision + recall == 0:
         return 0.0
     return 2.0 * precision * recall / (precision + recall)
+
+
+def _move_set_overlap_scores(predicted: set[str], gold: set[str]) -> dict[str, float]:
+    true_positive = len(predicted & gold)
+    extra = len(predicted - gold)
+    missing = len(gold - predicted)
+    precision = true_positive / len(predicted) if predicted else (1.0 if not gold else 0.0)
+    recall = true_positive / len(gold) if gold else (1.0 if not predicted else 0.0)
+    union_size = len(predicted | gold)
+    jaccard = true_positive / union_size if union_size else 1.0
+    return {
+        "precision": precision,
+        "recall": recall,
+        "jaccard": jaccard,
+        "illegal_extra_count": float(extra),
+        "missing_move_count": float(missing),
+    }
+
+
+def _uci_set(text: str) -> set[str]:
+    return set(_UCI_RE.findall((text or "").lower()))
+
+
+def _all_legal_moves_line_set(text: str) -> set[str] | None:
+    match = re.search(r"(?im)^\s*All legal moves:\s*(.*?)\s*$", text or "")
+    if match is None:
+        return None
+    return _uci_set(match.group(1))
+
+
+def _answer_move_set(text: str) -> set[str]:
+    final_line_moves = _all_legal_moves_line_set(text)
+    if final_line_moves is not None:
+        return final_line_moves
+    return _uci_set(text)
+
+
+def _legal_moves_by_piece_groups(text: str) -> dict[str, set[str]]:
+    groups: dict[str, set[str]] = {}
+    for line in (text or "").splitlines():
+        match = _LEGAL_MOVES_BY_PIECE_LINE_RE.match(line)
+        if match is None:
+            continue
+        square = match.group(1).lower()
+        moves = _uci_set(match.group(4))
+        groups.setdefault(square, set()).update(moves)
+    return groups
+
+
+def _set_jaccard(predicted: set[str], gold: set[str]) -> float:
+    if not predicted and not gold:
+        return 1.0
+    return len(predicted & gold) / len(predicted | gold)
+
+
+def _per_piece_group_jaccard(prediction: str, gold: str) -> float:
+    pred_groups = _legal_moves_by_piece_groups(prediction)
+    gold_groups = _legal_moves_by_piece_groups(gold)
+    squares = sorted(set(pred_groups) | set(gold_groups))
+    if not squares:
+        return 1.0 if prediction.strip() == gold.strip() else 0.0
+    scores = []
+    for square in squares:
+        if square not in pred_groups or square not in gold_groups:
+            scores.append(0.0)
+        else:
+            scores.append(_set_jaccard(pred_groups[square], gold_groups[square]))
+    return sum(scores) / len(scores)
+
+
+def legal_moves_by_piece_diagnostics(prediction: str, gold: str) -> dict[str, float]:
+    """Diagnostic partial metrics for the grouped legal-move task."""
+    lowered = (prediction or "").lower()
+    section_hits = [
+        "side to move:" in lowered,
+        "pieces:" in lowered,
+        "moves by piece:" in lowered,
+        "all legal moves:" in lowered,
+    ]
+    move_scores = _move_set_overlap_scores(
+        _answer_move_set(prediction),
+        _answer_move_set(gold),
+    )
+    return {
+        "section_completeness": sum(1 for hit in section_hits if hit) / len(section_hits),
+        "all_legal_line_present": 1.0 if section_hits[-1] else 0.0,
+        "piece_inventory_accuracy": side_piece_inventory_accuracy(prediction, gold),
+        "all_moves_precision": move_scores["precision"],
+        "all_moves_recall": move_scores["recall"],
+        "all_moves_jaccard": move_scores["jaccard"],
+        "per_piece_group_jaccard": _per_piece_group_jaccard(prediction, gold),
+        "illegal_extra_count": move_scores["illegal_extra_count"],
+        "missing_move_count": move_scores["missing_move_count"],
+    }
 
 
 def text_exact_match(prediction: str, gold: str) -> float:
@@ -874,6 +975,8 @@ def score_prediction(
         metric = "legality_check"
     elif example.task_type == "special_rules":
         metric = "special_rules"
+    elif example.task_type == "legal_moves_by_piece":
+        metric = "legal_moves_by_piece"
 
     if metric == "move_extraction":
         scores["primary"] = move_extraction_match(prediction, gold)
@@ -892,6 +995,9 @@ def score_prediction(
         scores["primary"] = side_piece_inventory_accuracy(prediction, gold)
     elif metric == "text_exact_match":
         scores["primary"] = text_exact_match(prediction, gold)
+    elif metric == "legal_moves_by_piece":
+        scores["primary"] = text_exact_match(prediction, gold)
+        scores.update(legal_moves_by_piece_diagnostics(prediction, gold))
     elif metric == "board_exact_match":
         scores["primary"] = board_exact_match(prediction, gold)
     elif metric == "fen_exact_match":
@@ -957,14 +1063,10 @@ def score_split(
         scores = score_prediction(example, pred)
         task_scores[example.task_type].append(float(scores.get("primary", 0.0)))
 
-        for key in (
-            "format_compliance",
-            "legal_move",
-            "fen_first4",
-            "material_piece_accuracy",
-            "legality_reason_accuracy",
-        ):
-            if key in scores and scores[key] is not None:
+        for key in scores:
+            if key == "primary":
+                continue
+            if scores[key] is not None:
                 task_secondary[f"{example.task_type}_{key}"].append(float(scores[key]))
 
         if acpl_scores and example.example_id in acpl_scores:

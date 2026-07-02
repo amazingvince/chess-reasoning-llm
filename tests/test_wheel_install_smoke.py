@@ -77,6 +77,7 @@ expected = {
     "chess-llm-upload-data": "chess_llm.sft.hub_upload:main",
     "chess-llm-train": "chess_llm.training.train:main",
     "chess-llm-evaluate": "chess_llm.training.evaluate:main",
+    "chess-llm-export-vllm": "chess_llm.training.vllm_export:main",
     "chess-llm-run-curriculum": "chess_llm.training.run_curriculum:main",
 }
 missing = {

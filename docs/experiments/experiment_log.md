@@ -516,3 +516,57 @@ Decision:
   `2.9_legal_moves_by_piece`.
 - Run a refreshed 25k/task packed rehearsal on the patched curriculum before
   spending the full Phase A budget.
+
+### Phase A Prelaunch Packing And vLLM Sanity - 2026-07-02
+
+Run identity:
+
+- Data root:
+  `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702/output`
+- Benchmark root:
+  `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702/benchmark`
+- Packing-off smoke checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/prelaunch-pack-off-smoke-20260702-100step/phase_a`
+- Packing-on smoke checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/prelaunch-pack-on-smoke-20260702-100step/phase_a`
+- W&B: disabled for these smoke checks.
+
+Dry-run source of truth:
+
+- Base model corrected to `Qwen/Qwen3.5-0.8B`.
+- Raw rows: 700,000 rows across tiers 1-2.
+- Effective rows before split: 925,000 after task upsampling.
+- Train split: 903,059 rows.
+- Eval split: 14,000 rows.
+- Estimated one-pass optimizer steps: 28,221 at effective batch size 32.
+- Task upsampling: `1.5_state_tracking=4`, `1.9_fen_assembly=4`,
+  `1.10_fen_row_application=4`.
+
+Controlled 100-step training comparison on the RTX 5090:
+
+| Setting | Runtime | Train Tokens | Tokens/sec | Loss |
+| --- | ---: | ---: | ---: | ---: |
+| `--packing off` | 220.2s | 1,120,160 | 5,086.9 | 0.2859 |
+| `--packing on` | 2,666.8s | 3,203,624 | 1,201.3 | 0.2370 |
+
+vLLM sidecar diagnosis:
+
+- Direct vLLM load of the base `Qwen/Qwen3.5-0.8B` works on the RTX 4090 and
+  uses FlashAttention v2 plus Qwen GDN/conv Triton kernels.
+- Direct vLLM load of the SFT `best/` checkpoint failed because Transformers
+  saves it as text-only `qwen3_5_text` / `Qwen3_5ForCausalLM`, while vLLM
+  loads Qwen3.5 through the wrapper `Qwen3_5ForConditionalGeneration` path.
+- A wrapper export that hardlinks SFT language weights plus base
+  config/visual weights loads successfully in vLLM.
+- `chess-llm-evaluate --inference-backend vllm --model .../best` now
+  auto-exports that wrapper under `best/vllm_qwen35_wrapper`.
+- Auto-export sanity output:
+  `/home/amazi/chess_sft_checkpoints/prelaunch-pack-off-smoke-20260702-100step/phase_a/eval_predictions.vllm.auto_export_sanity.jsonl`.
+
+Decision:
+
+- Use `--attn-implementation sdpa --packing off --max-length 1024` for the
+  next real rehearsal/full Phase A launch.
+- Keep trainer eval disabled and run vLLM sidecar eval on the second GPU; the
+  normal `phase_a/best` path is now acceptable because eval prepares the wrapper
+  export automatically.

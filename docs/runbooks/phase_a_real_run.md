@@ -35,10 +35,11 @@ Current target volumes:
   lengths change the number of useful tokens processed.
 - Treat SDPA as the stable baseline. Use FA2/FA4 only after a model-load and
   short train smoke succeeds on the selected GPU.
-- Use `--attn-implementation sdpa --packing on --max-length 1024` for the
-  current rehearsal and full Phase A launch. The older `auto` path did not pack
-  and was stopped after 93/28,221 steps because it only reached about 2.7k
-  actual train tokens/sec.
+- Use `--attn-implementation sdpa --packing off --max-length 1024` for the
+  current rehearsal and full Phase A launch. On the 2026-07-02 controlled
+  smoke with `Qwen/Qwen3.5-0.8B` and the refreshed legal/material data,
+  unpacked SDPA reached about 5.1k train tokens/sec while TRL packing reached
+  about 1.2k train tokens/sec on the same 100-step budget.
 - The 2026-07-01 HF FA2 smoke did not complete 100 steps in 40 minutes on this
   stack. Keep FA2 disabled until a short capped smoke proves it is faster than
   the SDPA packed path.
@@ -59,17 +60,21 @@ Decision: do not scale the unchanged 2026-06-30 recipe directly to the old
 decomposition first, then run a smaller focused rehearsal and compare against
 the 25k baseline.
 
-Latest 2026-07-01 packed-path smoke on the new decomposition data:
+Latest 2026-07-02 prelaunch smoke on the refreshed legal/material data:
 
-- Data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
-- Train config: `--attn-implementation sdpa --packing on --max-length 1024`
-- Token-length sample: 28,000 examples, p50 212, p95 366, p99 649, max 816.
-- 8,192 raw train examples packed to about 2,056 train sequences.
-- 50 optimizer steps finished in 198.1s training runtime.
-- Measured training throughput: about 8.0k actual train tokens/sec.
+- Data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702/output`
+- Base model: `Qwen/Qwen3.5-0.8B`
+- Dry-run train split: 903,059 examples after the current task upsampling.
+- Packing off, 100 steps: 1,120,160 train tokens, 220.2s runtime, about
+  5,087 train tokens/sec.
+- Packing on, 100 steps: 3,203,624 train tokens, 2,666.8s runtime, about
+  1,201 train tokens/sec.
+- vLLM sidecar on the 4090 can load the text-only SFT checkpoint through the
+  automatic `best/vllm_qwen35_wrapper` export and uses FlashAttention v2 plus
+  Qwen GDN/conv kernels.
 
-Use the new packed-path rehearsal before committing to the full 2.17M-row
-Phase A target.
+Use the unpacked SDPA path for the next serious rehearsal and full Phase A
+target unless a newer controlled smoke beats it on train tokens/sec.
 
 ## Preflight Checklist
 
@@ -143,13 +148,11 @@ warmups only.
 
 Current defaults are `per_device_train_batch_size=4` and
 `gradient_accumulation_steps=8`. As a rough guide with one GPU and the current
-`1.5`, `1.9`, `1.10` upsampling idea, dry-run row counts are pre-packing and
-therefore overstate optimizer steps when `--packing on` is enabled. The
-2026-07-01 decomposition rehearsal dry-run reported 925,000 pre-split effective
-rows and 903,059 train rows, but the capped packed smoke reduced raw rows to
-roughly one quarter as many packed train sequences. Estimate wall time from a
-capped smoke on the exact data root, not from the pre-packing dry-run step count
-alone.
+`1.5`, `1.9`, `1.10` upsampling idea, dry-run row counts map directly to the
+unpacked training plan. The 2026-07-02 legal/material dry-run reported 925,000
+pre-split effective rows and 903,059 train rows, or about 28,221 optimizer
+steps at effective batch size 32. Estimate wall time from capped smokes on the
+exact data root, with tokens/sec as the comparison metric.
 
 Recommended current task emphasis:
 
@@ -171,7 +174,7 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   -WslWandbDir /home/amazi/chess_sft_wandb `
   -- chess-llm-train --phase a `
   --attn-implementation sdpa `
-  --packing on `
+  --packing off `
   --max-length 1024 `
   --num-train-epochs 1 `
   --task-upsample 1.5_state_tracking=4 `
@@ -202,10 +205,9 @@ For a bounded smoke, also add:
 --max-train-examples 8192 --max-steps 100
 ```
 
-Keep `--packing auto` only for smoke comparisons. In the current TRL stack,
-`auto` packs only for flash-attention backends. The production path should pass
-`--packing on` explicitly so SDPA still gets sequence packing while avoiding the
-HF FA2 slowdown observed on 2026-07-01.
+Keep `--packing auto` or `--packing on` only for smoke comparisons. In the
+current Qwen3.5 + TRL stack, packing was slower on the controlled 100-step
+comparison, so the production path should pass `--packing off` explicitly.
 
 ## vLLM Sidecar Eval
 
@@ -219,6 +221,19 @@ On the current Ubuntu 24 WSL setup, vLLM's default V2 runner hit
 `RuntimeError: UVA is not available`. The working path is to disable the V2
 model runner:
 
+Fine-tuned Qwen3.5 SFT checkpoints save as text-only `qwen3_5_text`
+checkpoints, while vLLM loads the base model through the wrapper
+`Qwen3_5ForConditionalGeneration` architecture. `chess-llm-evaluate` now
+auto-exports local Qwen3.5 text checkpoints to `best/vllm_qwen35_wrapper` for
+vLLM by hardlinking the SFT language weights and base visual/config weights.
+You can also create that export explicitly:
+
+```powershell
+.\sft\training\run-wsl.ps1 `
+  -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
+  -- chess-llm-export-vllm --checkpoint /home/amazi/chess_sft_checkpoints/phase_a_25k/best
+```
+
 ```powershell
 $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
 $env:CUDA_DEVICE_ORDER = 'PCI_BUS_ID'
@@ -229,7 +244,7 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
   -NoSync `
   -CudaDeviceId 0 `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
-  -- chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --wandb-run-name phase-a-25k-vllm-eval
+  -- chess-llm-evaluate --model /home/amazi/chess_sft_checkpoints/phase_a_25k/best --benchmark-dir /home/amazi/chess_sft_data/phase_a_25k/benchmark --output /home/amazi/chess_sft_checkpoints/phase_a_25k/vllm_eval_predictions.jsonl --phase a --inference-backend vllm --vllm-max-model-len 4096 --max-new-tokens 384 --soft-gate --no-acpl --wandb-project chess-sft --wandb-group phase-a-eval --wandb-run-name phase-a-25k-vllm-eval
 ```
 
 Use the second GPU for sidecar eval. In the current launch-wrapper probe,
@@ -252,5 +267,9 @@ Record in `docs/experiments/experiment_log.md`:
 - Attention backend and packing state.
 - Eval backend and GPU.
 - Benchmark headline metrics.
+- `legal_moves_by_piece` exact score plus partial diagnostics:
+  `all_moves_jaccard`, `all_moves_precision`, `all_moves_recall`,
+  `per_piece_group_jaccard`, `section_completeness`, `illegal_extra_count`,
+  and `missing_move_count`.
 - The top recurring failure modes from `eval_predictions.analysis.json`.
 - Decision for the next data scale.

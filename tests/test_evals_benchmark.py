@@ -499,6 +499,77 @@ def test_package_side_piece_inventory_scoring_overrides_stale_exact_metric_type(
     assert round(scores["primary"], 3) == 0.667
 
 
+def test_package_legal_moves_by_piece_reports_partial_diagnostics():
+    gold = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook; e1 white king.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1b1\n"
+        "e1 white king: e1d1\n"
+        "All legal moves: a1a2 a1b1 e1d1"
+    )
+    prediction = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook; e1 white king.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1a3\n"
+        "e1 white king: no legal moves"
+    )
+    example = _example(
+        task_type="legal_moves_by_piece",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+    )
+
+    scores = packaged.score_prediction(example, prediction)
+
+    assert scores["primary"] == 0.0
+    assert scores["section_completeness"] == 0.75
+    assert scores["all_legal_line_present"] == 0.0
+    assert scores["piece_inventory_accuracy"] == 1.0
+    assert round(scores["all_moves_precision"], 3) == 0.5
+    assert round(scores["all_moves_recall"], 3) == 0.333
+    assert round(scores["all_moves_jaccard"], 3) == 0.25
+    assert round(scores["per_piece_group_jaccard"], 3) == 0.167
+    assert scores["illegal_extra_count"] == 1.0
+    assert scores["missing_move_count"] == 2.0
+
+
+def test_package_score_split_aggregates_legal_moves_by_piece_diagnostics():
+    gold = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1b1\n"
+        "All legal moves: a1a2 a1b1"
+    )
+    example = _example(
+        example_id="rules_00000",
+        task_type="legal_moves_by_piece",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+    )
+
+    metrics = packaged.score_split(
+        [example],
+        {
+            "rules_00000": (
+                "Side to move: white.\n"
+                "Pieces: a1 white rook.\n"
+                "Moves by piece:\n"
+                "a1 white rook: a1a2 a1a3\n"
+                "All legal moves: a1a2 a1a3"
+            )
+        },
+    )
+
+    assert metrics["legal_moves_by_piece"] == 0.0
+    assert metrics["legal_moves_by_piece_all_legal_line_present"] == 1.0
+    assert round(metrics["legal_moves_by_piece_all_moves_jaccard"], 3) == 0.333
+    assert metrics["legal_moves_by_piece_illegal_extra_count"] == 1.0
+    assert metrics["legal_moves_by_piece_missing_move_count"] == 1.0
+
+
 def test_package_legality_check_scores_binary_answer_and_reason_separately():
     example = _example(
         task_type="legality_check",

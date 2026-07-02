@@ -59,6 +59,8 @@ train = [
     "wandb>=0.19.0",
 ]
 vllm = [
+    "huggingface_hub>=0.24.0",
+    "safetensors>=0.4.0",
     "vllm",
 ]
 
@@ -66,6 +68,7 @@ vllm = [
 chess-llm-batch-judge = "chess_llm.evals.batch_judge:main"
 chess-llm-download-tablebases = "chess_llm.sft.download_tablebases:main"
 chess-llm-evaluate = "chess_llm.training.evaluate:main"
+chess-llm-export-vllm = "chess_llm.training.vllm_export:main"
 chess-llm-extract-polyglot-books = "chess_llm.sft.extract_polyglot_books:main"
 chess-llm-freeze-benchmark = "chess_llm.evals.freeze_benchmark:main"
 chess-llm-make-data = "chess_llm.sft.pipeline:cli"

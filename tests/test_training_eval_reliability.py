@@ -661,6 +661,61 @@ def test_prediction_analysis_report_classifies_legal_move_lists_as_uci(tmp_path)
     assert report["tasks"]["legal_moves"]["format_families"] == {"uci_moves": 1}
 
 
+def test_prediction_analysis_report_refreshes_legal_moves_by_piece_score_metrics(tmp_path):
+    from chess_llm.training import evaluate
+
+    output_path = tmp_path / "predictions.jsonl"
+    gold = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1b1\n"
+        "All legal moves: a1a2 a1b1"
+    )
+    prediction = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1a3\n"
+        "All legal moves: a1a2 a1a3"
+    )
+    example = BenchmarkExample(
+        example_id="rules_grouped",
+        split="rules",
+        task_type="legal_moves_by_piece",
+        fen=STARTING_FEN,
+        prompt="FEN: start\nGroup all legal moves by side-to-move piece.",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+        metadata={},
+    )
+    output_path.write_text(
+        json.dumps(
+            {
+                "example_id": "rules_grouped",
+                "sample_index": 0,
+                "prediction": prediction,
+                "score": {"primary": 0.0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report_path = evaluate.write_prediction_analysis_report(
+        output_path,
+        examples_by_id={"rules_grouped": example},
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    task = report["tasks"]["legal_moves_by_piece"]
+    assert round(task["score_metrics"]["all_moves_jaccard"], 3) == 0.333
+    assert task["score_metrics"]["all_legal_line_present"] == 1.0
+    assert task["score_metrics"]["illegal_extra_count"] == 1.0
+    assert task["score_metrics"]["missing_move_count"] == 1.0
+    assert round(task["failure_examples"][0]["score"]["all_moves_jaccard"], 3) == 0.333
+
+
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):
     from chess_llm.training import evaluate
 

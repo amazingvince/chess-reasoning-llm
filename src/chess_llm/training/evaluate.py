@@ -37,6 +37,7 @@ from chess_llm.training.model_loading import (
     ATTENTION_IMPLEMENTATION_CHOICES,
     load_causal_lm_with_attention,
 )
+from chess_llm.training.vllm_export import prepare_model_for_vllm
 from chess_llm.training.wandb_utils import wandb_config_error
 from chess_llm.training.eval_exit_codes import (
     EVAL_INFRA_FAILURE_EXIT_CODE,
@@ -709,15 +710,22 @@ class VllmPredictionGenerator:
         llm_cls: type[Any] | None = None,
         sampling_params_cls: type[Any] | None = None,
     ) -> None:
+        using_default_llm_cls = llm_cls is None
         if llm_cls is None or sampling_params_cls is None:
             loaded_llm_cls, loaded_sampling_params_cls = _load_vllm_classes()
             llm_cls = llm_cls or loaded_llm_cls
             sampling_params_cls = sampling_params_cls or loaded_sampling_params_cls
 
+        vllm_model_path = model_path
+        if using_default_llm_cls:
+            vllm_model_path = prepare_model_for_vllm(model_path)
+            if vllm_model_path != model_path:
+                logger.info("Prepared vLLM-compatible model export: %s", vllm_model_path)
+
         self.tokenizer = tokenizer
         self.sampling_params_cls = sampling_params_cls
         llm_kwargs: dict[str, Any] = {
-            "model": model_path,
+            "model": vllm_model_path,
             "tokenizer": getattr(tokenizer, "name_or_path", model_path),
             "trust_remote_code": True,
             "generation_config": "vllm",
