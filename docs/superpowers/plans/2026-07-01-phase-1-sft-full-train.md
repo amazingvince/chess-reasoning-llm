@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prepare, launch, monitor, and analyze the first full Phase 1 / Phase A SFT run for tiers 1-2 using one pass over freshly generated data, W&B logging, and vLLM sidecar eval.
+**Goal:** Get the first full Phase 1 / Phase A SFT run to a launchable state, then train one pass over freshly generated tiers 1-2 data with W&B logging and vLLM sidecar eval.
 
-**Architecture:** Keep data generation, training, and eval as separate artifacts with explicit Linux filesystem roots. Generate tiers 1-2 into a fresh WSL data root, train one epoch with trainer eval disabled, then evaluate checkpoints with vLLM on the second GPU. The full launch is gated by a focused rehearsal and dry-run estimates, not by hard metric gates.
+**Architecture:** Keep data generation, training, and eval as separate artifacts with explicit Linux filesystem roots. The July 2 packed rehearsal proved that the mechanics work, but it also showed that the unchanged curriculum is inefficient on legal move filtering and material counting. Patch those targeted curriculum areas first, run one focused rehearsal to verify the signal, then generate the full tiers 1-2 data root, train one epoch with trainer eval disabled, and evaluate checkpoints with vLLM on the second GPU.
 
 **Tech Stack:** Python package `chess_llm`, `chess-llm-make-data`, `chess-llm-train`, `chess-llm-evaluate`, Ubuntu-24.04-CUDA WSL, PyTorch, TRL/SFTTrainer, W&B, vLLM, PowerShell launch wrappers.
 
@@ -19,7 +19,45 @@ Current default volumes in `src/chess_llm/sft/settings.py`:
 - Phase A raw rows: 2,170,000
 - One-pass effective rows with `1.5`, `1.9`, and `1.10` upsampled to factor 4: about 3,070,000 rows before train/eval split
 
-Use the trainer dry-run output as the source of truth for row counts before packing. Use a capped packed smoke on the exact data root as the source of truth for optimizer step time and wall-clock estimates. The working 2026-07-01 training path is `--attn-implementation sdpa --packing on --max-length 1024`; the older `auto` path did not pack and was stopped because it projected to a multi-day run.
+Use the trainer dry-run output as the source of truth for row counts before packing. Use a capped packed smoke on the exact data root as the source of truth for optimizer step time and wall-clock estimates. The working 2026-07-02 training path is `--attn-implementation sdpa --packing on --max-length 1024`; the older `auto` path did not pack and was stopped because it projected to a multi-day run.
+
+## Active Goal State - 2026-07-02
+
+Codex goal:
+
+```text
+Get Phase 1 SFT ready for a full training run, execute the pre-run validation/rehearsal workflow, launch the one-pass Phase 1 training with W&B and sidecar eval, and analyze the run outputs to decide the next curriculum/training iteration.
+```
+
+Completed packed rehearsal:
+
+- Commit: `8ddf3db415c9ab76ac894ba13a500ab5c5b28a74`
+- Data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
+- Checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024`
+- Train run: `phase-a-t12-v25000-20260701-decomp-pack1024-train`
+- Eval run: `phase-a-t12-v25000-20260701-decomp-pack1024-vllm-sidecar-eval`
+- Train shape: one epoch, packed, max length 1024, 7,049 optimizer steps, 224,827,352 input tokens
+- Train runtime: 10:35:30.91
+- Train throughput: about 5,896 input tokens/sec
+- Eval shape: vLLM sidecar, 500 perception examples, 500 rules examples, `--vllm-max-model-len 4096`
+
+Rehearsal metrics:
+
+| Split | Metric | Score |
+| --- | --- | ---: |
+| Perception | overall | 85.2% |
+| Perception | board_to_fen | 96.4% |
+| Perception | fen_assembly | 85.7% |
+| Perception | fen_row_application | 75.0% |
+| Perception | state_tracking | 82.1% |
+| Perception | material_count | 25.0% |
+| Rules | overall | 56.8% |
+| Rules | legal_moves | 36.1% |
+| Rules | piece_legal_moves | 51.2% |
+| Rules | piece_legal_filter | 26.0% |
+| Rules | legal_moves_by_piece | 0.0% |
+
+Decision: do not launch the full Phase A pass on the unchanged recipe. The full-train goal stays active, but the next implementation step is targeted material-count and legal-move decomposition, then a smaller rehearsal to confirm that the model learns filtering and exact counting before the full run.
 
 ## Files And Artifacts
 
@@ -27,12 +65,21 @@ Use the trainer dry-run output as the source of truth for row counts before pack
 - Read/update after runs: `docs/experiments/experiment_log.md`
 - Read: `src/chess_llm/sft/settings.py`
 - Read: `src/chess_llm/training/phases.py`
+- Modify for the next curriculum patch: `src/chess_llm/sft/generators/tier1_perception.py`
+- Modify for the next curriculum patch: `src/chess_llm/sft/generators/tier2_rules.py`
+- Modify for prompt/format cleanup if needed: `src/chess_llm/sft/templates.py`
+- Modify for volume/rebalance if needed: `src/chess_llm/sft/settings.py`
+- Modify validation when answer formats change: `src/chess_llm/sft/validation.py`
+- Test targeted curriculum changes: `tests/test_sft_generators.py`
+- Test validation/scoring changes: `tests/test_sft_validation.py`, `tests/test_evals_benchmark.py`
 - Use: `sft/training/run-wsl.ps1`
 - Optional helper references: `.tmp/run_phase_a_t12_generate.ps1`, `.tmp/run_phase_a_t12_train.ps1`, `.tmp/run_phase_a_t12_vllm_sidecar_eval.ps1`
 - Rehearsal data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
 - Rehearsal checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024`
-- Full data root: `/home/amazi/chess_sft_data/phase-a-t12-full-20260701`
-- Full checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024`
+- Next targeted rehearsal data root: `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702`
+- Next targeted rehearsal checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-legal-material-20260702-pack1024`
+- Full data root: `/home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702`
+- Full checkpoint root: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024`
 
 ### Task 1: Freeze The Code State
 
@@ -271,10 +318,141 @@ git rev-parse HEAD
 
 Then add a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B or the eval result JSON: git commit, data root, checkpoint root, W&B train run, W&B eval run, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, state tracking, FEN assembly, legal move generation, piece legal filter, legal moves by piece, and the decision on whether to continue to full Phase A. Do not commit the log until each field has a concrete value.
 
-### Task 5: Generate And Validate Full Phase A Data
+### Task 5: Patch Targeted Material And Legal Curriculum
 
 **Files:**
-- Create external artifact: `/home/amazi/chess_sft_data/phase-a-t12-full-20260701`
+- Modify: `src/chess_llm/sft/generators/tier1_perception.py`
+- Modify: `src/chess_llm/sft/generators/tier2_rules.py`
+- Modify if answer formats change: `src/chess_llm/sft/templates.py`
+- Modify if validation expectations change: `src/chess_llm/sft/validation.py`
+- Modify if volume mix changes: `src/chess_llm/sft/settings.py`
+- Test: `tests/test_sft_generators.py`
+- Test: `tests/test_sft_validation.py`
+- Test: `tests/test_evals_benchmark.py`
+
+- [ ] **Step 1: Add material-count decomposition tests**
+
+Add generator tests that assert material examples force the intermediate state the model is currently skipping:
+
+```python
+def test_package_material_balance_trace_uses_balance_label():
+    from random import Random
+
+    from chess_llm.sft.generators.tier1_perception import MaterialBalanceTrace
+
+    row = next(
+        MaterialBalanceTrace(
+            config={
+                "fen_pool": [{"fen": "8/8/8/8/8/8/6p1/4K2k w - - 0 1"}],
+                "volume_override": 1,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+    answer = row["messages"][2]["content"]
+
+    assert answer.startswith("Inventory: ")
+    assert "\nCounts: " in answer
+    assert "\nValues: " in answer
+    assert "\nBalance: " in answer
+    assert "\nFinal: " not in answer
+```
+
+Run:
+
+```powershell
+python -m pytest tests/test_sft_generators.py::test_package_material_balance_trace_uses_balance_label -q
+```
+
+Expected: fail until the answer format has the explicit staged fields.
+
+- [ ] **Step 2: Add legal-filter decomposition tests**
+
+Add generator tests that assert the model sees rejected pseudo-legal moves with explicit reasons instead of only final legal move sets:
+
+```python
+def test_package_piece_legal_filter_includes_rejected_reason_labels():
+    from random import Random
+
+    from chess_llm.sft.generators.tier2_rules import PieceLegalFilter
+
+    row = next(
+        PieceLegalFilter(
+            config={
+                "fen_pool": [{"fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"}],
+                "volume_override": 1,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+    answer = row["messages"][2]["content"]
+
+    assert "Pseudo-legal:" in answer
+    assert "Legal:" in answer
+    assert "Rejected:" in answer
+    assert "pinned_piece_exposes_king" in answer
+```
+
+Run:
+
+```powershell
+python -m pytest tests/test_sft_generators.py::test_package_piece_legal_filter_includes_rejected_reason_labels -q
+```
+
+Expected: fail while rejected moves are still reasonless.
+
+- [ ] **Step 3: Implement the curriculum patch**
+
+Keep the answer formats short and mechanical:
+
+```text
+Inventory: white K=1 Q=0 R=2 B=0 N=1 P=5 | black K=1 Q=1 R=0 B=1 N=0 P=6
+Counts: white pieces=9 value=18 | black pieces=9 value=18
+Balance: equal material
+```
+
+```text
+Pseudo-legal: h1h2, h1h3, h1e1.
+Legal: h1h2, h1h3.
+Rejected: h1e1 pinned_piece_exposes_king.
+```
+
+Do not add long prose reasoning. The target is reliable lookup, filtering, counting, and exact compact output.
+
+- [ ] **Step 4: Run focused tests**
+
+```powershell
+python -m pytest tests/test_sft_generators.py tests/test_sft_validation.py tests/test_evals_benchmark.py -q
+```
+
+Expected: all targeted generator, validation, and eval tests pass.
+
+- [ ] **Step 5: Generate a targeted 25k rehearsal**
+
+```powershell
+.\sft\training\run-wsl.ps1 `
+  -WslRepoPath /home/amazi/code/chess_sft_sdpo `
+  -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702 `
+  -- chess-llm-make-data `
+  --tier 1 2 `
+  --volume 25000 `
+  --eval-split-volume 25000 `
+  --source-readiness-report /home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702/readiness.json
+```
+
+Expected: generation exits `0` and validation can be run on the new root.
+
+- [ ] **Step 6: Run a packed rehearsal before full launch**
+
+Use the same packed training recipe as the July 2 run, but point it at `/home/amazi/chess_sft_data/phase-a-t12-v25000-legal-material-20260702` and `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-legal-material-20260702-pack1024`.
+
+Expected: W&B logs train throughput and vLLM sidecar eval writes result JSON. The key question is whether `material_count`, `piece_legal_filter`, `legal_moves`, and `legal_moves_by_piece` improve relative to the July 2 rehearsal without regressing FEN/state mechanics.
+
+### Task 6: Generate And Validate Full Phase A Data
+
+**Files:**
+- Create external artifact: `/home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702`
 - Update after run: `docs/experiments/experiment_log.md`
 
 - [ ] **Step 1: Generate full default tiers 1-2**
@@ -283,10 +461,10 @@ Then add a dated entry to `docs/experiments/experiment_log.md` containing these 
 .\sft\training\run-wsl.ps1 `
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
-  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-20260701 `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
   -- chess-llm-make-data `
   --tier 1 2 `
-  --source-readiness-report /home/amazi/chess_sft_data/phase-a-t12-full-20260701/readiness.json
+  --source-readiness-report /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/readiness.json
 ```
 
 Expected: 28 tier task files are generated using default volumes and the command exits `0`.
@@ -296,7 +474,7 @@ Expected: 28 tier task files are generated using default volumes and the command
 ```powershell
 .\sft\training\run-wsl.ps1 `
   -NoSync `
-  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-20260701 `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
   -- chess-llm-make-data `
   --validate-only `
   --tier 1 2
@@ -309,13 +487,13 @@ Expected: validation exits `0` with no completeness or contamination errors.
 ```powershell
 .\sft\training\run-wsl.ps1 `
   -NoSync `
-  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-20260701 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024 `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
   -- chess-llm-train `
   --phase a `
-  --data-root /home/amazi/chess_sft_data/phase-a-t12-full-20260701/output `
-  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024 `
-  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-20260701/benchmark `
+  --data-root /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/output `
+  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
   --attn-implementation sdpa `
   --packing on `
   --max-length 1024 `
@@ -328,17 +506,17 @@ Expected: validation exits `0` with no completeness or contamination errors.
   --skip-eval `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-group phase-a-t12-full-20260701-pack1024 `
-  --run-name phase-a-t12-full-20260701-pack1024-dry-run `
+  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024 `
+  --run-name phase-a-t12-full-legal-material-20260702-pack1024-dry-run `
   --dry-run
 ```
 
 Expected: dry-run exits `0` and prints the true full-run optimizer step estimate.
 
-### Task 6: Launch Full Phase A And Sidecar Eval
+### Task 7: Launch Full Phase A And Sidecar Eval
 
 **Files:**
-- Create external artifact: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024`
+- Create external artifact: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024`
 - Update after run: `docs/experiments/experiment_log.md`
 
 - [ ] **Step 1: Launch full one-pass Phase A training**
@@ -349,15 +527,15 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
 .\sft\training\run-wsl.ps1 `
   -WslRepoPath /home/amazi/code/chess_sft_sdpo `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv `
-  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-20260701 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024 `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
   -WslHfCache /home/amazi/.cache/huggingface `
   -WslWandbDir /home/amazi/chess_sft_wandb `
   -- chess-llm-train `
   --phase a `
-  --data-root /home/amazi/chess_sft_data/phase-a-t12-full-20260701/output `
-  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024 `
-  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-20260701/benchmark `
+  --data-root /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/output `
+  --output-root /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
+  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
   --attn-implementation sdpa `
   --packing on `
   --max-length 1024 `
@@ -370,11 +548,11 @@ $env:WANDB_GIT_COMMIT = (git rev-parse HEAD).Trim()
   --skip-eval `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-group phase-a-t12-full-20260701-pack1024 `
-  --run-name phase-a-t12-full-20260701-pack1024-train
+  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024 `
+  --run-name phase-a-t12-full-legal-material-20260702-pack1024-train
 ```
 
-Expected: training writes `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a/READY`, exports `phase_a/best`, and logs online to W&B.
+Expected: training writes `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/READY`, exports `phase_a/best`, and logs online to W&B.
 
 - [ ] **Step 2: Resume if interrupted**
 
@@ -384,7 +562,7 @@ Run the same command as Step 1 with this extra argument appended:
 --resume-from-checkpoint auto
 ```
 
-Expected: the trainer resumes from the latest `checkpoint-N` under `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a`.
+Expected: the trainer resumes from the latest `checkpoint-N` under `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a`.
 
 - [ ] **Step 3: Launch final vLLM sidecar eval**
 
@@ -398,12 +576,12 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
   -NoSync `
   -CudaDeviceId 0 `
   -VenvPath /home/amazi/code/chess_sft_sdpo/.venv-vllm `
-  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-20260701 `
-  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024 `
+  -WslDataRoot /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702 `
+  -WslCheckpointRoot /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024 `
   -- chess-llm-evaluate `
-  --model /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a/best `
-  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-20260701/benchmark `
-  --output /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a/eval_predictions.vllm.jsonl `
+  --model /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/best `
+  --benchmark-dir /home/amazi/chess_sft_data/phase-a-t12-full-legal-material-20260702/benchmark `
+  --output /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/eval_predictions.vllm.jsonl `
   --phase a `
   --soft-gate `
   --batch-size 32 `
@@ -414,17 +592,17 @@ $env:VLLM_WORKER_MULTIPROC_METHOD = 'spawn'
   --vllm-max-model-len 4096 `
   --no-acpl `
   --wandb-project chess-sft `
-  --wandb-run-name phase-a-t12-full-20260701-pack1024-vllm-eval `
-  --wandb-group phase-a-t12-full-20260701-pack1024
+  --wandb-run-name phase-a-t12-full-legal-material-20260702-pack1024-vllm-eval `
+  --wandb-group phase-a-t12-full-legal-material-20260702-pack1024
 ```
 
 Expected: eval exits `0`, logs to W&B, and writes prediction/result artifacts in `phase_a`.
 
-### Task 7: Analyze And Decide The Next Curriculum Move
+### Task 8: Analyze And Decide The Next Curriculum Move
 
 **Files:**
 - Modify: `docs/experiments/experiment_log.md`
-- Read: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a/eval_predictions.vllm.jsonl`
+- Read: `/home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a/eval_predictions.vllm.jsonl`
 - Read generated result/analysis JSON files next to the eval output
 
 - [ ] **Step 1: Add full run entry to the experiment log**
@@ -433,7 +611,7 @@ Collect the exact commit and result files:
 
 ```powershell
 git rev-parse HEAD
-.\sft\training\run-wsl.ps1 -NoSync -- bash -lc "ls -lh /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a && find /home/amazi/chess_sft_checkpoints/phase-a-t12-full-20260701-pack1024/phase_a -maxdepth 1 -type f -name '*result*' -o -name '*analysis*'"
+.\sft\training\run-wsl.ps1 -NoSync -- bash -lc "ls -lh /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a && find /home/amazi/chess_sft_checkpoints/phase-a-t12-full-legal-material-20260702-pack1024/phase_a -maxdepth 1 -type f -name '*result*' -o -name '*analysis*'"
 ```
 
 Then append a dated entry to `docs/experiments/experiment_log.md` containing these exact fields with measured values from W&B, the training dry-run output, eval result JSON, and prediction analysis: git commit, data root, checkpoint root, W&B train run, W&B eval run, raw generated rows, effective rows after task upsampling, optimizer steps, train runtime, input tokens/sec, total train tokens, perception overall, rules overall, board to FEN, state tracking, FEN assembly, FEN row application, legal move generation, move legality, piece legal filter, legal moves by piece, main failure modes, and decision for next run. Do not commit the log until each field has a concrete value.
@@ -463,6 +641,6 @@ Record the chosen action in `docs/experiments/experiment_log.md` under `Decision
 
 ## Self-Review
 
-- Spec coverage: The plan covers code freeze, WSL preflight, W&B, data generation, validation, dry-run sizing, 25k rehearsal, full default Phase A, vLLM sidecar eval, resume behavior, and post-run analysis.
+- Spec coverage: The plan covers code freeze, WSL preflight, W&B, the completed July 2 packed rehearsal, targeted material/legal curriculum cleanup, refreshed 25k rehearsal, full Phase A data generation, vLLM sidecar eval, resume behavior, and post-run analysis.
 - Placeholder scan: Future experiment-log fields are described as measured values that must be collected before commit; the plan has no empty future-value holes.
 - Type and command consistency: Commands use current entrypoints and current Phase A options: `--num-train-epochs 1`, `--skip-trainer-eval`, `--skip-eval`, task upsampling for `1.5`, `1.9`, and `1.10`, vLLM with `VLLM_USE_V2_MODEL_RUNNER=0`, and W&B project `chess-sft`.

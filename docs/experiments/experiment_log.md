@@ -395,3 +395,124 @@ Main risks:
 4. Keep the FEN/state tasks in the mix, but reduce their upsampling once they
    consistently stay above the target.
 5. Use the final 25k rehearsal eval as the baseline for the next run.
+
+### Phase A 25k Decomposition Packed Rehearsal - 2026-07-02
+
+Run identity:
+
+- Git SHA: `8ddf3db415c9ab76ac894ba13a500ab5c5b28a74`
+- Data root:
+  `/home/amazi/chess_sft_data/phase-a-t12-v25000-20260701-decomp`
+- Checkpoint root:
+  `/home/amazi/chess_sft_checkpoints/phase-a-t12-v25000-20260701-decomp-pack1024`
+- W&B train run: `phase-a-t12-v25000-20260701-decomp-pack1024-train`
+  (`run-20260701_212125-6f8e4jkb`)
+- W&B eval run:
+  `phase-a-t12-v25000-20260701-decomp-pack1024-vllm-sidecar-eval`
+  (`run-20260702_075834-ffvwrgh2`)
+
+Training configuration:
+
+- `--attn-implementation sdpa`
+- `--packing on`
+- `--max-length 1024`
+- `--num-train-epochs 1`
+- `--skip-trainer-eval`
+- `--skip-eval`
+- `--no-acpl`
+- Task upsampling: `1.5_state_tracking=4`, `1.9_fen_assembly=4`,
+  `1.10_fen_row_application=4`
+- W&B project/group: `chess-sft` /
+  `phase-a-t12-v25000-20260701-decomp-pack1024`
+
+Dry-run and training result:
+
+- Raw rows: 700,000 rows across tiers 1-2.
+- Effective rows before split: about 925,000 after task upsampling.
+- Train split: 903,059 rows.
+- Eval split: 14,000 rows.
+- Dry-run step estimate before packing: 28,221.
+- Actual packed optimizer steps: 7,049.
+- Input tokens seen: 224,827,352.
+- Train runtime: 10:35:30.91.
+- Train throughput: about 5,896 input tokens/sec.
+- Train loss: 0.0879.
+- Final export: `phase_a/best`.
+- Final marker: `phase_a/READY`.
+
+Sidecar eval setup:
+
+- Backend: vLLM.
+- Benchmark version: `chess-sft-eval-v1`.
+- Eval size: 500 perception examples and 500 rules examples.
+- `VLLM_USE_V2_MODEL_RUNNER=0`.
+- `--vllm-max-model-len 4096`.
+- `--batch-size 32`.
+- `--max-new-tokens 192`.
+- `--soft-gate`.
+- `--no-acpl`.
+
+Final eval:
+
+| Split | Metric | Score |
+| --- | --- | ---: |
+| Perception | overall | 85.2% |
+| Perception | board_print | 100.0% |
+| Perception | board_to_fen | 96.4% |
+| Perception | piece_id | 92.9% |
+| Perception | material_count | 25.0% |
+| Perception | square_lookup | 92.9% |
+| Perception | rank_lookup | 100.0% |
+| Perception | square_coordinates | 100.0% |
+| Perception | fen_rank_expansion | 100.0% |
+| Perception | fen_rank_cell_edit | 92.9% |
+| Perception | fen_board_edit | 89.3% |
+| Perception | move_square_edits | 92.9% |
+| Perception | fen_assembly | 85.7% |
+| Perception | fen_row_application | 75.0% |
+| Perception | state_tracking | 82.1% |
+| Perception | material_inventory | 77.8% |
+| Perception | material_piece_counts | 81.5% |
+| Perception | material_value_totals | 81.5% |
+| Perception | material_balance_trace | 66.7% |
+| Rules | overall | 56.8% |
+| Rules | legal_moves | 36.1% |
+| Rules | side_piece_inventory | 99.0% |
+| Rules | piece_legal_moves | 51.2% |
+| Rules | check_detection | 80.0% |
+| Rules | special_rules | 78.0% |
+| Rules | legality_check | 66.0% |
+| Rules | piece_pseudo_legal_moves | 44.0% |
+| Rules | piece_legal_filter | 26.0% |
+| Rules | king_safety_filter | 88.0% |
+| Rules | legal_moves_by_piece | 0.0% |
+
+Failure modes:
+
+- Material count still collapses exact side inventory into hallucinated
+  piece-count/value totals, even when related material decomposition tasks are
+  partially correct.
+- Legal move generation still over-generates pseudo-legal moves and often
+  misses blockers, pinned-piece filtering, or own-king safety.
+- `piece_legal_filter` often labels every pseudo-legal move as legal and emits
+  `Rejected: none`, which explains much of the weak full legal-move behavior.
+- `legal_moves_by_piece` is too brittle as a full exact target at this stage;
+  grouped output is sometimes structurally close but has illegal extras or
+  missing moves.
+- FEN/state mechanics are no longer the main blocker, but row application still
+  misses some captures, en-passant fields, halfmove fields, and compressed row
+  edits.
+- Qwen thinking-template bleed appears as `<think></think>` in generations.
+  The scorer mostly strips it, so this is token/format noise rather than the
+  primary accuracy problem.
+
+Decision:
+
+- Do not launch the full Phase A pass on the unchanged recipe.
+- Keep the full-train goal active.
+- Next work: add targeted material-count decomposition and legal-move
+  decomposition, especially reason-labeled rejected moves for
+  `2.7_piece_legal_filter` and less brittle progression before
+  `2.9_legal_moves_by_piece`.
+- Run a refreshed 25k/task packed rehearsal on the patched curriculum before
+  spending the full Phase A budget.
