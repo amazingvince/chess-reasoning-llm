@@ -185,7 +185,7 @@ def test_package_material_decomposition_generators_emit_structured_traces():
             "Counts: white king=1; queen=0; rook=0; bishop=0; knight=0; pawn=0 | "
             "black king=1; queen=0; rook=0; bishop=0; knight=0; pawn=1\n"
             "Values: white total=0; black total=1\n"
-            "Final: Black is up 1 point(s) of material."
+            "Balance: Black is up 1 point(s) of material."
         ),
     }
 
@@ -267,11 +267,12 @@ def test_package_format_sensitive_generators_append_answer_contracts():
         BoardToFEN,
         FENAssembly,
         FENRowApplication,
+        MaterialBalanceTrace,
         PieceIdentification,
         SquareLookup,
         StateTracking,
     )
-    from chess_llm.sft.generators.tier2_rules import LegalMoveGen
+    from chess_llm.sft.generators.tier2_rules import LegalMoveGen, PieceLegalFilter
 
     position = "8/8/8/8/8/Q7/8/4K2k w - - 0 1"
     game_position = "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1"
@@ -318,6 +319,21 @@ def test_package_format_sensitive_generators_append_answer_contracts():
             rng=Random(0),
         ).generate()
     )
+    material_trace = next(
+        MaterialBalanceTrace(
+            config={"fen_pool": [{"fen": position}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    legal_filter = next(
+        PieceLegalFilter(
+            config={
+                "fen_pool": [{"fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"}],
+                "volume_override": 1,
+            },
+            rng=Random(0),
+        ).generate()
+    )
 
     assert (
         "Answer format: return exactly one complete six-field FEN"
@@ -346,6 +362,15 @@ def test_package_format_sensitive_generators_append_answer_contracts():
     assert (
         'Answer format: return exactly two lines: "Side to move: <white|black>."'
         in _user_prompt(legal_moves)
+    )
+    assert (
+        '"Counts:", "Values:", and "Balance:".'
+        in _user_prompt(material_trace)
+    )
+    assert (
+        'Rejected entries must be "<uci> <reason_label>" separated by semicolons, '
+        'or "none" when no moves are rejected.'
+        in _user_prompt(legal_filter)
     )
 
 
@@ -728,7 +753,25 @@ def test_package_legal_decomposition_generators_emit_structured_traces():
         "Pseudo-legal from e2: "
         "e2a2 e2b2 e2c2 e2d2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2f2 e2g2 e2h2.\n"
         "Legal: e2e3 e2e4 e2e5 e2e6 e2e7 e2e8.\n"
-        "Rejected: e2a2 e2b2 e2c2 e2d2 e2f2 e2g2 e2h2."
+        "Rejected: e2a2 pinned_piece_exposes_king; e2b2 pinned_piece_exposes_king; "
+        "e2c2 pinned_piece_exposes_king; e2d2 pinned_piece_exposes_king; "
+        "e2f2 pinned_piece_exposes_king; e2g2 pinned_piece_exposes_king; "
+        "e2h2 pinned_piece_exposes_king."
+    )
+
+    quiet_filter = next(
+        PieceLegalFilter(
+            config={"fen_pool": [{"fen": quiet_rook_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    assert quiet_filter["task"] == "2.7_piece_legal_filter"
+    assert quiet_filter["metadata"]["source_square"] == "a1"
+    assert quiet_filter["messages"][2]["content"] == (
+        "Pseudo-legal from a1: "
+        "a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1.\n"
+        "Legal: a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1.\n"
+        "Rejected: none."
     )
 
     safety = next(
@@ -763,7 +806,7 @@ def test_package_legal_decomposition_generators_emit_structured_traces():
         "e1d1 e1d2 e1e2 e1f1 e1f2"
     )
 
-    for row in (pseudo, legal_filter, safety, grouped):
+    for row in (pseudo, legal_filter, quiet_filter, safety, grouped):
         assert row["metadata"]["expected_answer"] == row["messages"][2]["content"]
         assert row["metadata"]["example_identity"]
         passed, errors = validate_example(row)

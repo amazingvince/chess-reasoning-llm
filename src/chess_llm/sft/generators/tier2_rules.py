@@ -153,6 +153,15 @@ def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
     )
 
 
+def _rejected_move_text(board: chess.Board, moves: list[str]) -> str:
+    if not moves:
+        return "none"
+    return "; ".join(
+        f"{move_uci} {classify_move_legality(board, move_uci).reason_label}"
+        for move_uci in moves
+    )
+
+
 def _candidate_piece_squares(
     board: chess.Board,
     *,
@@ -202,7 +211,7 @@ def _format_piece_legal_filter_answer(board: chess.Board, square: int) -> str:
         [
             f"Pseudo-legal from {square_name}: {_move_text(pseudo)}.",
             f"Legal: {_move_text(legal)}.",
-            f"Rejected: {_move_text(rejected)}.",
+            f"Rejected: {_rejected_move_text(board, rejected)}.",
         ]
     )
 

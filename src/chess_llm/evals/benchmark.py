@@ -148,7 +148,7 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "material_inventory": "FEN: {fen}\nList the material inventory by side and piece type.",
     "material_piece_counts": "FEN: {fen}\nCount each piece type for both sides.",
     "material_value_totals": "FEN: {fen}\nConvert the piece counts into material value totals.",
-    "material_balance_trace": "FEN: {fen}\nTrace inventory, counts, values, and final material balance.",
+    "material_balance_trace": "FEN: {fen}\nTrace inventory, counts, values, and material balance.",
     "square_lookup": "FEN: {fen}\nWhat is on {square}?",
     "rank_lookup": "FEN: {fen}\nWhat is the compressed FEN row for rank {rank}?",
     "square_coordinates": "FEN: {fen}\nFor square {square}, give the FEN row-from-top and file index.",
@@ -163,7 +163,7 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "side_piece_inventory": "FEN: {fen}\nList the side-to-move pieces and their squares.",
     "piece_legal_moves": "FEN: {fen}\nWhat legal moves does the piece on {source_square} have?",
     "piece_pseudo_legal_moves": "FEN: {fen}\nList pseudo-legal moves from {source_square}.",
-    "piece_legal_filter": "FEN: {fen}\nFor the piece on {source_square}, split pseudo-legal moves into legal and rejected moves.",
+    "piece_legal_filter": "FEN: {fen}\nFor the piece on {source_square}, split pseudo-legal moves into legal and rejected moves with rejection reasons.",
     "king_safety_filter": "FEN: {fen}\nFor move {move}, decide whether king safety allows it.",
     "legal_moves_by_piece": "FEN: {fen}\nGroup all legal moves by side-to-move piece.",
     "check_detection": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
@@ -1238,7 +1238,7 @@ def _derive_material_decomposition(
                 f"black {_material_count_vector_text(black)}"
             ),
             f"Values: white total={white_total}; black total={black_total}",
-            f"Final: {_material_balance_sentence(white_total, black_total)}",
+            f"Balance: {_material_balance_sentence(white_total, black_total)}",
         ]
     )
 
@@ -1407,6 +1407,15 @@ def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
     )
 
 
+def _rejected_move_text(board: chess.Board, moves: list[str]) -> str:
+    if not moves:
+        return "none"
+    return "; ".join(
+        f"{move_uci} {classify_move_legality(board, move_uci).reason_label}"
+        for move_uci in moves
+    )
+
+
 def _select_decomposition_square(
     board: chess.Board,
     *,
@@ -1461,7 +1470,7 @@ def _derive_piece_legal_filter(
         [
             f"Pseudo-legal from {square_name}: {_move_text(pseudo)}.",
             f"Legal: {_move_text(legal)}.",
-            f"Rejected: {_move_text(rejected)}.",
+            f"Rejected: {_rejected_move_text(board, rejected)}.",
         ]
     )
 

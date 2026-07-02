@@ -410,7 +410,7 @@ def test_package_benchmark_derives_material_decomposition_diagnostics():
         assert packaged.score_prediction(example, example.gold_answer)["primary"] == 1.0
 
     assert by_task["material_balance_trace"].gold_answer.endswith(
-        "Final: Black is up 1 point(s) of material."
+        "Balance: Black is up 1 point(s) of material."
     )
 
 
@@ -433,6 +433,8 @@ def test_package_benchmark_derives_legal_decomposition_diagnostics():
         assert packaged.score_prediction(example, example.gold_answer)["primary"] == 1.0
 
     assert "Rejected:" in by_task["piece_legal_filter"].gold_answer
+    assert "pinned_piece_exposes_king" in by_task["piece_legal_filter"].gold_answer
+    assert "rejection reasons" in packaged.CANONICAL_PROMPTS["piece_legal_filter"]
 
 
 def test_package_piece_legal_moves_benchmark_can_score_no_move_piece():

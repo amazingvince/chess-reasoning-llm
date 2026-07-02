@@ -327,6 +327,31 @@ def test_package_validate_example_rejects_wrong_material_trace_answer():
     assert any("material decomposition" in error.lower() for error in errors)
 
 
+def test_package_validate_example_rejects_old_material_trace_final_label():
+    fen = "8/8/8/8/8/8/6p1/4K2k w - - 0 1"
+    row = build_sft_row(
+        task="1.18_material_balance_trace",
+        tier=1,
+        fen=fen,
+        user_prompt="FEN: ...\nTrace material.",
+        assistant_content=(
+            "Inventory: white king=e1; queen=none; rook=none; bishop=none; "
+            "knight=none; pawn=none | black king=h1; queen=none; rook=none; "
+            "bishop=none; knight=none; pawn=g2\n"
+            "Counts: white king=1; queen=0; rook=0; bishop=0; knight=0; pawn=0 | "
+            "black king=1; queen=0; rook=0; bishop=0; knight=0; pawn=1\n"
+            "Values: white total=0; black total=1\n"
+            "Final: Black is up 1 point(s) of material."
+        ),
+        metadata={"expected_answer": "wrong"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("material decomposition" in error.lower() for error in errors)
+
+
 def test_package_validate_example_rejects_wrong_square_lookup_answer():
     row = build_sft_row(
         task="1.6_square_lookup",
@@ -550,6 +575,28 @@ def test_package_validate_example_rejects_wrong_piece_legal_filter_trace():
             "e2e7 e2e8 e2f2 e2g2 e2h2.\n"
             "Legal: e2a2 e2e3.\n"
             "Rejected: none."
+        ),
+        metadata={"source_square": "e2", "expected_answer": "wrong"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("legal decomposition" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_piece_legal_filter_without_rejection_reasons():
+    fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    row = build_sft_row(
+        task="2.7_piece_legal_filter",
+        tier=2,
+        fen=fen,
+        user_prompt="FEN: ...\nFilter pseudo moves from e2.",
+        assistant_content=(
+            "Pseudo-legal from e2: "
+            "e2a2 e2b2 e2c2 e2d2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2f2 e2g2 e2h2.\n"
+            "Legal: e2e3 e2e4 e2e5 e2e6 e2e7 e2e8.\n"
+            "Rejected: e2a2 e2b2 e2c2 e2d2 e2f2 e2g2 e2h2."
         ),
         metadata={"source_square": "e2", "expected_answer": "wrong"},
     )

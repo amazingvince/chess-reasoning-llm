@@ -124,11 +124,11 @@ ANSWER_CONTRACTS: dict[str, str] = {
     ),
     "1.18_material_balance_trace": (
         'Answer format: return exactly four lines starting "Inventory:", '
-        '"Counts:", "Values:", and "Final:".'
+        '"Counts:", "Values:", and "Balance:".'
     ),
     "material_balance_trace": (
         'Answer format: return exactly four lines starting "Inventory:", '
-        '"Counts:", "Values:", and "Final:".'
+        '"Counts:", "Values:", and "Balance:".'
     ),
     "2.1_legal_move_gen": (
         'Answer format: return exactly two lines: "Side to move: <white|black>." '
@@ -148,11 +148,15 @@ ANSWER_CONTRACTS: dict[str, str] = {
     ),
     "2.7_piece_legal_filter": (
         'Answer format: return exactly three lines starting "Pseudo-legal from", '
-        '"Legal:", and "Rejected:".'
+        '"Legal:", and "Rejected:". Rejected entries must be '
+        '"<uci> <reason_label>" separated by semicolons, or "none" when no '
+        'moves are rejected.'
     ),
     "piece_legal_filter": (
         'Answer format: return exactly three lines starting "Pseudo-legal from", '
-        '"Legal:", and "Rejected:".'
+        '"Legal:", and "Rejected:". Rejected entries must be '
+        '"<uci> <reason_label>" separated by semicolons, or "none" when no '
+        'moves are rejected.'
     ),
     "2.8_king_safety_filter": (
         'Answer format: return exactly four lines starting "Move:", '
@@ -307,9 +311,9 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nCalculate material value totals for white and black.",
     ],
     "1.18_material_balance_trace": [
-        "FEN: {fen}\nTrace inventory, counts, values, and final material balance.",
+        "FEN: {fen}\nTrace inventory, counts, values, and material balance.",
         "Position: {fen}\nShow a structured material-count trace ending with the balance.",
-        "Board:\n{board}\nWork through material inventory, counts, value totals, and final balance.",
+        "Board:\n{board}\nWork through material inventory, counts, value totals, and balance.",
     ],
 
     # ---- Tier 2: Rules ----
@@ -375,9 +379,9 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nSide to move: {side_to_move}\nList pseudo-legal moves from {square}.",
     ],
     "2.7_piece_legal_filter": [
-        "FEN: {fen}\nFor the piece on {square}, split pseudo-legal moves into legal and rejected moves.",
-        "Position: {fen}\nFilter the pseudo-legal moves from {square} by king safety.",
-        "Board:\n{board}\nSide to move: {side_to_move}\nShow pseudo-legal, legal, and rejected moves from {square}.",
+        "FEN: {fen}\nFor the piece on {square}, split pseudo-legal moves into legal and rejected moves with rejection reasons.",
+        "Position: {fen}\nFilter the pseudo-legal moves from {square} by king safety and label each rejected move.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nShow pseudo-legal, legal, and rejected moves from {square}; include a reason label for each rejection.",
     ],
     "2.8_king_safety_filter": [
         "FEN: {fen}\nFor move {move}, decide whether king safety allows it.",

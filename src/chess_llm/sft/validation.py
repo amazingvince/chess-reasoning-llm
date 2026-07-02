@@ -321,7 +321,7 @@ def _material_decomposition_answer(task: str, board: chess.Board) -> str:
                 f"black {_material_count_vector_text(black)}"
             ),
             f"Values: white total={white_total}; black total={black_total}",
-            f"Final: {_material_balance_sentence(white_total, black_total)}",
+            f"Balance: {_material_balance_sentence(white_total, black_total)}",
         ]
     )
 
@@ -343,6 +343,15 @@ def _legal_moves_from_square(board: chess.Board, square: int) -> list[str]:
         move.uci()
         for move in board.legal_moves
         if move.from_square == square
+    )
+
+
+def _rejected_move_text(board: chess.Board, moves: list[str]) -> str:
+    if not moves:
+        return "none"
+    return "; ".join(
+        f"{move_uci} {classify_move_legality(board, move_uci).reason_label}"
+        for move_uci in moves
     )
 
 
@@ -424,7 +433,7 @@ def _legal_decomposition_answer(
             [
                 f"Pseudo-legal from {source_square}: {_move_text(pseudo)}.",
                 f"Legal: {_move_text(legal)}.",
-                f"Rejected: {_move_text(rejected)}.",
+                f"Rejected: {_rejected_move_text(board, rejected)}.",
             ]
         )
     if task == "2.8_king_safety_filter":

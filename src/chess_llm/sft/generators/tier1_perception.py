@@ -234,7 +234,7 @@ def _format_material_balance_trace_answer(board: chess.Board) -> str:
                 f"black {_material_count_vector_text(black)}"
             ),
             f"Values: white total={white_total}; black total={black_total}",
-            f"Final: {_material_balance_sentence(white_total, black_total)}",
+            f"Balance: {_material_balance_sentence(white_total, black_total)}",
         ]
     )
 
