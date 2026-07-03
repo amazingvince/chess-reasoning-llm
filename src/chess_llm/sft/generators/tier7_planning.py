@@ -4,6 +4,7 @@
 7.2 Puzzle solving (Lichess puzzles rated 1000-2500)
 7.3 Move consequence (PV line analysis)
 7.8 Candidate ratings (fixed grammar, true MultiPV only)
+7.10 Best-line trace (fixed grammar, true MultiPV PV only)
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from typing import Iterator
 
 import chess
 
-from chess_llm.sft.context import board_from_raw
+from chess_llm.sft.context import board_from_raw, raw_is_chess960
 from chess_llm.evals.benchmark import format_candidate_ratings_answer
+from chess_llm.sft.best_line_trace import best_line_trace_payload
 from chess_llm.sft.generators.base import TaskGenerator
 from chess_llm.sft.generators.reasoning_traces import (
     generate_endgame_trace,
@@ -316,6 +318,72 @@ class CandidateRatings(TaskGenerator):
             count += 1
 
 
+class BestLineTrace(TaskGenerator):
+    """Task 7.10: seeded fixed-grammar trace for the engine best PV."""
+
+    def task_id(self) -> str:
+        return "7.10_best_line_trace"
+
+    def tier(self) -> int:
+        return 7
+
+    def generate(self) -> Iterator[dict]:
+        evals = self.config.get("candidate_rating_evals", [])
+        target = self.target_volume()
+        count = 0
+
+        for ev in evals:
+            if count >= target:
+                return
+            raw = self.source_row(ev)
+            if self.is_blocked(raw):
+                continue
+
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            ratings = _candidate_ratings_from_row(raw)
+            if not ratings:
+                continue
+            payload = best_line_trace_payload(
+                str(raw.get("fen", "")),
+                ratings[0],
+                chess960=raw_is_chess960(raw),
+            )
+            if payload is None:
+                continue
+
+            best_move = str(payload["best_move"])
+            raw["move"] = best_move
+            raw["best_move"] = best_move
+            raw["pv_line"] = str(payload["pv_line"])
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update({
+                "source": "stockfish_multipv",
+                "source_task": "7.8_candidate_ratings",
+                "target_move": best_move,
+                "best_move": best_move,
+                "pv": payload["pv"],
+                "pv_line": payload["pv_line"],
+                "cp": payload["cp"],
+                "mate": payload["mate"],
+                "bucket": payload["bucket"],
+                "expected_answer": payload["expected_answer"],
+                "multipv_depth": raw.get("multipv_depth", raw.get("depth", 0)),
+                "multipv_k": raw.get("multipv_k"),
+                "pv_len": raw.get("pv_len"),
+            })
+            raw["metadata"] = metadata
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=str(payload["expected_answer"]),
+            )
+            count += 1
+
+
 def _candidate_ratings_from_row(raw: dict) -> list[dict[str, object]]:
     source = raw.get("candidate_ratings")
     if not isinstance(source, list):
@@ -342,5 +410,12 @@ def _candidate_ratings_from_row(raw: dict) -> list[dict[str, object]]:
                 rating["mate"] = int(mate)
             except (TypeError, ValueError):
                 pass
+        pv = item.get("pv") or item.get("pv_line") or item.get("principal_variation")
+        if pv:
+            rating["pv_line"] = " ".join(pv) if isinstance(pv, list) else str(pv)
+        if item.get("rank") is not None:
+            rating["rank"] = item.get("rank")
+        if item.get("expectation") is not None:
+            rating["expectation"] = item.get("expectation")
         ratings.append(rating)
     return ratings

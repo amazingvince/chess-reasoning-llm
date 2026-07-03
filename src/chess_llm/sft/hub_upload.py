@@ -78,6 +78,7 @@ TASK_DESCRIPTIONS = {
     "7.3_move_consequence": "Predict the consequence of a candidate move",
     "7.8_candidate_ratings": "Rate five Stockfish MultiPV candidate moves with fixed grammar",
     "7.9_step_verification": "Audit a numbered chess trace and identify one broken step",
+    "7.10_best_line_trace": "Emit a fixed-grammar Stockfish best-line trace",
 }
 
 SPLIT_DESCRIPTIONS = {

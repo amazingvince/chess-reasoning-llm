@@ -21,6 +21,11 @@ from chess_llm.formats.answers import (
     extract_uci_from_move_tag as _extract_uci_from_move_tag,
 )
 from chess_llm.formats.answers import validate_think_move_format
+from chess_llm.sft.best_line_trace import (
+    normalize_pv_moves,
+    parse_best_line_trace_answer,
+    validate_pv_moves,
+)
 from chess_llm.sft.context import raw_is_chess960
 from chess_llm.sft.step_verification import (
     format_step_verification_answer,
@@ -859,6 +864,55 @@ def _candidate_rating_metadata_moves(metadata: dict) -> list[str]:
     return moves
 
 
+def _validate_best_line_trace_answer(
+    messages: list[dict],
+    fen: str,
+    metadata: dict,
+    *,
+    chess960: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    contents = _assistant_contents(messages)
+    if not contents:
+        return ["Best-line trace: missing assistant answer"]
+
+    expected_answer = metadata.get("expected_answer")
+    expected_answer_text = expected_answer if isinstance(expected_answer, str) else None
+    expected_move = _expected_target_move(metadata)
+    expected_pv = normalize_pv_moves(metadata.get("pv") or metadata.get("pv_line"))
+
+    for content in contents:
+        parsed = parse_best_line_trace_answer(content)
+        if parsed is None:
+            errors.append("Best-line trace answer does not match fixed grammar")
+            continue
+        if expected_answer_text is not None and content.strip() != expected_answer_text.strip():
+            errors.append("Best-line trace answer does not match metadata expected_answer")
+
+        root = str(parsed["root"])
+        best = str(parsed["best"])
+        move = str(parsed["move"])
+        pv = [str(item) for item in parsed["pv"]]
+        if root != best or root != move:
+            errors.append("Best-line trace root, Best line, and <move> tag must match")
+        if expected_move is not None and move != expected_move:
+            errors.append(
+                f"Best-line trace move {move!r} does not match target move "
+                f"{expected_move!r}"
+            )
+        if not pv or pv[0] != root:
+            errors.append("Best-line trace PV must begin with the root move")
+        if expected_pv and pv != expected_pv:
+            errors.append("Best-line trace PV does not match metadata pv")
+        if validate_fen(fen, chess960=chess960) and not validate_pv_moves(
+            fen,
+            pv,
+            chess960=chess960,
+        ):
+            errors.append("Best-line trace PV is not legal from FEN")
+    return errors
+
+
 def _validate_step_verification_answer(
     messages: list[dict],
     metadata: dict,
@@ -971,6 +1025,15 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
     if task == "7.8_candidate_ratings":
         errors.extend(
             _validate_candidate_ratings_answer(
+                messages,
+                fen,
+                metadata,
+                chess960=is_960,
+            )
+        )
+    elif task == "7.10_best_line_trace":
+        errors.extend(
+            _validate_best_line_trace_answer(
                 messages,
                 fen,
                 metadata,

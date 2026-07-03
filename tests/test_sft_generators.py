@@ -1481,6 +1481,92 @@ def test_package_candidate_ratings_registered_for_tier7_generation():
     assert "Candidate <uci>" in ANSWER_CONTRACTS["7.8_candidate_ratings"]
 
 
+def test_package_best_line_trace_generator_uses_true_multipv_pv():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier7_planning import BestLineTrace
+
+    candidate_row = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "multipv_k": 5,
+        "pv_len": 4,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42, "pv_line": "e2e4 e7e5 g1f3 b8c6"},
+            {"uci": "d2d4", "cp": 15, "pv_line": "d2d4 d7d5 c2c4"},
+            {"uci": "g1f3", "cp": 5, "pv_line": "g1f3 d7d5"},
+            {"uci": "c2c4", "cp": -20, "pv_line": "c2c4 e7e5"},
+            {"uci": "b1c3", "cp": -80, "pv_line": "b1c3 d7d5"},
+        ],
+    }
+
+    rows = list(
+        BestLineTrace(
+            config={"candidate_rating_evals": [candidate_row], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    answer = row["messages"][2]["content"]
+    assert row["task"] == "7.10_best_line_trace"
+    assert answer == "\n".join(
+        [
+            "<think>",
+            "Root: e2e4",
+            "Eval: +42cp; Bucket: equal",
+            "PV: e2e4 e7e5 g1f3 b8c6",
+            "Best: e2e4",
+            "</think><move>e2e4</move>",
+        ]
+    )
+    assert "engine best line" in row["messages"][1]["content"].lower()
+    assert row["metadata"]["source"] == "stockfish_multipv"
+    assert row["metadata"]["source_task"] == "7.8_candidate_ratings"
+    assert row["metadata"]["target_move"] == "e2e4"
+    assert row["metadata"]["pv"] == ["e2e4", "e7e5", "g1f3", "b8c6"]
+    assert row["metadata"]["expected_answer"] == answer
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_best_line_trace_generator_skips_invalid_pv():
+    from chess_llm.sft.generators.tier7_planning import BestLineTrace
+
+    invalid_row = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42, "pv_line": "e2e5 e7e5"},
+            {"uci": "d2d4", "cp": 15, "pv_line": "d2d4 d7d5"},
+            {"uci": "g1f3", "cp": 5, "pv_line": "g1f3 d7d5"},
+            {"uci": "c2c4", "cp": -20, "pv_line": "c2c4 e7e5"},
+            {"uci": "b1c3", "cp": -80, "pv_line": "b1c3 d7d5"},
+        ],
+    }
+
+    rows = list(
+        BestLineTrace(
+            config={"candidate_rating_evals": [invalid_row], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert rows == []
+
+
+def test_package_best_line_trace_registered_for_tier7_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators import BestLineTrace
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert BestLineTrace in pipeline.TIER_GENERATORS[7]
+    assert DEFAULT_VOLUMES["7.10_best_line_trace"] > 0
+    assert TEMPLATES["7.10_best_line_trace"]
+    assert "<think>" in ANSWER_CONTRACTS["7.10_best_line_trace"]
+
+
 def test_package_step_verification_generator_corrupts_candidate_rating_trace():
     from chess_llm.sft import validate_example
     from chess_llm.sft.generators.tier7_verification import StepVerification

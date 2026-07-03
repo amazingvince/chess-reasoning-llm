@@ -45,6 +45,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "5.3_opening_principles": ("variant",),
     "7.8_candidate_ratings": ("candidate_moves",),
     "7.9_step_verification": ("source_task", "corruption_kind", "faulty_line"),
+    "7.10_best_line_trace": ("best_move", "pv_line"),
 }
 
 

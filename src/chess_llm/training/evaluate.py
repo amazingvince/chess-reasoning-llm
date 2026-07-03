@@ -78,7 +78,7 @@ DEFAULT_STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH") or shutil.which("stock
 
 # Task types that predict moves (candidates for ACPL) — matches run_benchmark.py
 _MOVE_TASK_TYPES = frozenset({
-    "best_move", "puzzle_solve", "endgame_best_move",
+    "best_move", "puzzle_solve", "best_line_trace", "endgame_best_move",
 })
 
 _ACPL_INVALID_MOVE_PENALTY = 150.0
@@ -850,7 +850,7 @@ def _prediction_diagnostics(
             example,
             prediction,
         )
-    if example.task_type in ("best_move", "puzzle_solve"):
+    if example.task_type in ("best_move", "puzzle_solve", "best_line_trace"):
         diagnostics["trace"] = analyze_trace_metrics(
             example.fen,
             prediction,
@@ -1011,7 +1011,7 @@ def _score_split_with_protocol_predictions(
     """
     scoring_predictions = dict(normalized_predictions)
     for example in examples:
-        if example.task_type in ("best_move", "puzzle_solve"):
+        if example.task_type in ("best_move", "puzzle_solve", "best_line_trace"):
             raw = raw_predictions.get(example.example_id)
             if raw is not None:
                 scoring_predictions[example.example_id] = raw
@@ -1813,7 +1813,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         planning_preds = [
             (ex, flat_raw_preds.get(ex.example_id, flat_preds.get(ex.example_id, "")))
             for ex in examples
-            if ex.task_type in ("best_move", "puzzle_solve")
+            if ex.task_type in ("best_move", "puzzle_solve", "best_line_trace")
         ]
         if planning_preds:
             fc_scores = [format_compliance(p) for _, p in planning_preds]

@@ -35,6 +35,10 @@ from chess_llm.formats.board import render_ascii_board
 from chess_llm.evals.trace_metrics import analyze_trace_metrics, numeric_trace_metrics
 from chess_llm.sft.context import build_template_context, raw_is_chess960
 from chess_llm.sft.settings import DEFAULT_EVAL_BUCKETS
+from chess_llm.sft.best_line_trace import (
+    best_line_trace_payload,
+    parse_best_line_trace_answer,
+)
 from chess_llm.sft.step_verification import (
     format_step_verification_answer,
     label_from_metadata,
@@ -167,6 +171,7 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "best_move",
         "puzzle_solve",
         "candidate_ratings",
+        "best_line_trace",
         "step_verification",
     ],
     "chess960": ["legal_moves_960", "check_detection_960", "castling_rules_960"],
@@ -221,6 +226,7 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "best_move": "FEN: {fen}\nWhat is the best move?",
     "puzzle_solve": "FEN: {fen}\nSolve this puzzle. Find the winning move.",
     "candidate_ratings": "FEN: {fen}\nRate exactly these 5 candidate moves: {candidate_moves}",
+    "best_line_trace": "FEN: {fen}\nEmit the fixed-grammar engine best line trace.",
     "step_verification": (
         "FEN: {fen}\nTrace to verify:\n{verification_trace}\n"
         "Find the broken line, or say the trace is sound."
@@ -279,6 +285,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "best_move": "move_extraction",
     "puzzle_solve": "move_extraction",
     "candidate_ratings": "candidate_ratings",
+    "best_line_trace": "best_line_trace",
     "step_verification": "step_verification",
     "legal_moves_960": "uci_set_jaccard",
     "check_detection_960": "check_state",
@@ -297,6 +304,7 @@ _META_KEYS = frozenset({
     "after_row", "before_fen", "after_fen", "board_fen_before",
     "board_fen_after", "edit_text",
     "candidate_ratings", "candidate_moves", "multipv_depth",
+    "multipv_k", "pv", "pv_line", "pv_len", "best_line_trace",
     "verification_trace", "verification_verdict", "faulty_line",
     "error_type", "correction", "source_task", "corruption_kind",
 })
@@ -1191,6 +1199,51 @@ def candidate_ratings_score(prediction: str, gold: str) -> dict[str, float | Non
     }
 
 
+def best_line_trace_score(prediction: str, gold: str) -> dict[str, float | None]:
+    """Score fixed-grammar best-line traces."""
+    pred = parse_best_line_trace_answer(prediction)
+    expected = parse_best_line_trace_answer(gold)
+    if expected is None:
+        return {
+            "primary": 0.0,
+            "root_move_match": 0.0,
+            "best_move_match": 0.0,
+            "move_tag_match": 0.0,
+            "bucket_match": 0.0,
+            "pv_prefix_match": 0.0,
+            "pv_exact_match": 0.0,
+        }
+    if pred is None:
+        return {
+            "primary": 0.0,
+            "root_move_match": 0.0,
+            "best_move_match": 0.0,
+            "move_tag_match": 0.0,
+            "bucket_match": 0.0,
+            "pv_prefix_match": 0.0,
+            "pv_exact_match": 0.0,
+        }
+
+    root_match = 1.0 if pred["root"] == expected["root"] else 0.0
+    best_match = 1.0 if pred["best"] == expected["best"] else 0.0
+    move_match = 1.0 if pred["move"] == expected["move"] else 0.0
+    bucket_match = 1.0 if pred["bucket"] == expected["bucket"] else 0.0
+    pred_pv = list(pred["pv"])
+    expected_pv = list(expected["pv"])
+    pv_prefix = _sequence_prefix_ratio(pred_pv, expected_pv)
+    pv_exact = 1.0 if pred_pv == expected_pv else 0.0
+    primary_parts = [root_match, best_match, move_match, bucket_match, pv_prefix]
+    return {
+        "primary": sum(primary_parts) / len(primary_parts),
+        "root_move_match": root_match,
+        "best_move_match": best_match,
+        "move_tag_match": move_match,
+        "bucket_match": bucket_match,
+        "pv_prefix_match": pv_prefix,
+        "pv_exact_match": pv_exact,
+    }
+
+
 def _parse_candidate_ratings_answer(text: str) -> dict[str, object] | None:
     candidates: list[dict[str, str]] = []
     best: str | None = None
@@ -1215,6 +1268,17 @@ def _parse_candidate_ratings_answer(text: str) -> dict[str, object] | None:
     if len(candidates) != 5 or best is None:
         return None
     return {"candidates": candidates, "best": best}
+
+
+def _sequence_prefix_ratio(predicted: Sequence[object], expected: Sequence[object]) -> float:
+    if not expected:
+        return 1.0 if not predicted else 0.0
+    matches = 0
+    for pred_item, expected_item in zip(predicted, expected, strict=False):
+        if pred_item != expected_item:
+            break
+        matches += 1
+    return matches / len(expected)
 
 
 def _candidate_bucket_index(label: str) -> int:
@@ -1319,12 +1383,14 @@ def score_prediction(
         scores["primary"] = continuation_rank(prediction, gold)
     elif metric == "candidate_ratings":
         scores.update(candidate_ratings_score(prediction, gold))
+    elif metric == "best_line_trace":
+        scores.update(best_line_trace_score(raw_prediction, gold))
     elif metric == "step_verification":
         scores.update(step_verification_score(prediction, gold))
     else:
         scores["primary"] = exact_match(prediction, gold)
 
-    if example.task_type in ("best_move", "puzzle_solve"):
+    if example.task_type in ("best_move", "puzzle_solve", "best_line_trace"):
         scores["format_compliance"] = format_compliance(raw_prediction)
         scores["legal_move"] = legal_move_rate(
             raw_prediction,
@@ -2704,6 +2770,20 @@ def _legal_candidate_ratings_gold(raw: dict, *, chess960: bool = False) -> str:
     return format_candidate_ratings_answer(ratings)
 
 
+def _legal_best_line_trace_gold(raw: dict, *, chess960: bool = False) -> str:
+    fen = str(raw.get("fen", ""))
+    ratings = _candidate_ratings_from_raw(raw)
+    if not ratings:
+        return ""
+    payload = best_line_trace_payload(fen, ratings[0], chess960=chess960)
+    if payload is None:
+        return ""
+    raw["_best_line_trace_move"] = payload["best_move"]
+    raw["_best_line_trace_pv"] = payload["pv"]
+    raw["_best_line_trace_pv_line"] = payload["pv_line"]
+    return str(payload["expected_answer"])
+
+
 def _step_verification_gold(raw: dict) -> str:
     expected_answer = raw.get("expected_answer")
     if isinstance(expected_answer, str) and parse_step_verification_answer(expected_answer):
@@ -2741,6 +2821,13 @@ def _candidate_ratings_from_raw(raw: Mapping[str, object]) -> list[dict[str, obj
                 normalized["mate"] = int(mate)
             except (TypeError, ValueError):
                 pass
+        pv = item.get("pv") or item.get("pv_line") or item.get("principal_variation")
+        if pv:
+            normalized["pv_line"] = " ".join(pv) if isinstance(pv, list) else str(pv)
+        if item.get("rank") is not None:
+            normalized["rank"] = item.get("rank")
+        if item.get("expectation") is not None:
+            normalized["expectation"] = item.get("expectation")
         ratings.append(normalized)
     return ratings
 
@@ -2965,6 +3052,8 @@ def _derive_gold_answer_inner(
         return _legal_gold_move(fen, raw.get("solution_first_move"), chess960=is_960)
     if task_type == "candidate_ratings":
         return _legal_candidate_ratings_gold(raw, chess960=is_960)
+    if task_type == "best_line_trace":
+        return _legal_best_line_trace_gold(raw, chess960=is_960)
     if task_type == "step_verification":
         return _step_verification_gold(raw)
     if task_type == "castling_rules_960":
@@ -3071,7 +3160,12 @@ def freeze_split(
 
     for index, raw in enumerate(raw_examples):
         if split_name == "planning":
-            if raw.get("verification_trace"):
+            requested_task = str(raw.get("task_type") or raw.get("task") or "")
+            if requested_task in {"best_line_trace", "7.10_best_line_trace"} or raw.get(
+                "best_line_trace"
+            ):
+                task_type = "best_line_trace"
+            elif raw.get("verification_trace"):
                 task_type = "step_verification"
             elif _candidate_ratings_from_raw(raw):
                 task_type = "candidate_ratings"

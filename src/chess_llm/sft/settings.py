@@ -83,6 +83,7 @@ DEFAULT_VOLUMES: dict[str, int] = {
     "7.3_move_consequence": 40_000,
     "7.8_candidate_ratings": 40_000,
     "7.9_step_verification": 30_000,
+    "7.10_best_line_trace": 30_000,
 }
 
 DEFAULT_CHESS960_RATIOS: dict[int, float] = {

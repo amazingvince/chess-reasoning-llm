@@ -461,6 +461,66 @@ def test_package_validate_example_rejects_candidate_ratings_wrong_best_and_illeg
     assert any("best" in error.lower() for error in errors)
 
 
+def test_package_validate_example_accepts_best_line_trace_fixed_grammar():
+    answer = "\n".join(
+        [
+            "<think>",
+            "Root: e2e4",
+            "Eval: +42cp; Bucket: equal",
+            "PV: e2e4 e7e5 g1f3 b8c6",
+            "Best: e2e4",
+            "</think><move>e2e4</move>",
+        ]
+    )
+    row = build_sft_row(
+        task="7.10_best_line_trace",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nEmit the fixed grammar engine best line trace.",
+        assistant_content=answer,
+        metadata={
+            "target_move": "e2e4",
+            "pv": ["e2e4", "e7e5", "g1f3", "b8c6"],
+            "expected_answer": answer,
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
+def test_package_validate_example_rejects_best_line_trace_wrong_or_illegal_pv():
+    answer = "\n".join(
+        [
+            "<think>",
+            "Root: e2e4",
+            "Eval: +42cp; Bucket: equal",
+            "PV: e2e4 e7e6 e2e4",
+            "Best: e2e4",
+            "</think><move>e2e4</move>",
+        ]
+    )
+    row = build_sft_row(
+        task="7.10_best_line_trace",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...",
+        assistant_content=answer,
+        metadata={
+            "target_move": "e2e4",
+            "pv": ["e2e4", "e7e5", "g1f3"],
+            "expected_answer": answer,
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("best-line trace" in error.lower() for error in errors)
+    assert any("pv" in error.lower() for error in errors)
+
+
 def test_package_validate_example_accepts_step_verification_fixed_grammar():
     row = build_sft_row(
         task="7.9_step_verification",

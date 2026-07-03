@@ -1188,6 +1188,48 @@ def test_package_candidate_ratings_scores_partial_bucket_and_best_errors():
     assert scores["cp_bucket_mae"] == 0.2
 
 
+def test_package_best_line_trace_freeze_uses_fixed_grammar_gold():
+    raw = {
+        "fen": STARTING_FEN,
+        "best_line_trace": True,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42, "pv_line": "e2e4 e7e5 g1f3 b8c6"},
+            {"uci": "d2d4", "cp": 15, "pv_line": "d2d4 d7d5"},
+            {"uci": "g1f3", "cp": 5, "pv_line": "g1f3 d7d5"},
+            {"uci": "c2c4", "cp": -20, "pv_line": "c2c4 e7e5"},
+            {"uci": "b1c3", "cp": -80, "pv_line": "b1c3 d7d5"},
+        ],
+    }
+    expected = "\n".join(
+        [
+            "<think>",
+            "Root: e2e4",
+            "Eval: +42cp; Bucket: equal",
+            "PV: e2e4 e7e5 g1f3 b8c6",
+            "Best: e2e4",
+            "</think><move>e2e4</move>",
+        ]
+    )
+
+    gold = packaged.derive_gold_answer("best_line_trace", dict(raw), Random(42))
+    examples = packaged.freeze_split("planning", [dict(raw)], seed=42)
+
+    assert gold == expected
+    assert examples[0].task_type == "best_line_trace"
+    assert examples[0].metric_type == "best_line_trace"
+    assert "engine best line" in examples[0].prompt.lower()
+    assert examples[0].gold_answer == expected
+
+    scores = packaged.score_prediction(examples[0], expected)
+    assert scores["primary"] == 1.0
+    assert scores["format_compliance"] == 1.0
+    assert scores["legal_move"] == 1.0
+    assert scores["trace_referenced_move_accuracy"] == 1.0
+    assert scores["trace_line_depth"] == 4.0
+    assert scores["trace_conclusion_move_match"] == 1.0
+
+
 def test_package_step_verification_scores_verdict_line_and_error_type():
     gold = "\n".join(
         [

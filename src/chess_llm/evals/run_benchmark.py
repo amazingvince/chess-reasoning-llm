@@ -28,7 +28,12 @@ from chess_llm.external.multipv import SqliteMultipvCache, score_move_wpd
 
 logger = logging.getLogger(__name__)
 
-_MOVE_TASK_TYPES = frozenset({"best_move", "puzzle_solve", "endgame_best_move"})
+_MOVE_TASK_TYPES = frozenset({
+    "best_move",
+    "puzzle_solve",
+    "best_line_trace",
+    "endgame_best_move",
+})
 _ACPL_INVALID_MOVE_PENALTY = 150.0
 
 
@@ -366,7 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             scoring_predictions = dict(flat_predictions)
             for example in examples:
-                if example.task_type in ("best_move", "puzzle_solve"):
+                if example.task_type in ("best_move", "puzzle_solve", "best_line_trace"):
                     raw = flat_raw_predictions.get(example.example_id)
                     if raw is not None:
                         scoring_predictions[example.example_id] = raw
@@ -391,7 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 )
                 for example in examples
-                if example.task_type in ("best_move", "puzzle_solve")
+                if example.task_type in ("best_move", "puzzle_solve", "best_line_trace")
             ]
             if planning_predictions:
                 format_scores = [format_compliance(pred) for _, pred in planning_predictions]

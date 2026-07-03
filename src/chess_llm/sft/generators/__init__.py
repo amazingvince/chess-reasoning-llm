@@ -60,6 +60,7 @@ from chess_llm.sft.generators.tier6_endgames import (
     EndgameWDL,
 )
 from chess_llm.sft.generators.tier7_planning import (
+    BestLineTrace,
     BestMoveSelection,
     CandidateRatings,
     MoveConsequence,
@@ -112,6 +113,7 @@ TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
         PuzzleSolving,
         MoveConsequence,
         CandidateRatings,
+        BestLineTrace,
         StepVerification,
     ],
 }
@@ -119,6 +121,7 @@ TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
 __all__ = [
     "AttackedDefended",
     "AvailableCaptures",
+    "BestLineTrace",
     "BestMoveSelection",
     "BoardToFEN",
     "CandidateRatings",

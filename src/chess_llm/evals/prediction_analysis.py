@@ -38,7 +38,11 @@ _MOVE_EDIT_TRACE_TASK_TYPES = frozenset({
     "fen_assembly",
     "state_tracking",
 })
-_THINK_MOVE_PROTOCOL_TASK_TYPES = frozenset({"best_move", "puzzle_solve"})
+_THINK_MOVE_PROTOCOL_TASK_TYPES = frozenset({
+    "best_move",
+    "puzzle_solve",
+    "best_line_trace",
+})
 _TRACE_METRIC_KEYS = frozenset({
     "trace_referenced_move_accuracy",
     "trace_referenced_move_count",
