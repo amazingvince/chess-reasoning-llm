@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -12,10 +13,27 @@ from typing import Sequence
 
 from chess_llm.artifacts.jsonl import read_jsonl
 from chess_llm.artifacts.schemas import JudgmentArtifact, PromptArtifact, RolloutArtifact
-from chess_llm.autodata.failure_buckets import ILLEGAL_MOVE, LEGAL_UNSCORED, MISSING_FEN, PARSE_FAILURE
+from chess_llm.autodata.failure_buckets import (
+    ILLEGAL_MOVE,
+    INVALID_FEN,
+    LEGAL_UNSCORED,
+    MISSING_FEN,
+    PARSE_FAILURE,
+)
 from chess_llm.core.board import is_legal_move, validate_fen, variant_fen_key
 from chess_llm.sft import build_sft_row
+from chess_llm.sft.decontamination import check_no_contamination
+from chess_llm.sft.eval_split import load_blocklist
+from chess_llm.sft.settings import SftDataSettings
 
+logger = logging.getLogger(__name__)
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
+_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+DEFAULT_BLOCKLIST_PATH = (
+    SftDataSettings.from_env(_SETTINGS_ROOT).eval_splits_dir / "blocklist.txt"
+)
 
 FORMAT_REPAIR_TASK = "7.4_autodata_format_repair"
 MOVE_CORRECTION_TASK = "7.5_autodata_move_correction"
@@ -47,11 +65,28 @@ def build_sft_refresh(
     min_regret_cp: float = 100.0,
     task_types: set[str] | list[str] | tuple[str, ...] | None = None,
     max_examples: int | None = None,
+    chess960: bool = False,
+    blocklist_path: str | Path | None = None,
 ) -> SftRefreshResult:
     """Convert judged rollout artifacts into legacy-compatible Tier 7 rows."""
     prompts = _index_prompts(prompts_path)
     rollouts = _index_rollouts(rollouts_path)
     allowed_task_types = set(task_types) if task_types is not None else set(DEFAULT_MOVE_TASK_TYPES)
+
+    resolved_blocklist_path = (
+        Path(blocklist_path) if blocklist_path is not None else DEFAULT_BLOCKLIST_PATH
+    )
+    if resolved_blocklist_path.exists():
+        blocklist = load_blocklist(resolved_blocklist_path)
+    elif blocklist_path is not None:
+        raise FileNotFoundError(f"eval blocklist not found: {resolved_blocklist_path}")
+    else:
+        blocklist = frozenset()
+        logger.warning(
+            "No eval blocklist found at %s; refresh rows are NOT checked against "
+            "the frozen benchmark",
+            resolved_blocklist_path,
+        )
 
     format_rows: list[dict] = []
     correction_rows: list[dict] = []
@@ -86,9 +121,13 @@ def build_sft_refresh(
         if not fen:
             skip_reasons["missing_fen"] += 1
             continue
-        chess960 = _is_chess960(prompt)
-        if not validate_fen(fen, chess960=chess960):
+        row_chess960 = _is_chess960(prompt, default=chess960)
+        if not validate_fen(fen, chess960=row_chess960):
             skip_reasons["invalid_fen"] += 1
+            continue
+
+        if not check_no_contamination(fen, blocklist, chess960=row_chess960):
+            skip_reasons["blocklisted_fen"] += 1
             continue
 
         user_prompt = _user_prompt(prompt)
@@ -96,12 +135,17 @@ def build_sft_refresh(
             skip_reasons["missing_prompt_text"] += 1
             continue
 
-        target_move, target_source = _target_move(prompt, judgment, fen=fen, chess960=chess960)
+        target_move, target_source = _target_move(prompt, judgment, fen=fen, chess960=row_chess960)
         if target_move is None or _requires_teacher_target(judgment, row_task, target_source):
             skip_reasons["missing_target_move"] += 1
             continue
 
-        dedupe_key = (row_task, variant_fen_key(fen, chess960=chess960), target_move)
+        model_move = (rollout.parsed_answer.move_uci or "").strip().lower()
+        if row_task == MOVE_CORRECTION_TASK and target_move == model_move:
+            skip_reasons["target_equals_model_move"] += 1
+            continue
+
+        dedupe_key = (row_task, variant_fen_key(fen, chess960=row_chess960), target_move)
         if dedupe_key in seen_keys:
             skip_reasons["duplicate"] += 1
             continue
@@ -116,7 +160,7 @@ def build_sft_refresh(
             user_prompt=user_prompt,
             target_move=target_move,
             target_source=target_source,
-            chess960=chess960,
+            chess960=row_chess960,
             prompts_path=Path(prompts_path),
             rollouts_path=Path(rollouts_path),
             judgments_path=Path(judgments_path),
@@ -125,6 +169,14 @@ def build_sft_refresh(
             format_rows.append(row)
         else:
             correction_rows.append(row)
+
+    blocklisted_count = skip_reasons.get("blocklisted_fen", 0)
+    if blocklisted_count:
+        logger.warning(
+            "Dropped %d refresh row(s) whose position is in the eval blocklist at %s",
+            blocklisted_count,
+            resolved_blocklist_path,
+        )
 
     output_root = Path(output_dir)
     tier7_dir = output_root / "tier7"
@@ -145,6 +197,9 @@ def build_sft_refresh(
         "min_regret_cp": float(min_regret_cp),
         "task_types": sorted(allowed_task_types),
         "max_examples": max_examples,
+        "chess960": bool(chess960),
+        "blocklist_path": str(resolved_blocklist_path),
+        "blocklisted_count": blocklisted_count,
         "format_repair_count": len(format_rows),
         "move_correction_count": len(correction_rows),
         "skipped_count": sum(skip_reasons.values()),
@@ -195,6 +250,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Optional cap across all emitted refresh rows.",
     )
+    parser.add_argument(
+        "--chess960",
+        action="store_true",
+        help="Validate and label refresh rows under Chess960 rules (match the judging run flag).",
+    )
+    parser.add_argument(
+        "--blocklist-path",
+        "--blocklist",
+        dest="blocklist_path",
+        default=None,
+        help="Eval blocklist path used to drop contaminated refresh rows.",
+    )
     args = parser.parse_args(argv)
 
     build_sft_refresh(
@@ -205,6 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_regret_cp=args.min_regret_cp,
         task_types=args.task_types,
         max_examples=args.max_examples,
+        chess960=args.chess960,
+        blocklist_path=args.blocklist_path,
     )
     return 0
 
@@ -248,6 +317,8 @@ def _skip_reason_for_judgment(
 ) -> str:
     if judgment.failure_bucket == MISSING_FEN:
         return "missing_fen"
+    if judgment.failure_bucket == INVALID_FEN:
+        return "invalid_fen"
     if judgment.failure_bucket == LEGAL_UNSCORED:
         return "legal_unscored"
     if judgment.legal is True:
@@ -317,7 +388,9 @@ def _user_prompt(prompt: PromptArtifact) -> str | None:
     return None
 
 
-def _is_chess960(prompt: PromptArtifact) -> bool:
+def _is_chess960(prompt: PromptArtifact, *, default: bool = False) -> bool:
+    # Precedence mirrors chess_llm.evals.batch_judge._prompt_chess960 so refresh
+    # rows are labeled under the same rules used at judging time.
     benchmark_metadata = prompt.metadata.get("benchmark_metadata")
     if isinstance(benchmark_metadata, dict) and benchmark_metadata.get("is_chess960") is not None:
         return bool(benchmark_metadata["is_chess960"])
@@ -328,7 +401,7 @@ def _is_chess960(prompt: PromptArtifact) -> bool:
     if prompt.metadata.get("chess960_id") is not None:
         return True
     task_type = str(prompt.task_type or prompt.metadata.get("task_type") or "")
-    return task_type.endswith("_960") or task_type == "chess960"
+    return default or task_type.endswith("_960") or task_type == "chess960"
 
 
 def _build_training_row(
@@ -372,9 +445,17 @@ def _build_training_row(
         tier=7,
         fen=fen,
         is_chess960=chess960,
-        user_prompt=user_prompt,
+        user_prompt=_refresh_user_prompt(user_prompt, rollout.raw_output),
         assistant_content=_assistant_content(task, target_move),
         metadata=metadata,
+    )
+
+
+def _refresh_user_prompt(user_prompt: str, previous_answer: str) -> str:
+    return (
+        f"{user_prompt}\n\n"
+        f"Previous answer:\n{previous_answer}\n\n"
+        "The previous answer was rejected. Reply with the corrected move."
     )
 
 

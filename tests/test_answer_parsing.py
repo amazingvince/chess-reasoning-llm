@@ -2,6 +2,7 @@ from chess_llm.formats.answers import (
     extract_move,
     extract_uci_from_move_tag,
     parse_answer,
+    strip_fen_strings,
     validate_think_move_format,
 )
 
@@ -62,3 +63,30 @@ def test_extract_move_preserves_benchmark_first_uci_semantics():
     assert extract_move("e2e4") == "e2e4"
     assert extract_move("I prefer e2e4 over d2d4.") == "e2e4"
     assert extract_move("no move") is None
+
+
+def test_extract_move_strips_complete_fen_strings_before_prose_fallback():
+    fen_with_uci_like_row = "b2b4/8/8/8/7k/8/8/K7 w - - 0 1"
+
+    assert extract_move(
+        f"The position is {fen_with_uci_like_row} and I recommend g1f3"
+    ) == "g1f3"
+    assert extract_move(fen_with_uci_like_row) is None
+
+
+def test_parse_answer_strips_complete_fen_strings_before_prose_fallback():
+    fen_with_uci_like_row = "b2b4/8/8/8/7k/8/8/K7 w - - 0 1"
+
+    parsed = parse_answer(fen_with_uci_like_row)
+
+    assert parsed.move_uci is None
+    assert parsed.format_type == "none"
+    assert parsed.parse_error == "no UCI move found"
+
+
+def test_strip_fen_strings_removes_only_complete_fen_strings():
+    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    assert strip_fen_strings(f"before {fen} after").split() == ["before", "after"]
+    assert strip_fen_strings("play e2e4 now") == "play e2e4 now"
+    assert strip_fen_strings("") == ""

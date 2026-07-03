@@ -1,5 +1,13 @@
+import logging
+from pathlib import Path
+
+import chess
+
+from chess_llm.sft.settings import SftDataSettings
+from chess_llm.sft.sources import lichess_evals
 from chess_llm.sft.sources.lichess_evals import (
     EVAL_PERSPECTIVE,
+    _default_dedup_db_path,
     _flush_batch,
     _init_dedup_db,
     partition_evals,
@@ -114,6 +122,17 @@ def test_stream_evals_zero_limit_does_not_open_dataset(tmp_path):
     ) == []
 
 
+def test_default_dedup_db_path_uses_sft_settings_default_root(tmp_path, monkeypatch):
+    monkeypatch.delenv("CHESS_SFT_OUTPUT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    expected = (
+        SftDataSettings.from_env(Path.cwd(), env={}).annotations_dir / "evals_dedup.db"
+    )
+
+    assert _default_dedup_db_path() == expected
+    assert not _default_dedup_db_path().is_relative_to(tmp_path)
+
+
 def test_stream_evals_closes_streaming_dataset_after_early_stop(tmp_path):
     class CloseableRows:
         def __init__(self, rows):
@@ -221,13 +240,14 @@ def test_stream_evals_with_new_better_row_yields_merged_cache_subset(tmp_path):
         )
     )
 
-    assert [row["fen"] for row in result] == [BLACK_TO_MOVE_FEN, STARTING_FEN]
-    assert result[0]["best_move"] == "c7c5"
-    assert result[0]["depth"] == 31
-    assert result[1]["best_move"] == "e2e4"
+    assert sorted(row["fen"] for row in result) == sorted([BLACK_TO_MOVE_FEN, STARTING_FEN])
+    by_fen = {row["fen"]: row for row in result}
+    assert by_fen[BLACK_TO_MOVE_FEN]["best_move"] == "c7c5"
+    assert by_fen[BLACK_TO_MOVE_FEN]["depth"] == 31
+    assert by_fen[STARTING_FEN]["best_move"] == "e2e4"
 
 
-def test_stream_evals_rerun_orders_db_rows_and_normalizes_old_castling_pv(tmp_path):
+def test_stream_evals_rerun_normalizes_old_castling_pv_from_db_rows(tmp_path):
     db_path = tmp_path / "evals.db"
     conn = _init_dedup_db(db_path)
     _flush_batch(
@@ -248,10 +268,78 @@ def test_stream_evals_rerun_orders_db_rows_and_normalizes_old_castling_pv(tmp_pa
         )
     )
 
-    assert [row["depth"] for row in result] == [40, 31]
-    assert result[0]["fen"] == CASTLING_FEN
-    assert result[0]["best_move"] == "e1g1"
-    assert result[0]["pv_line"] == "e1g1 e8g8"
+    assert sorted(row["depth"] for row in result) == [31, 40]
+    castling = next(row for row in result if row["fen"] == CASTLING_FEN)
+    assert castling["depth"] == 40
+    assert castling["best_move"] == "e1g1"
+    assert castling["pv_line"] == "e1g1 e8g8"
+
+
+def test_stream_evals_cached_order_is_seed_stable_shuffle_not_depth_ranked(tmp_path):
+    db_path = tmp_path / "evals.db"
+    conn = _init_dedup_db(db_path)
+    board = chess.Board()
+    batch = []
+    for depth in range(21, 31):
+        move = next(iter(board.legal_moves))
+        batch.append((board.fen(), move.uci(), move.uci(), depth, 100, 10, None))
+        board.push(move)
+    _flush_batch(conn, batch)
+    conn.close()
+
+    def run() -> list[dict]:
+        return list(
+            stream_evals(
+                min_depth=20,
+                dedup_db_path=db_path,
+                dataset_loader=lambda *_args, **_kwargs: (),
+            )
+        )
+
+    first = run()
+    second = run()
+
+    depths = [row["depth"] for row in first]
+    assert sorted(depths) == list(range(21, 31))
+    assert depths != sorted(depths, reverse=True)
+    assert [row["fen"] for row in first] == [row["fen"] for row in second]
+
+
+def test_stream_evals_flushes_batches_and_survives_mid_stream_failure(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(lichess_evals, "_FLUSH_INTERVAL", 1)
+
+    def exploding_rows(*_args, **_kwargs):
+        yield {
+            "fen": BLACK_TO_MOVE_FEN,
+            "line": "e7e5 g1f3",
+            "depth": 30,
+            "knodes": 100,
+            "cp": 100,
+            "mate": None,
+        }
+        yield {
+            "fen": STARTING_FEN,
+            "line": "e2e4 e7e5",
+            "depth": 30,
+            "knodes": 100,
+            "cp": 20,
+            "mate": None,
+        }
+        raise RuntimeError("stream died mid-scan")
+
+    with caplog.at_level(logging.ERROR):
+        result = list(
+            stream_evals(
+                min_depth=20,
+                dedup_db_path=tmp_path / "evals.db",
+                dataset_loader=exploding_rows,
+            )
+        )
+
+    assert sorted(row["fen"] for row in result) == sorted([BLACK_TO_MOVE_FEN, STARTING_FEN])
+    assert any("mid-stream" in record.getMessage() for record in caplog.records)
 
 
 def test_partition_evals_uses_valid_board_rows_only():

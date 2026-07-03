@@ -86,7 +86,12 @@ def judge_rollout_with_stockfish(
             metadata=fallback_metadata,
         )
 
-    regret_cp = float(max(0, best_eval - move_eval))
+    if teacher_move == move_uci:
+        # The model played the engine's best move; any eval delta is
+        # depth-parity noise and must not become a self-correction row.
+        regret_cp = 0.0
+    else:
+        regret_cp = float(max(0, best_eval - move_eval))
     scored_metadata = dict(bootstrap.metadata)
     scored_metadata.update(
         {

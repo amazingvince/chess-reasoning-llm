@@ -120,6 +120,54 @@ def test_upload_eval_uses_injected_hf_api_and_skips_blocklist(tmp_path: Path):
     assert api.uploads[0]["repo_type"] == "dataset"
 
 
+def test_collect_eval_file_stats_raises_when_benchmark_dir_missing(tmp_path: Path):
+    import pytest
+
+    from chess_llm.sft.hub_upload import collect_eval_file_stats
+
+    eval_dir = tmp_path / "eval_splits"
+    _write_jsonl(eval_dir / "rules.jsonl", [{"fen": "fen"}])
+
+    with pytest.raises(FileNotFoundError, match="benchmark dir not found"):
+        collect_eval_file_stats(eval_dir, tmp_path / "missing-benchmark")
+
+
+def test_collect_eval_file_stats_raises_when_benchmark_dir_empty(tmp_path: Path):
+    import pytest
+
+    from chess_llm.sft.hub_upload import collect_eval_file_stats
+
+    eval_dir = tmp_path / "eval_splits"
+    bench_dir = tmp_path / "benchmark"
+    _write_jsonl(eval_dir / "rules.jsonl", [{"fen": "fen"}])
+    bench_dir.mkdir()
+
+    with pytest.raises(ValueError, match="no benchmark JSONL files"):
+        collect_eval_file_stats(eval_dir, bench_dir)
+
+
+def test_upload_eval_fails_instead_of_publishing_zero_benchmark_files(tmp_path: Path):
+    from chess_llm.sft.hub_upload import main
+
+    eval_dir = tmp_path / "eval_splits"
+    bench_dir = tmp_path / "benchmark"
+    _write_jsonl(eval_dir / "rules.jsonl", [{"fen": "fen"}])
+    bench_dir.mkdir()
+
+    exit_code = main(
+        [
+            "--eval",
+            "--dry-run",
+            "--eval-splits-dir",
+            str(eval_dir),
+            "--benchmark-dir",
+            str(bench_dir),
+        ]
+    )
+
+    assert exit_code == 1
+
+
 def test_legacy_push_to_hub_import_aliases_package_module(monkeypatch):
     package_module = importlib.import_module("chess_llm.sft.hub_upload")
     make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"

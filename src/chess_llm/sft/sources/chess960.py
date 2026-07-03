@@ -7,10 +7,18 @@ from random import Random
 import chess
 
 
+# Scharnagl ID of the standard chess start position.  Excluded from random
+# sampling: its Chess960 castling UCI (e1h1) contradicts the standard-chess
+# supervision (e1g1) for an identical prompt.
+STANDARD_START_ID = 518
+
+
 def generate_random(rng: Random | None = None) -> tuple[chess.Board, int]:
-    """Return a random Chess960 starting position and its Scharnagl ID."""
+    """Return a random non-standard Chess960 starting position and its ID."""
     rng = rng or Random()
     position_id = rng.randint(0, 959)
+    while position_id == STANDARD_START_ID:
+        position_id = rng.randint(0, 959)
     board = chess.Board.from_chess960_pos(position_id)
     board.chess960 = True
     return board, position_id

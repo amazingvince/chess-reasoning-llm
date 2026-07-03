@@ -61,6 +61,35 @@ def test_stockfish_judge_adds_teacher_move_and_regret_for_legal_rollout():
     assert [depth for _, depth in engine.calls] == [18, 18]
 
 
+class DepthSkewedStockfish:
+    """Root and post-move analyses disagree even for the engine's best move."""
+
+    def analyse(self, board: chess.Board, limit: chess.engine.Limit) -> dict:
+        if len(board.move_stack) == 0:
+            return {
+                "score": chess.engine.PovScore(chess.engine.Cp(35), chess.WHITE),
+                "pv": [chess.Move.from_uci("e2e4")],
+            }
+        return {"score": chess.engine.PovScore(chess.engine.Cp(10), chess.WHITE)}
+
+
+def test_stockfish_judge_zeroes_regret_when_model_plays_teacher_move():
+    prompt = _prompt()
+    rollout = build_rollout(prompt, "model-a", "<move>e2e4</move>", "rollout-1")
+
+    judgment = judge_rollout_with_stockfish(
+        prompt,
+        rollout,
+        DepthSkewedStockfish(),
+        judgment_id="judgment-1",
+    )
+
+    assert judgment.legal is True
+    assert judgment.failure_bucket is None
+    assert judgment.teacher_move_uci == "e2e4"
+    assert judgment.regret_cp == 0.0
+
+
 def test_stockfish_judge_preserves_parse_failure_without_engine_analysis():
     prompt = _prompt()
     rollout = build_rollout(prompt, "model-a", "I considered e2e4 and d2d4.", "rollout-1")

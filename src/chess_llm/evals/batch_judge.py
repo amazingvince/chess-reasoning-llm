@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -20,6 +21,8 @@ from chess_llm.external.stockfish import (
     open_stockfish,
     stockfish_engine_name,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,7 @@ def judge_prediction_file(
         )
 
     prediction_path = Path(predictions_path)
+    skipped_out_of_split = 0
     try:
         with prediction_path.open(encoding="utf-8") as fh:
             for row_index, line in enumerate(fh):
@@ -93,6 +97,9 @@ def judge_prediction_file(
                 row = json.loads(line)
                 example_id = str(row.get("example_id", ""))
                 if example_id not in prompts_by_id:
+                    if split_list is not None:
+                        skipped_out_of_split += 1
+                        continue
                     raise ValueError(
                         f"prediction example_id {example_id!r} was not found in "
                         f"loaded benchmark prompts"
@@ -150,6 +157,14 @@ def judge_prediction_file(
             engine_name = stockfish_engine_name(engine)
         if opened_engine and engine is not None:
             engine.quit()
+
+    if skipped_out_of_split:
+        logger.warning(
+            "Skipped %d prediction row(s) whose example_id is outside the "
+            "loaded splits %s",
+            skipped_out_of_split,
+            split_list,
+        )
 
     prompts_path = output_root / "prompts.jsonl"
     rollouts_path = output_root / "rollouts.jsonl"

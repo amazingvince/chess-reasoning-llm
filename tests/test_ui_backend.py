@@ -394,7 +394,9 @@ def test_live_llm_move_uses_stockfish_scoring_when_available(tool_client):
     judgment = response.json()["last_judgment"]
     assert judgment["legal"] is True
     assert judgment["teacher_move_uci"] == "e7e5"
-    assert judgment["regret_cp"] == 5.0
+    # The model played the teacher move, so regret is 0 by definition
+    # (depth-parity noise between the two analyse calls must not count).
+    assert judgment["regret_cp"] == 0.0
     assert judgment["metadata"]["judge"] == "stockfish"
     assert judgment["metadata"]["stockfish_depth"] == 18
     assert judgment["metadata"]["stockfish_scored"] is True
@@ -403,7 +405,7 @@ def test_live_llm_move_uses_stockfish_scoring_when_available(tool_client):
     assert len(judgments) == 1
     persisted = judgments[0].read_text(encoding="utf-8")
     assert '"teacher_move_uci": "e7e5"' in persisted
-    assert '"regret_cp": 5.0' in persisted
+    assert '"regret_cp": 0.0' in persisted
 
 
 def test_live_llm_move_falls_back_to_legality_when_stockfish_unavailable(tmp_path):
@@ -664,6 +666,23 @@ def test_concurrent_llm_requests_for_same_game_are_serialized(tmp_path):
     assert statuses == [200, 400]
     assert llm_client.calls == 1
     assert [move["source"] for move in game["moves"]].count("llm") == 1
+
+
+def test_ui_llm_module_keeps_deterministic_stub_import_path_working():
+    import chess_llm.inference as inference_module
+    from chess_llm_ui.llm import DeterministicLegalMoveClient
+
+    assert (
+        DeterministicLegalMoveClient
+        is inference_module.DeterministicLegalMoveClient
+    )
+    response = DeterministicLegalMoveClient().complete(
+        InferenceRequest(
+            model_id="stub-model",
+            messages=[ChatMessage(role="user", content=f"FEN: {STARTING_FEN}")],
+        )
+    )
+    assert "<move>a2a3</move>" in response.raw_text
 
 
 def _write_artifact_fixture(artifact_dir: Path, suffix: str) -> None:

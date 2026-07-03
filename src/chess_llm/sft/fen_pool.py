@@ -40,8 +40,21 @@ class FENPool:
             "tags": normalized_tags,
         }
 
+    def _lookup_keys(self, fen: str) -> list[str]:
+        """Return candidate identity keys: standard first, then Chess960.
+
+        Bare-FEN lookups have no tags, so a chess960-tagged entry whose FEN
+        also parses as standard chess would otherwise be invisible.
+        """
+        std_key = self.identity_key(fen)
+        keys = [std_key]
+        chess960_key = raw_fen_identity_key({"fen": fen, "is_chess960": True})
+        if chess960_key != std_key:
+            keys.append(chess960_key)
+        return keys
+
     def __contains__(self, fen: str) -> bool:
-        return self.identity_key(fen) in self._entries
+        return any(key in self._entries for key in self._lookup_keys(fen))
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -59,10 +72,11 @@ class FENPool:
 
     def get_tags(self, fen: str) -> dict:
         """Return a copy of tags for the canonical FEN identity."""
-        entry = self._entries.get(self.identity_key(fen))
-        if entry is None:
-            return {}
-        return dict(entry["tags"])
+        for key in self._lookup_keys(fen):
+            entry = self._entries.get(key)
+            if entry is not None:
+                return dict(entry["tags"])
+        return {}
 
     def sample(
         self,
@@ -86,8 +100,10 @@ class FENPool:
         return rng.sample(candidates, n)
 
     def remove(self, fen: str) -> None:
-        """Remove a FEN by canonical identity."""
-        self._entries.pop(self.identity_key(fen), None)
+        """Remove a FEN by canonical identity (standard entry first)."""
+        for key in self._lookup_keys(fen):
+            if self._entries.pop(key, None) is not None:
+                return
 
     def save(self, path: str | Path) -> None:
         """Save pool rows to a JSONL file."""

@@ -27,6 +27,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "1.16_material_piece_counts": (),
     "1.17_material_value_totals": (),
     "1.18_material_balance_trace": (),
+    "1.19_multi_move_state_tracking": ("moves",),
     "2.0_side_piece_inventory": (),
     "2.1_legal_move_gen": (),
     "2.2_piece_specific_moves": ("source_square", "square"),
@@ -37,6 +38,11 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "2.7_piece_legal_filter": ("source_square",),
     "2.8_king_safety_filter": ("tested_move",),
     "2.9_legal_moves_by_piece": (),
+    "2.10_ray_walk": ("source_square",),
+    "2.11_legal_filter_trace": (),
+    "5.1_opening_identification": ("variant",),
+    "5.2_opening_continuation": ("variant",),
+    "5.3_opening_principles": ("variant",),
 }
 
 

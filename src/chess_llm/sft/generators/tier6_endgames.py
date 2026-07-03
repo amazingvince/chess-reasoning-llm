@@ -37,7 +37,7 @@ _ENDGAME_PRINCIPLES: dict[str, list[str]] = {
         "Systematic box method: shrink the defending king's space.",
     ],
     "KQKP": [
-        "Queen vs pawn on the 7th is tricky — bishop/center pawn may draw.",
+        "Queen vs pawn on the 7th: a bishop (c/f) or rook (a/h) pawn can draw; center and knight pawns lose.",
         "Use the queen to force the king in front of the pawn, then bring your king closer.",
     ],
     "KRPKR": [

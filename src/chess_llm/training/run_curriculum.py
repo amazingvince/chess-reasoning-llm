@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
         help="Attention backend for training and transformers eval model loads",
     )
     parser.add_argument("--eval-batch-size", type=int, default=16, help="Benchmark generation batch size")
-    parser.add_argument("--eval-max-new-tokens", type=int, default=256, help="Benchmark generation max_new_tokens")
+    parser.add_argument("--eval-max-new-tokens", type=int, default=512, help="Benchmark generation max_new_tokens")
     parser.add_argument("--eval-acpl-depth", type=int, default=20, help="Benchmark Stockfish ACPL depth")
     parser.add_argument(
         "--enable-liger-fused-linear-ce",

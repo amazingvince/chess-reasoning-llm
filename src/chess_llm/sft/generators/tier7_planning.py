@@ -17,7 +17,6 @@ from chess_llm.sft.generators.reasoning_traces import (
     generate_endgame_trace,
     generate_positional_trace,
     generate_tactical_trace,
-    convert_mate_annotation,
 )
 from chess_llm.sft.templates import select_template
 
@@ -25,8 +24,10 @@ from chess_llm.sft.templates import select_template
 class BestMoveSelection(TaskGenerator):
     """Task 7.1: Best move with <think>/<move> format.
 
-    Uses Position Evals depth >= 30 as primary source, supplemented by
-    MATE dataset rows for strategy/tactic-annotated examples.
+    Uses Position Evals depth >= 30 as the source.  MATE dataset rows
+    (better of exactly two candidate moves) are intentionally excluded:
+    a pairwise comparison is not an answer to "What is the best move?",
+    so they need a dedicated A-vs-B comparison task instead.
     """
 
     def task_id(self) -> str:
@@ -37,21 +38,12 @@ class BestMoveSelection(TaskGenerator):
 
     def generate(self) -> Iterator[dict]:
         evals = self.config.get("best_move_evals", [])
-        mate_rows = self.config.get("mate_rows", [])
         target = self.target_volume()
         count = 0
 
-        # Interleave eval and MATE sources so MATE rows get a fair share
-        # even when evals alone could fill the target.  We reserve 20% of
-        # the budget for MATE rows (or fewer if not enough are available).
-        mate_budget = min(len(mate_rows), target // 5) if mate_rows else 0
-        eval_budget = target - mate_budget
-
-        # --- Eval source ---
-        eval_count = 0
         for ev in evals:
-            if eval_count >= eval_budget:
-                break
+            if count >= target:
+                return
             raw = self.source_row(ev)
             fen = raw["fen"]
             if self.is_blocked(raw):
@@ -75,10 +67,17 @@ class BestMoveSelection(TaskGenerator):
             mate = ev.get("mate")
             pv_line = ev.get("pv_line", "")
 
-            if mate is not None:
+            side_to_move_is_mating = (
+                mate is not None and (mate > 0) == (board.turn == chess.WHITE)
+            )
+            if side_to_move_is_mating:
                 trace = generate_tactical_trace(
                     board, best_move, ["mate"], pv_line, self.rng
                 )
+            elif mate is not None:
+                # The side to move is defending against mate; do not
+                # narrate its move as a mating pattern.
+                trace = generate_positional_trace(board, best_move, cp, self.rng)
             elif cp is not None and abs(cp) > 300:
                 trace = generate_tactical_trace(
                     board, best_move, [], pv_line, self.rng
@@ -93,46 +92,6 @@ class BestMoveSelection(TaskGenerator):
                 "stockfish_eval_cp": cp,
                 "stockfish_eval_mate": mate,
                 "depth": ev.get("depth", 0),
-            })
-            raw["metadata"] = metadata
-            tpl = select_template(self.task_id(), self.rng)
-            user_text = self.render_template(raw, tpl)
-            yield self.format_example(raw, template_text=user_text, assistant_content=trace)
-            eval_count += 1
-
-        count = eval_count
-
-        # --- MATE source (fills remaining budget) ---
-        for row in mate_rows:
-            if count >= target:
-                return
-            raw = self.source_row(row)
-            fen = raw.get("fen", "")
-            if not fen or self.is_blocked(raw):
-                continue
-
-            better_move = row.get("better_move", "")
-            if not better_move:
-                continue
-
-            try:
-                board = board_from_raw(raw)
-                if board is None:
-                    continue
-                m = chess.Move.from_uci(better_move)
-                if m not in board.legal_moves:
-                    continue
-            except (ValueError, TypeError):
-                continue
-
-            trace = convert_mate_annotation(row, self.rng)
-
-            metadata = dict(raw.get("metadata", {}))
-            metadata.update({
-                "source": "mate_dataset",
-                "target_move": better_move,
-                "strategy": row.get("strategy", ""),
-                "tactic": row.get("tactic", ""),
             })
             raw["metadata"] = metadata
             tpl = select_template(self.task_id(), self.rng)

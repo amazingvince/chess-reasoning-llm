@@ -115,6 +115,7 @@ PHASE_DEFAULT_BENCHMARK_TASK_TYPES: dict[str, dict[str, tuple[str, ...]]] = {
             "fen_assembly",
             "fen_row_application",
             "state_tracking",
+            "multi_state_tracking",
         ),
         "rules": (
             "legal_moves",
@@ -124,6 +125,8 @@ PHASE_DEFAULT_BENCHMARK_TASK_TYPES: dict[str, dict[str, tuple[str, ...]]] = {
             "piece_legal_filter",
             "king_safety_filter",
             "legal_moves_by_piece",
+            "ray_walk",
+            "legal_filter_trace",
             "check_detection",
             "special_rules",
             "legality_check",
@@ -171,7 +174,7 @@ class EvaluationConfig:
     vllm_max_model_len: int | None = None
     pass_k: int = 1
     temperature: float | None = None
-    max_new_tokens: int = 256
+    max_new_tokens: int = 512
     batch_size: int = 16
     max_examples_per_split: int | None = None
     splits: tuple[str, ...] | None = None
@@ -407,7 +410,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pass-k", type=int, default=1, help="Number of samples per example for pass@k (default: 1)")
     parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature (default: 0.0 for pass@1, 0.7 for pass@k)")
-    parser.add_argument("--max-new-tokens", type=int, default=256, help="Max tokens to generate (default: 256)")
+    parser.add_argument("--max-new-tokens", type=int, default=512, help="Max tokens to generate (default: 512; legal_moves_by_piece gold answers routinely exceed shorter budgets)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for generation (default: 16)")
     parser.add_argument(
         "--max-examples-per-split", type=int, default=None,
@@ -550,13 +553,13 @@ def format_prompt(example: BenchmarkExample, tokenizer: AutoTokenizer) -> str:
     user_content = example.prompt
     template_kwargs: dict[str, object] = {}
 
-    # Qwen3 defaults to thinking mode and will happily burn the whole decode
-    # budget on benchmark questions. Its chat template supports
-    # ``enable_thinking=False`` directly; do not add a textual /no_think
+    # Thinking-mode chat templates (Qwen3 and friends) default to burning the
+    # whole decode budget on benchmark questions. Always request
+    # ``enable_thinking=False``: sniffing the checkpoint name misses local
+    # checkpoint directories, and templates that reject the kwarg are handled
+    # by the TypeError fallback below. Do not add a textual /no_think
     # directive because small SFT checkpoints can learn to echo it.
-    tokenizer_name = (getattr(tokenizer, "name_or_path", "") or "").lower()
-    if "qwen" in tokenizer_name:
-        template_kwargs["enable_thinking"] = False
+    template_kwargs["enable_thinking"] = False
 
     messages = [
         {"role": "system", "content": _get_system_prompt()},
@@ -604,6 +607,13 @@ def generate_predictions_transformers(
     """
     from tqdm import tqdm
 
+    if num_samples > 1 and temperature <= 0.0:
+        raise ValueError(
+            f"num_samples={num_samples} with temperature={temperature} would "
+            "generate identical greedy samples; pass a temperature > 0 "
+            "(e.g. 0.7) for pass@k sampling."
+        )
+
     predictions: dict[str, list[str]] = defaultdict(list)
 
     # Build prompts
@@ -621,23 +631,6 @@ def generate_predictions_transformers(
         gen_kwargs["top_p"] = 0.95
 
     torch = _get_torch()
-    if num_samples > 1 and temperature == 0.0:
-        for sample_idx in range(num_samples):
-            logger.info("Deterministic sample %d/%d", sample_idx + 1, num_samples)
-            single_predictions = generate_predictions_transformers(
-                model,
-                tokenizer,
-                examples,
-                num_samples=1,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                batch_size=batch_size,
-                seed=seed + sample_idx,
-            )
-            for example_id, values in single_predictions.items():
-                predictions[example_id].extend(values)
-        return dict(predictions)
-
     return_sequences_per_prompt = 1
     effective_batch_size = batch_size
     if num_samples > 1 and temperature > 0.0:
@@ -744,6 +737,12 @@ class VllmPredictionGenerator:
         max_new_tokens: int = 512,
         seed: int = 42,
     ) -> dict[str, list[str]]:
+        if num_samples > 1 and temperature <= 0.0:
+            raise ValueError(
+                f"num_samples={num_samples} with temperature={temperature} "
+                "would generate identical greedy samples; pass a temperature "
+                "> 0 (e.g. 0.7) for pass@k sampling."
+            )
         prompts = [format_prompt(ex, self.tokenizer) for ex in examples]
         sampling_kwargs: dict = {
             "n": num_samples,
@@ -1293,6 +1292,8 @@ def print_report(
             if isinstance(value, float):
                 if "acpl" in key:
                     print(f"  {key:<35} {value:>7.1f} cp")
+                elif key.endswith("_count"):
+                    print(f"  {key:<35} {value:>7.0f}")
                 else:
                     print(f"  {key:<35} {value:>7.1%}")
 
@@ -1456,6 +1457,12 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     # pass@k uses a separate sampled generation pass (see below).
     primary_temperature = 0.0
     sample_temperature = args.temperature if args.temperature is not None else 0.7
+    if args.pass_k > 1 and sample_temperature <= 0.0:
+        raise ValueError(
+            f"--pass-k {args.pass_k} with --temperature {sample_temperature} "
+            "would generate identical greedy samples; pass a temperature > 0 "
+            "(e.g. --temperature 0.7) for pass@k."
+        )
 
     # Load manifest
     manifest_path = args.benchmark_dir / "manifest.json"
@@ -1676,21 +1683,23 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         ]
         if planning_preds:
             fc_scores = [format_compliance(p) for _, p in planning_preds]
-            lm_scores = [
-                v
-                for v in (
-                    legal_move_rate(
-                        p,
-                        ex.fen,
-                        chess960=_example_is_chess960(ex),
-                    )
-                    for ex, p in planning_preds
+            lm_raw_scores = [
+                legal_move_rate(
+                    p,
+                    ex.fen,
+                    chess960=_example_is_chess960(ex),
                 )
-                if v is not None
+                for ex, p in planning_preds
             ]
+            # A prediction with no move tag is not a legal move: count it as
+            # 0.0 instead of dropping it from the denominator, which would
+            # inflate the gate metric.
+            lm_scores = [0.0 if v is None else v for v in lm_raw_scores]
             metrics["format_compliance"] = sum(fc_scores) / len(fc_scores)
-            if lm_scores:
-                metrics["legal_move_rate"] = sum(lm_scores) / len(lm_scores)
+            metrics["legal_move_rate"] = sum(lm_scores) / len(lm_scores)
+            metrics["missing_move_tag_count"] = float(
+                sum(1 for v in lm_raw_scores if v is None)
+            )
 
         split_results[split_name] = metrics
         split_counts[split_name] = len(examples)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -24,6 +25,10 @@ from chess_llm.sft.sources._streaming import (
 logger = logging.getLogger(__name__)
 
 DatasetLoader = Callable[..., Iterable[Mapping]]
+
+# Minimum plies recovered from a partially corrupt PGN before the prefix is
+# worth keeping as training signal.
+MIN_RECOVERED_PLIES = 4
 
 
 def game_phase(ply: int) -> str:
@@ -61,13 +66,18 @@ def extract_game_positions(game: dict) -> Iterator[dict]:
     if not moves_str:
         return
 
+    game_id = hashlib.sha256(moves_str.encode("utf-8")).hexdigest()[:16]
     parsed = _parse_pgn_moves(moves_str)
     if parsed is not None:
         board, moves = parsed
-        yield from _positions_from_moves(board, moves)
+        yield from _positions_from_moves(board, moves, game_id=game_id)
         return
 
-    yield from _positions_from_moves(chess.Board(), _parse_token_moves(moves_str))
+    yield from _positions_from_moves(
+        chess.Board(),
+        _parse_token_moves(moves_str),
+        game_id=game_id,
+    )
 
 
 def _parse_pgn_moves(text: str) -> tuple[chess.Board, list[chess.Move]] | None:
@@ -75,10 +85,17 @@ def _parse_pgn_moves(text: str) -> tuple[chess.Board, list[chess.Move]] | None:
     if parsed is None:
         return None
 
-    if parsed.errors:
-        return parsed.board(), []
-
     moves = list(parsed.mainline_moves())
+    if parsed.errors:
+        if len(moves) < MIN_RECOVERED_PLIES:
+            return None
+        logger.debug(
+            "PGN parse recovered %d-ply prefix from game with %d errors",
+            len(moves),
+            len(parsed.errors),
+        )
+        return parsed.board(), moves
+
     if not moves:
         return None
     return parsed.board(), moves
@@ -185,6 +202,8 @@ def _default_dataset_loader(*args, **kwargs):
 def _positions_from_moves(
     initial_board: chess.Board,
     moves: Iterable[chess.Move],
+    *,
+    game_id: str | None = None,
 ) -> Iterator[dict]:
     board = initial_board.copy()
     for ply, move in enumerate(moves):
@@ -196,6 +215,7 @@ def _positions_from_moves(
             "game_phase": game_phase(ply),
             "material_balance": material_balance(board),
             "ply": ply,
+            "game_id": game_id,
         }
         board.push(move)
 

@@ -7,6 +7,16 @@ and can be safely imported in the test environment.
 from __future__ import annotations
 
 
+def is_count_metric(metric_name: str) -> bool:
+    """Return whether a metric is count-valued (lower is better, not an accuracy).
+
+    Count metrics (e.g. ``legal_moves_by_piece_illegal_extra_count``,
+    ``missing_move_count``) must not be compared against accuracy floors or
+    accuracy-direction regression thresholds.
+    """
+    return metric_name.endswith("_count")
+
+
 DIAGNOSTIC_METRICS = frozenset({
     "square_lookup",
     "rank_lookup",
@@ -22,8 +32,14 @@ DIAGNOSTIC_METRICS = frozenset({
     "piece_legal_moves",
     "piece_pseudo_legal_moves",
     "piece_legal_filter",
+    "piece_legal_filter_set_f1",
     "king_safety_filter",
     "legal_moves_by_piece",
+    "legal_moves_by_piece_set_f1",
+    "legal_filter_trace",
+    "legal_filter_trace_final_jaccard",
+    "ray_walk",
+    "multi_state_tracking",
 })
 
 
@@ -157,6 +173,8 @@ def check_phase_criteria(
                     continue
                 if "acpl" in metric_name:
                     continue
+                if is_count_metric(metric_name):
+                    continue
                 if value < worst_value:
                     worst_value = value
                     worst_metric = f"{split_name}/{metric_name}"
@@ -189,6 +207,15 @@ def check_phase_criteria(
                     continue
                 current_val = current.get(metric_name)
                 if current_val is None:
+                    continue
+                if is_count_metric(metric_name):
+                    # Count metrics are lower-is-better; the 5% accuracy-drop
+                    # rule does not apply. Report them for visibility only.
+                    print(
+                        f"  [INFO] {split_name}/{metric_name}: count metric "
+                        f"baseline={baseline_val:g} current={current_val:g} "
+                        f"(informational, not gated)"
+                    )
                     continue
                 drop = baseline_val - current_val
                 if drop > max_regression:

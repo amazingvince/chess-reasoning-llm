@@ -79,6 +79,187 @@ def test_package_validate_example_accepts_compact_legal_move_answer():
     assert passed is True, errors
 
 
+def test_package_validate_example_rejects_stale_legal_move_list_before_trailing_text():
+    moves = " ".join(sorted(move.uci() for move in chess.Board(STARTING_FEN).legal_moves))
+    answer = (
+        "Side to move: white.\n"
+        f"Legal moves: {moves}\n"
+        "unlabelled trailing line"
+    )
+    row = build_sft_row(
+        task="2.1_legal_move_gen",
+        tier=2,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...",
+        assistant_content=answer,
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("legal move list" in error.lower() for error in errors)
+
+
+def test_package_validate_example_accepts_terminal_legal_move_answer_conventions():
+    checkmate_fen = "R6k/8/7K/8/8/8/8/8 b - - 0 1"
+    for no_move_text in ("none", "No legal moves available."):
+        row = build_sft_row(
+            task="2.1_legal_move_gen",
+            tier=2,
+            fen=checkmate_fen,
+            user_prompt="FEN: ...",
+            assistant_content=f"Side to move: black.\nLegal moves: {no_move_text}",
+        )
+
+        passed, errors = validate_example(row)
+
+        assert passed is True, errors
+
+
+def test_package_validate_example_accepts_piece_identification_answers():
+    square_row = build_sft_row(
+        task="1.3_piece_identification",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nWhat piece is on e2?",
+        assistant_content="white pawn",
+        metadata={
+            "query_kind": "square_piece",
+            "square": "e2",
+            "expected_answer": "white pawn",
+        },
+    )
+
+    passed, errors = validate_example(square_row)
+
+    assert passed is True, errors
+
+    locate_row = build_sft_row(
+        task="1.3_piece_identification",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nWhere are the white rooks?",
+        assistant_content="a1 h1",
+        metadata={
+            "query_kind": "locate_pieces",
+            "color": "white",
+            "piece": "rook",
+            "expected_answer": "a1 h1",
+        },
+    )
+
+    passed, errors = validate_example(locate_row)
+
+    assert passed is True, errors
+
+
+def test_package_validate_example_recomputes_piece_identification_from_fen():
+    row = build_sft_row(
+        task="1.3_piece_identification",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nWhat piece is on e2?",
+        assistant_content="empty",
+        metadata={
+            "query_kind": "square_piece",
+            "square": "e2",
+            "expected_answer": "empty",
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("piece identification" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_wrong_locate_pieces_answer():
+    row = build_sft_row(
+        task="1.3_piece_identification",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nWhere are the white rooks?",
+        assistant_content="a1",
+        metadata={
+            "query_kind": "locate_pieces",
+            "color": "white",
+            "piece": "rook",
+            "expected_answer": "a1",
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("piece identification" in error.lower() for error in errors)
+
+
+def _e2e4_fen_row_application_answer() -> str:
+    result_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    return (
+        "Rows: rank 2 PPPPPPPP->PPPP1PPP; rank 4 8->4P3.\n"
+        f"Result FEN: {result_fen}"
+    )
+
+
+def test_package_validate_example_accepts_fen_row_application_answer():
+    result_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    answer = _e2e4_fen_row_application_answer()
+    row = build_sft_row(
+        task="1.10_fen_row_application",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nMove: e2e4",
+        assistant_content=answer,
+        metadata={
+            "move": "e2e4",
+            "result_fen": result_fen,
+            "expected_answer": answer,
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
+def test_package_validate_example_rejects_wrong_fen_row_application_answer():
+    result_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    answer = _e2e4_fen_row_application_answer()
+    row = build_sft_row(
+        task="1.10_fen_row_application",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nMove: e2e4",
+        assistant_content=answer.replace("PPPP1PPP", "PPPPPPPP"),
+        metadata={
+            "move": "e2e4",
+            "result_fen": result_fen,
+            "expected_answer": answer,
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("fen row application" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_fen_row_application_missing_metadata():
+    row = build_sft_row(
+        task="1.10_fen_row_application",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nMove: e2e4",
+        assistant_content="Rows: rank 2 PPPPPPPP->PPPP1PPP.",
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("fen row application" in error.lower() for error in errors)
+
+
 def test_package_validate_example_accepts_side_piece_inventory_answer():
     row = build_sft_row(
         task="2.0_side_piece_inventory",
@@ -607,6 +788,153 @@ def test_package_validate_example_rejects_piece_legal_filter_without_rejection_r
     assert any("legal decomposition" in error.lower() for error in errors)
 
 
+def test_package_validate_example_rejects_wrong_ray_walk_answer():
+    fen = "7k/3p4/8/8/3RN3/8/8/7K w - - 0 1"
+    corrupted = (
+        "Piece: d4 white rook.\n"
+        "Ray N: d5 empty; d6 empty; d7 empty; edge.\n"
+        "Ray E: e4 white knight: own piece (stop, excluded).\n"
+        "Ray S: d3 empty; d2 empty; d1 empty; edge.\n"
+        "Ray W: c4 empty; b4 empty; a4 empty; edge.\n"
+        "Moves from rays: d4a4 d4b4 d4c4 d4d1 d4d2 d4d3 d4d5 d4d6 d4d7 d4d8"
+    )
+    row = build_sft_row(
+        task="2.10_ray_walk",
+        tier=2,
+        fen=fen,
+        user_prompt="FEN: ...\nWalk each ray for the slider on d4.",
+        assistant_content=corrupted,
+        metadata={"source_square": "d4", "expected_answer": corrupted},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("ray walk" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_ray_walk_on_non_slider_square():
+    fen = "7k/3p4/8/8/3RN3/8/8/7K w - - 0 1"
+    row = build_sft_row(
+        task="2.10_ray_walk",
+        tier=2,
+        fen=fen,
+        user_prompt="FEN: ...\nWalk each ray for the slider on e4.",
+        assistant_content="Piece: e4 white knight.",
+        metadata={"source_square": "e4", "expected_answer": "Piece: e4 white knight."},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("side-to-move slider" in error for error in errors)
+
+
+def test_package_validate_example_rejects_wrong_legal_filter_trace_answer():
+    fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    corrupted = (
+        "Side to move: white.\n"
+        "Pieces: e1 white king; e2 white rook.\n"
+        "Filter by piece:\n"
+        "e1 white king: pseudo-legal e1d1 e1d2 e1f1 e1f2 | rejected none | "
+        "legal e1d1 e1d2 e1f1 e1f2\n"
+        "e2 white rook: pseudo-legal e2e3 | rejected none | legal e2e3\n"
+        "All legal moves: e1d1 e1d2 e1f1 e1f2 e2e3"
+    )
+    row = build_sft_row(
+        task="2.11_legal_filter_trace",
+        tier=2,
+        fen=fen,
+        user_prompt="FEN: ...\nTrace pseudo-legal -> rejected -> legal.",
+        assistant_content=corrupted,
+        metadata={"expected_answer": corrupted},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("legal filter trace" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_legal_filter_trace_wrong_move_metadata():
+    fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    from chess_llm.core.legality import format_legal_filter_trace_answer
+
+    answer = format_legal_filter_trace_answer(chess.Board(fen))
+    assert answer is not None
+    row = build_sft_row(
+        task="2.11_legal_filter_trace",
+        tier=2,
+        fen=fen,
+        user_prompt="FEN: ...\nTrace pseudo-legal -> rejected -> legal.",
+        assistant_content=answer,
+        metadata={"expected_answer": answer, "legal_moves": "e2e3"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("legal_moves metadata" in error for error in errors)
+
+
+def test_package_validate_example_rejects_multi_move_state_tracking_wrong_answer():
+    board = chess.Board(STARTING_FEN)
+    board.push_uci("e2e4")
+    board.push_uci("e7e5")
+    result_fen = board.fen()
+    row = build_sft_row(
+        task="1.19_multi_move_state_tracking",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nApply e2e4 e7e5.",
+        assistant_content=f"Result FEN: {STARTING_FEN}",
+        metadata={"result_fen": result_fen, "moves": "e2e4 e7e5"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("state tracking" in error.lower() for error in errors)
+
+
+def test_package_validate_example_rejects_single_ply_multi_move_state_tracking():
+    board = chess.Board(STARTING_FEN)
+    board.push_uci("e2e4")
+    result_fen = board.fen()
+    row = build_sft_row(
+        task="1.19_multi_move_state_tracking",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nApply e2e4.",
+        assistant_content=f"Result FEN: {result_fen}",
+        metadata={"result_fen": result_fen, "moves": "e2e4"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("at least 2 moves" in error for error in errors)
+
+
+def test_package_validate_example_accepts_multi_move_state_tracking_answer():
+    board = chess.Board(STARTING_FEN)
+    board.push_uci("e2e4")
+    board.push_uci("e7e5")
+    result_fen = board.fen()
+    row = build_sft_row(
+        task="1.19_multi_move_state_tracking",
+        tier=1,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nApply e2e4 e7e5.",
+        assistant_content=f"Result FEN: {result_fen}",
+        metadata={"result_fen": result_fen, "moves": "e2e4 e7e5"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
 def test_package_validate_example_accepts_piece_specific_no_moves():
     row = build_sft_row(
         task="2.2_piece_specific_moves",
@@ -646,7 +974,7 @@ def test_package_validate_example_rejects_wrong_check_detection_answer():
         task="2.4_check_detection",
         tier=2,
         fen=STARTING_FEN,
-        user_prompt="FEN: ...\nIs the king in check?",
+        user_prompt="FEN: ...\nWhat is the check state: check, checkmate, stalemate, or normal?",
         assistant_content="Check.",
         metadata={"state_label": "normal"},
     )

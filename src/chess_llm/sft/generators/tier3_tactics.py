@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Iterator
 
 import chess
@@ -26,6 +27,50 @@ _PIECE_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
 }
+
+# Lichess puzzle themes that describe an actual tactical motif.  Everything
+# else (difficulty, length, source tags like masterVsMaster) is noise.
+_TACTICAL_THEME_WHITELIST = (
+    "fork",
+    "pin",
+    "skewer",
+    "discoveredAttack",
+    "doubleCheck",
+    "sacrifice",
+    "deflection",
+    "attraction",
+    "clearance",
+    "interference",
+    "zugzwang",
+    "backRankMate",
+    "smotheredMate",
+    "hangingPiece",
+    "trappedPiece",
+    "exposedKing",
+    "xRayAttack",
+    "zwischenzug",
+    "mateIn1",
+    "mateIn2",
+    "mateIn3",
+    "mateIn4",
+    "mateIn5",
+)
+
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z0-9])")
+
+
+def _humanize_theme(theme: str) -> str:
+    """Turn a camelCase theme into words, e.g. 'mateIn2' -> 'mate in 2'."""
+    return _CAMEL_SPLIT_RE.sub(" ", theme).lower()
+
+
+def _tactical_theme_phrases(themes: list[str]) -> list[str]:
+    """Filter raw puzzle themes to humanized tactical motifs."""
+    return [
+        _humanize_theme(theme)
+        for theme in themes
+        if theme in _TACTICAL_THEME_WHITELIST
+    ]
 
 
 class AvailableCaptures(TaskGenerator):
@@ -233,7 +278,8 @@ class TacticalPatterns(TaskGenerator):
             if not solution:
                 continue
 
-            theme_str = ", ".join(themes) if themes else "tactical"
+            theme_phrases = _tactical_theme_phrases(themes)
+            theme_str = ", ".join(theme_phrases) if theme_phrases else "tactical"
             answer = f"The tactic is {theme_str}. Best move: {solution}"
 
             metadata = dict(raw.get("metadata", {}))

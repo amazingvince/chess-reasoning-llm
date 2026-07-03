@@ -759,20 +759,24 @@ def test_package_legal_decomposition_generators_emit_structured_traces():
         "e2h2 pinned_piece_exposes_king."
     )
 
-    quiet_filter = next(
+    # The >=50% rejection floor defers rejection-free rows until a
+    # contrast row has been emitted, so lead with the pinned position.
+    quiet_rows = list(
         PieceLegalFilter(
-            config={"fen_pool": [{"fen": quiet_rook_fen}], "volume_override": 1},
+            config={
+                "fen_pool": [{"fen": pinned_rook_fen}, {"fen": quiet_rook_fen}],
+                "volume_override": 2,
+            },
             rng=Random(0),
         ).generate()
     )
+    quiet_filter = quiet_rows[1]
     assert quiet_filter["task"] == "2.7_piece_legal_filter"
-    assert quiet_filter["metadata"]["source_square"] == "a1"
-    assert quiet_filter["messages"][2]["content"] == (
-        "Pseudo-legal from a1: "
-        "a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1.\n"
-        "Legal: a1a2 a1a3 a1a4 a1a5 a1a6 a1a7 a1a8 a1b1 a1c1 a1d1.\n"
-        "Rejected: none."
-    )
+    assert quiet_filter["fen"] == quiet_rook_fen
+    assert quiet_filter["metadata"]["rejection_category"] == "no_rejection"
+    assert quiet_filter["metadata"]["rejected_count"] == 0
+    assert quiet_filter["metadata"]["rejected_moves"] == "none"
+    assert quiet_filter["messages"][2]["content"].endswith("Rejected: none.")
 
     safety = next(
         KingSafetyFilter(
@@ -1115,6 +1119,305 @@ def test_package_board_to_fen_generator_canonicalizes_to_complete_fen():
     assert row["messages"][2]["content"] == "4k3/8/8/8/8/8/4K3/8 w - - 0 1"
 
 
+def test_package_board_to_fen_teaches_legal_en_passant_convention():
+    from chess_llm.sft.generators.tier1_perception import BoardToFEN
+
+    fen_with_phantom_ep = (
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+    )
+    gen = BoardToFEN(
+        config={"fen_pool": [{"fen": fen_with_phantom_ep}], "volume_override": 1},
+        rng=Random(0),
+    )
+
+    row = next(gen.generate())
+
+    assert row["messages"][2]["content"] == (
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    )
+    assert row["fen"] == row["messages"][2]["content"]
+
+
+def test_package_tier1_pool_generators_sample_fen_pool_in_shuffled_order():
+    from chess_llm.sft.generators.tier1_perception import BoardToFEN, RankLookup
+
+    pool = [
+        {
+            "fen": fen,
+            "metadata": {"label": label},
+        }
+        for label, fen in [
+            ("first", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            ("second", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"),
+            ("third", "rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 2"),
+            ("fourth", "rnbqkbnr/ppp2ppp/3pp3/8/3PP3/8/PPP2PPP/RNBQKBNR w KQkq - 0 3"),
+            ("fifth", "rnbqkbnr/ppp2ppp/3pp3/8/2PPP3/8/PP3PPP/RNBQKBNR b KQkq - 0 3"),
+        ]
+    ]
+
+    for generator_cls in (BoardToFEN, RankLookup):
+        row = next(
+            generator_cls(
+                config={"fen_pool": list(pool), "volume_override": 1},
+                rng=Random(0),
+            ).generate()
+        )
+        assert row["metadata"]["label"] == "third"
+
+
+class _ForceCastleRng:
+    """Fake rng whose choice() prefers the e1g1 castling move."""
+
+    def choice(self, values):
+        for value in values:
+            if getattr(value, "uci", None) is not None and value.uci() == "e1g1":
+                return value
+        return values[0]
+
+
+def test_package_fen_rank_cell_edit_castling_teaches_true_post_move_row():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier1_perception import FENRankCellEdit
+
+    gen = FENRankCellEdit(
+        config={
+            "game_positions": [{"fen": "4k3/8/8/8/8/8/8/4K2R w K - 0 1"}],
+            "volume_override": 1,
+        },
+        rng=_ForceCastleRng(),
+    )
+
+    row = next(gen.generate())
+    answer = row["messages"][2]["content"]
+
+    assert row["metadata"]["move"] == "e1g1"
+    assert row["metadata"]["before_row"] == "4K2R"
+    assert row["metadata"]["after_row"] == "5RK1"
+    assert answer == "rank 1: 4K2R -> 5RK1"
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_piece_counting_full_material_identity_ignores_color_and_piece(monkeypatch):
+    from chess_llm.sft.generators.tier1_perception import PieceCounting
+
+    tpl = "FEN: {fen}\nWhat is the material count for both sides?"
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier1_perception.select_template",
+        lambda _task_id, _rng: tpl,
+    )
+
+    rows = [
+        next(
+            PieceCounting(
+                config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+                rng=Random(seed),
+            ).generate()
+        )
+        for seed in (0, 99)
+    ]
+
+    assert rows[0]["metadata"]["example_identity"] == rows[1]["metadata"]["example_identity"]
+    for row in rows:
+        assert "color" not in row["metadata"]
+        assert "piece" not in row["metadata"]
+
+
+def test_package_tier5_variant_identities_are_distinct():
+    from chess_llm.sft.generators.tier5_openings import OpeningIdentification
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+
+    for task_id in (
+        "5.1_opening_identification",
+        "5.2_opening_continuation",
+        "5.3_opening_principles",
+    ):
+        assert TASK_IDENTITY_FIELDS[task_id] == ("variant",)
+
+    opening = {
+        "fen": STARTING_FEN,
+        "name": "Test Opening",
+        "eco": "C20",
+        "uci_moves": ["e2e4"],
+    }
+    gen = OpeningIdentification(
+        config={"openings": [opening], "volume_override": 5},
+        rng=Random(0),
+    )
+
+    rows = list(gen.generate())
+    identities = {row["metadata"]["example_identity"] for row in rows}
+
+    assert len(rows) == 5
+    assert len(identities) == 5
+
+
+def test_package_cp_to_bucket_implements_shared_contract():
+    from chess_llm.sft.generators.tier4_evaluation import _cp_to_bucket
+
+    assert _cp_to_bucket(0) == "The position is equal."
+    assert _cp_to_bucket(30) == "The position is equal."
+    assert _cp_to_bucket(-49) == "The position is equal."
+    assert _cp_to_bucket(50) == "White has a slight edge."
+    assert _cp_to_bucket(-149) == "Black has a slight edge."
+    assert _cp_to_bucket(150) == "White has a clear advantage."
+    assert _cp_to_bucket(-299) == "Black has a clear advantage."
+    assert _cp_to_bucket(300) == "White is winning."
+    assert _cp_to_bucket(-599) == "Black is winning."
+    assert _cp_to_bucket(600) == "White has a decisive advantage."
+    # Values beyond the last bucket bound clamp to the last bucket.
+    assert _cp_to_bucket(100_000) == "White has a decisive advantage."
+    assert _cp_to_bucket(-250_000) == "Black has a decisive advantage."
+
+
+def test_package_position_evaluation_answers_use_shared_bucket_sentences():
+    from chess_llm.sft.generators.tier4_evaluation import PositionEvaluation
+
+    evals = [
+        {"fen": STARTING_FEN, "cp": 0},
+        {"fen": STARTING_FEN, "cp": -75},
+        {"fen": STARTING_FEN, "cp": 700},
+    ]
+    rows = list(
+        PositionEvaluation(
+            config={"position_evals": evals, "volume_override": 3},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert [row["messages"][2]["content"] for row in rows] == [
+        "The position is equal.",
+        "Black has a slight edge.",
+        "White has a decisive advantage.",
+    ]
+
+
+def test_package_kqkp_endgame_principle_is_chess_accurate():
+    from chess_llm.sft.generators.tier6_endgames import _ENDGAME_PRINCIPLES
+
+    principles = _ENDGAME_PRINCIPLES["KQKP"]
+
+    assert (
+        "Queen vs pawn on the 7th: a bishop (c/f) or rook (a/h) pawn can draw; "
+        "center and knight pawns lose."
+        in principles
+    )
+    assert all("bishop/center pawn may draw" not in text for text in principles)
+
+
+def test_package_tactical_patterns_filter_and_humanize_themes():
+    from chess_llm.sft.generators.tier3_tactics import TacticalPatterns
+
+    puzzles = [
+        {
+            "fen": STARTING_FEN,
+            "themes": [
+                "short",
+                "crushing",
+                "masterVsMaster",
+                "discoveredAttack",
+                "mateIn2",
+            ],
+            "solution_first_move": "e2e4",
+            "rating": 1500,
+        },
+        {
+            "fen": STARTING_FEN,
+            "themes": ["short", "long", "masterVsMaster"],
+            "solution_first_move": "d2d4",
+            "rating": 1500,
+        },
+    ]
+    rows = list(
+        TacticalPatterns(
+            config={"puzzles": puzzles, "volume_override": 2},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert rows[0]["messages"][2]["content"] == (
+        "The tactic is discovered attack, mate in 2. Best move: e2e4"
+    )
+    assert rows[1]["messages"][2]["content"] == (
+        "The tactic is tactical. Best move: d2d4"
+    )
+
+
+def test_package_mate_trace_claims_check_only_when_true():
+    import chess
+
+    from chess_llm.sft.generators.reasoning_traces import generate_tactical_trace
+
+    quiet = generate_tactical_trace(
+        chess.Board(STARTING_FEN), "e2e4", ["mateIn2"], "", Random(0)
+    )
+    assert "delivers check" not in quiet
+    assert "tightens the mating net" in quiet
+
+    checking = generate_tactical_trace(
+        chess.Board("k7/8/8/8/8/8/1Q6/4K3 w - - 0 1"),
+        "b2b8",
+        ["mateIn1"],
+        "",
+        Random(0),
+    )
+    assert "delivers check from b8" in checking
+
+
+def test_package_best_move_mate_traces_only_for_the_mating_side():
+    from chess_llm.sft.generators.tier7_planning import BestMoveSelection
+
+    black_defends_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"
+    evals = [
+        {"fen": STARTING_FEN, "best_move": "e2e4", "mate": 2, "depth": 30},
+        {"fen": black_defends_fen, "best_move": "e7e5", "mate": 2, "depth": 30},
+    ]
+    rows = list(
+        BestMoveSelection(
+            config={"best_move_evals": evals, "volume_override": 2},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 2
+    assert "mating pattern" in rows[0]["messages"][2]["content"]
+    assert "mating pattern" not in rows[1]["messages"][2]["content"]
+
+
+def test_package_best_move_selection_excludes_mate_pairwise_rows():
+    from chess_llm.sft.generators.tier7_planning import BestMoveSelection
+
+    mate_rows = [
+        {
+            "fen": STARTING_FEN,
+            "better_move": "e2e4",
+            "move_a": "e2e4",
+            "move_b": "d2d4",
+            "strategy": "control the center",
+            "tactic": "central pawn push",
+        }
+    ]
+
+    only_mate = BestMoveSelection(
+        config={"best_move_evals": [], "mate_rows": mate_rows, "volume_override": 3},
+        rng=Random(0),
+    )
+    assert list(only_mate.generate()) == []
+
+    evals = [{"fen": STARTING_FEN, "best_move": "e2e4", "cp": 20, "depth": 30}]
+    mixed = BestMoveSelection(
+        config={
+            "best_move_evals": evals,
+            "mate_rows": mate_rows,
+            "volume_override": 5,
+        },
+        rng=Random(0),
+    )
+    rows = list(mixed.generate())
+    assert rows
+    assert all(row["metadata"]["source"] == "lichess_evals" for row in rows)
+
+
 def test_package_legal_move_generator_samples_fen_pool_in_shuffled_order():
     from chess_llm.sft.generators.tier2_rules import LegalMoveGen
 
@@ -1234,6 +1537,169 @@ def test_package_move_legality_classifier_explains_illegal_move_reason():
 
         assert result.is_legal is False
         assert result.reason_label == expected_reason
+
+
+def test_package_move_legality_classifier_only_flags_promotion_for_pseudo_legal_shapes():
+    import chess
+
+    from chess_llm.core.legality import classify_move_legality
+
+    cases = [
+        # Push onto an occupied promotion square is a movement defect.
+        ("r6k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8", "illegal_piece_movement_or_blocked_path"),
+        # Diagonal move to an EMPTY promotion square is a movement defect.
+        ("7k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7b8", "illegal_piece_movement_or_blocked_path"),
+        # Push onto an own-piece promotion square is an own-destination defect.
+        ("N6k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8", "own_piece_destination"),
+        # A genuinely promotable push without a suffix is a promotion defect.
+        ("7k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8", "missing_or_invalid_promotion"),
+        # A capture-promotion without a suffix is a promotion defect.
+        ("1r5k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7b8", "missing_or_invalid_promotion"),
+    ]
+
+    for fen, move_uci, expected_reason in cases:
+        board = chess.Board(fen)
+        result = classify_move_legality(board, move_uci)
+
+        assert result.is_legal is False, (fen, move_uci)
+        assert result.reason_label == expected_reason, (fen, move_uci)
+
+
+def test_package_move_legality_classifier_labels_castling_king_safety():
+    import chess
+
+    from chess_llm.core.legality import classify_move_legality
+
+    # Castling through an attacked transit square is a king-safety defect.
+    through_check = classify_move_legality(
+        chess.Board("4k3/8/8/8/8/8/5r2/4K2R w K - 0 1"),
+        "e1g1",
+    )
+    assert through_check.is_legal is False
+    assert through_check.reason_label == "king_would_be_in_check"
+
+    # Castling out of check is a king-safety defect too.
+    out_of_check = classify_move_legality(
+        chess.Board("4k3/8/8/8/8/8/4r3/4K2R w K - 0 1"),
+        "e1g1",
+    )
+    assert out_of_check.reason_label == "king_would_be_in_check"
+
+    # A blocked castling path stays a movement/blocked-path defect.
+    blocked_path = classify_move_legality(
+        chess.Board("4k3/8/8/8/8/8/8/4KB1R w K - 0 1"),
+        "e1g1",
+    )
+    assert blocked_path.reason_label == "illegal_piece_movement_or_blocked_path"
+
+    # Castling without rights stays a movement defect.
+    no_rights = classify_move_legality(
+        chess.Board("4k3/8/8/8/8/8/8/4K2R w - - 0 1"),
+        "e1g1",
+    )
+    assert no_rights.reason_label == "illegal_piece_movement_or_blocked_path"
+
+
+def test_package_select_bucketed_rows_fills_from_unique_rows_only():
+    from chess_llm.sft.generators.tier2_rules import _select_bucketed_rows
+
+    buckets = {
+        "a": [{"fen": f"a{i}"} for i in range(3)],
+        "b": [{"fen": f"b{i}"} for i in range(2)],
+    }
+    quotas = {"a": 5, "b": 5}
+
+    selected = _select_bucketed_rows(buckets, quotas, 10, Random(0))
+    fens = [row["fen"] for _bucket, row in selected]
+
+    assert len(selected) == 5
+    assert len(set(fens)) == 5
+
+
+def test_package_select_bucketed_rows_backfills_from_other_buckets():
+    from chess_llm.sft.generators.tier2_rules import _select_bucketed_rows
+
+    buckets = {
+        "a": [{"fen": f"a{i}"} for i in range(4)],
+        "b": [{"fen": "b0"}],
+    }
+    quotas = {"a": 1, "b": 4}
+
+    selected = _select_bucketed_rows(buckets, quotas, 5, Random(1))
+    fens = sorted(row["fen"] for _bucket, row in selected)
+
+    assert fens == ["a0", "a1", "a2", "a3", "b0"]
+
+
+def test_package_check_detection_templates_match_state_answer_contract():
+    from chess_llm.sft.templates import TEMPLATES
+
+    templates = TEMPLATES["2.4_check_detection"]
+
+    assert "FEN: {fen}\nIs the king in check?" not in templates
+    assert "FEN: {fen}\nIs the side to move in check?" not in templates
+    assert (
+        "FEN: {fen}\nWhat is the check state: check, checkmate, stalemate, or normal?"
+        in templates
+    )
+    assert (
+        "FEN: {fen}\nWhat is the check state for the side to move: "
+        "check, checkmate, stalemate, or normal?"
+        in templates
+    )
+
+
+def test_package_move_legality_negatives_include_king_safety_share():
+    from chess_llm.sft.generators.tier2_rules import MoveLegalityCheck
+
+    pinned_fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    gen = MoveLegalityCheck(
+        config={
+            "fen_pool": [{"fen": pinned_fen} for _ in range(60)],
+            "volume_override": 60,
+        },
+        rng=Random(0),
+    )
+
+    rows = list(gen.generate())
+    negatives = [
+        row for row in rows if row["metadata"]["expected_is_legal"] is False
+    ]
+    positives = [row for row in rows if row["metadata"]["expected_is_legal"] is True]
+
+    assert negatives
+    assert all(
+        row["metadata"]["negative_category"] in {"king_safety", "other_illegal"}
+        for row in negatives
+    )
+    king_safety = [
+        row
+        for row in negatives
+        if row["metadata"]["negative_category"] == "king_safety"
+    ]
+    assert len(king_safety) / len(negatives) >= 0.25
+    assert all("negative_category" not in row["metadata"] for row in positives)
+
+
+def test_package_legal_move_generator_emits_none_for_terminal_positions():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import LegalMoveGen
+
+    checkmate_fen = "R6k/8/7K/8/8/8/8/8 b - - 0 1"
+    stalemate_fen = "k7/8/1QK5/8/8/8/8/8 b - - 0 1"
+    for fen in (checkmate_fen, stalemate_fen):
+        row = next(
+            LegalMoveGen(
+                config={"fen_pool": [{"fen": fen}], "volume_override": 1},
+                rng=Random(0),
+            ).generate()
+        )
+        answer = row["messages"][2]["content"]
+
+        assert answer == "Side to move: black.\nLegal moves: none"
+        assert row["metadata"]["legal_move_count"] == 0
+        passed, errors = validate_example(row)
+        assert passed is True, errors
 
 
 def test_package_check_detection_includes_rare_states_from_normal_pool():
@@ -1360,6 +1826,301 @@ def test_package_special_rules_generic_promotion_answer_uses_exact_uci_moves(mon
     for move in promotion_moves:
         assert move in answer
     assert "Promotion possible from:" not in answer
+
+
+def test_package_ray_walk_generator_walks_blockers_captures_and_edges():
+    import chess
+
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import RayWalk
+
+    fen = "7k/3p4/8/8/3RN3/8/8/7K w - - 0 1"
+    row = next(
+        RayWalk(
+            config={"fen_pool": [{"fen": fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    answer = row["messages"][2]["content"]
+
+    assert row["task"] == "2.10_ray_walk"
+    assert row["metadata"]["source_square"] == "d4"
+    assert row["metadata"]["piece"] == "rook"
+    assert row["metadata"]["ray_move_count"] == 9
+    assert row["metadata"]["blocked_ray_count"] == 2
+    assert answer == (
+        "Piece: d4 white rook.\n"
+        "Ray N: d5 empty; d6 empty; d7 black pawn: capture (stop, included).\n"
+        "Ray E: e4 white knight: own piece (stop, excluded).\n"
+        "Ray S: d3 empty; d2 empty; d1 empty; edge.\n"
+        "Ray W: c4 empty; b4 empty; a4 empty; edge.\n"
+        "Moves from rays: d4a4 d4b4 d4c4 d4d1 d4d2 d4d3 d4d5 d4d6 d4d7"
+    )
+    board = chess.Board(fen)
+    pseudo = sorted(
+        move.uci()
+        for move in board.pseudo_legal_moves
+        if move.from_square == chess.D4
+    )
+    assert answer.splitlines()[-1] == "Moves from rays: " + " ".join(pseudo)
+    assert row["metadata"]["expected_answer"] == answer
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_ray_walk_generator_emits_none_for_fully_blocked_slider():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import RayWalk
+
+    fen = "7k/8/8/8/8/8/P7/RN5K w - - 0 1"
+    row = next(
+        RayWalk(
+            config={"fen_pool": [{"fen": fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert row["messages"][2]["content"].splitlines() == [
+        "Piece: a1 white rook.",
+        "Ray N: a2 white pawn: own piece (stop, excluded).",
+        "Ray E: b1 white knight: own piece (stop, excluded).",
+        "Ray S: edge.",
+        "Ray W: edge.",
+        "Moves from rays: none",
+    ]
+    assert row["metadata"]["ray_move_count"] == 0
+    assert row["metadata"]["blocked_ray_count"] == 2
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_ray_walk_generator_skips_sliderless_positions_and_keeps_piece_floors():
+    from chess_llm.sft.generators.tier2_rules import RayWalk
+
+    sliderless_fen = "7k/8/8/8/8/8/P7/7K w - - 0 1"
+    slider_fen = "7k/8/8/8/2B5/1Q6/8/R6K w - - 0 1"
+
+    row = next(
+        RayWalk(
+            config={
+                "fen_pool": [{"fen": sliderless_fen} for _ in range(3)]
+                + [{"fen": slider_fen}],
+                "volume_override": 1,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+    assert row["fen"] == slider_fen
+
+    gen = RayWalk(
+        config={
+            "fen_pool": [{"fen": slider_fen} for _ in range(40)],
+            "volume_override": 40,
+        },
+        rng=Random(0),
+    )
+    counts = Counter(r["metadata"]["piece"] for r in gen.generate())
+    total = sum(counts.values())
+
+    assert total == 40
+    assert set(counts) <= {"rook", "bishop", "queen"}
+    assert counts["rook"] / total >= 0.30
+    assert counts["bishop"] / total >= 0.25
+    assert counts["queen"] / total >= 0.25
+
+
+def test_package_piece_legal_filter_meets_rejection_floor_with_rejection_free_pool():
+    from chess_llm.sft.generators.tier2_rules import (
+        PieceLegalFilter,
+        _synthetic_pin_check_fens,
+    )
+
+    quiet_rook_fen = "7k/8/8/8/8/8/8/R3K3 w - - 0 1"
+    gen = PieceLegalFilter(
+        config={
+            "fen_pool": [{"fen": quiet_rook_fen} for _ in range(20)],
+            "volume_override": 10,
+        },
+        rng=Random(0),
+    )
+
+    rows = list(gen.generate())
+    categories = Counter(row["metadata"]["rejection_category"] for row in rows)
+
+    assert len(rows) == 10
+    assert categories["has_rejection"] / len(rows) >= 0.5
+    for row in rows:
+        if row["metadata"]["rejection_category"] == "has_rejection":
+            assert row["metadata"]["rejected_count"] > 0
+        else:
+            assert row["metadata"]["rejected_count"] == 0
+
+    labels = {label for label, _fen in _synthetic_pin_check_fens(10)}
+    assert labels == {
+        "pinned_piece_exposes_king",
+        "does_not_resolve_check",
+        "king_would_be_in_check",
+    }
+
+
+def test_package_legal_filter_trace_generator_composes_filter_lines():
+    import chess
+
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import (
+        LegalFilterTrace,
+        _format_legal_moves_by_piece_answer,
+    )
+
+    pinned_rook_fen = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+    row = next(
+        LegalFilterTrace(
+            config={"fen_pool": [{"fen": pinned_rook_fen}], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+    answer = row["messages"][2]["content"]
+
+    assert row["task"] == "2.11_legal_filter_trace"
+    assert answer == (
+        "Side to move: white.\n"
+        "Pieces: e1 white king; e2 white rook.\n"
+        "Filter by piece:\n"
+        "e1 white king: pseudo-legal e1d1 e1d2 e1f1 e1f2 | rejected none | "
+        "legal e1d1 e1d2 e1f1 e1f2\n"
+        "e2 white rook: pseudo-legal e2a2 e2b2 e2c2 e2d2 e2e3 e2e4 e2e5 e2e6 "
+        "e2e7 e2e8 e2f2 e2g2 e2h2 | rejected e2a2 pinned_piece_exposes_king; "
+        "e2b2 pinned_piece_exposes_king; e2c2 pinned_piece_exposes_king; "
+        "e2d2 pinned_piece_exposes_king; e2f2 pinned_piece_exposes_king; "
+        "e2g2 pinned_piece_exposes_king; e2h2 pinned_piece_exposes_king | "
+        "legal e2e3 e2e4 e2e5 e2e6 e2e7 e2e8\n"
+        "All legal moves: e1d1 e1d2 e1f1 e1f2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8"
+    )
+    grouped_answer, _grouped, _final = _format_legal_moves_by_piece_answer(
+        chess.Board(pinned_rook_fen)
+    )
+    # Header and final lines are byte-identical to 2.9's grouped format.
+    assert answer.splitlines()[0] == grouped_answer.splitlines()[0]
+    assert answer.splitlines()[1] == grouped_answer.splitlines()[1]
+    assert answer.splitlines()[-1] == grouped_answer.splitlines()[-1]
+    assert row["metadata"]["rejection_category"] == "has_rejection"
+    assert row["metadata"]["rejected_total"] == 7
+    assert row["metadata"]["legal_move_count"] == 10
+    assert row["metadata"]["legal_moves_by_piece"]["e2"] == [
+        "e2e3", "e2e4", "e2e5", "e2e6", "e2e7", "e2e8",
+    ]
+    assert row["metadata"]["expected_answer"] == answer
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_legal_filter_trace_generator_respects_caps_and_rejection_floor():
+    import chess
+
+    from chess_llm.core.legality import format_legal_filter_trace_answer
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier2_rules import LegalFilterTrace
+
+    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    # 16 side-to-move pieces exceed the 12-piece cap.
+    assert format_legal_filter_trace_answer(chess.Board(starting_fen)) is None
+
+    gen = LegalFilterTrace(
+        config={
+            "fen_pool": [{"fen": starting_fen} for _ in range(4)],
+            "volume_override": 4,
+        },
+        rng=Random(0),
+    )
+    rows = list(gen.generate())
+    categories = Counter(row["metadata"]["rejection_category"] for row in rows)
+
+    assert len(rows) == 4
+    assert all(row["fen"] != starting_fen for row in rows)
+    assert all(len(row["messages"][2]["content"]) <= 1200 for row in rows)
+    assert all(row["metadata"]["legal_move_count"] > 0 for row in rows)
+    assert categories["has_rejection"] / len(rows) >= 0.4
+    for row in rows:
+        passed, errors = validate_example(row)
+        assert passed is True, errors
+
+
+def test_package_multi_move_state_tracking_uses_two_to_three_plies():
+    from chess_llm.sft.generators.tier1_perception import MultiMoveStateTracking
+
+    gen = MultiMoveStateTracking(
+        config={
+            "game_positions": [
+                {"fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}
+                for _ in range(20)
+            ],
+            "volume_override": 20,
+        },
+        rng=Random(11),
+    )
+
+    rows = list(gen.generate())
+
+    assert rows
+    assert all(row["task"] == "1.19_multi_move_state_tracking" for row in rows)
+    assert all(int(row["metadata"]["n_moves"]) in (2, 3) for row in rows)
+    assert {int(row["metadata"]["n_moves"]) for row in rows} == {2, 3}
+
+
+def test_package_multi_move_state_tracking_honors_config_override_and_bare_answer():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier1_perception import MultiMoveStateTracking
+
+    gen = MultiMoveStateTracking(
+        config={
+            "game_positions": [{"fen": STARTING_FEN}],
+            "volume_override": 1,
+            "multi_state_tracking_min_plies": 4,
+            "multi_state_tracking_max_plies": 4,
+        },
+        rng=Random(1),
+    )
+
+    row = next(gen.generate())
+    answer = row["messages"][2]["content"]
+
+    assert int(row["metadata"]["n_moves"]) == 4
+    assert len(row["metadata"]["moves"].split()) == 4
+    assert answer == f"Result FEN: {row['metadata']['result_fen']}"
+    assert "Move 1:" not in answer
+    assert "Lookup:" not in answer
+    assert "Squares:" not in answer
+    assert "Ranks:" not in answer
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_new_curriculum_tasks_are_registered():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators import (
+        LegalFilterTrace,
+        MultiMoveStateTracking,
+        RayWalk,
+    )
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert MultiMoveStateTracking in pipeline.TIER_GENERATORS[1]
+    assert RayWalk in pipeline.TIER_GENERATORS[2]
+    assert LegalFilterTrace in pipeline.TIER_GENERATORS[2]
+    for task_id, alias in (
+        ("1.19_multi_move_state_tracking", "multi_state_tracking"),
+        ("2.10_ray_walk", "ray_walk"),
+        ("2.11_legal_filter_trace", "legal_filter_trace"),
+    ):
+        assert DEFAULT_VOLUMES[task_id] > 0
+        assert TEMPLATES[task_id]
+        assert ANSWER_CONTRACTS[task_id] == ANSWER_CONTRACTS[alias]
+    assert TEMPLATES["1.19_multi_move_state_tracking"] == TEMPLATES["1.5_state_tracking"]
+    assert TASK_IDENTITY_FIELDS["1.19_multi_move_state_tracking"] == ("moves",)
+    assert TASK_IDENTITY_FIELDS["2.10_ray_walk"] == ("source_square",)
+    assert TASK_IDENTITY_FIELDS["2.11_legal_filter_trace"] == ()
 
 
 def test_pipeline_registry_uses_package_generators():

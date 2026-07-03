@@ -8,11 +8,12 @@ from typing import Any
 from chess_llm.artifacts.schemas import JudgmentArtifact, PromptArtifact, RolloutArtifact
 from chess_llm.autodata.failure_buckets import (
     ILLEGAL_MOVE,
+    INVALID_FEN,
     LEGAL_UNSCORED,
     MISSING_FEN,
     PARSE_FAILURE,
 )
-from chess_llm.core.board import is_legal_move
+from chess_llm.core.board import is_legal_move, validate_fen
 
 
 def judge_rollout(
@@ -33,6 +34,16 @@ def judge_rollout(
             legal=None,
             failure_bucket=MISSING_FEN,
             feedback="Cannot judge rollout: missing FEN on prompt.",
+            metadata=base_metadata,
+        )
+
+    if not validate_fen(prompt.fen, chess960=chess960):
+        return JudgmentArtifact(
+            judgment_id=resolved_id,
+            rollout_id=rollout.rollout_id,
+            legal=None,
+            failure_bucket=INVALID_FEN,
+            feedback=f"Cannot judge rollout: prompt FEN {prompt.fen!r} is invalid.",
             metadata=base_metadata,
         )
 

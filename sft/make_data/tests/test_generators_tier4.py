@@ -22,35 +22,35 @@ def test_cp_to_bucket_equal_positive():
     from generators.tier4_evaluation import _cp_to_bucket
 
     result = _cp_to_bucket(30)
-    assert result == "White has a equal"
+    assert result == "The position is equal."
 
 
 def test_cp_to_bucket_slight_edge():
     from generators.tier4_evaluation import _cp_to_bucket
 
     result = _cp_to_bucket(100)
-    assert result == "White has a slight edge"
+    assert result == "White has a slight edge."
 
 
 def test_cp_to_bucket_black_clear_advantage():
     from generators.tier4_evaluation import _cp_to_bucket
 
     result = _cp_to_bucket(-250)
-    assert result == "Black has a clear advantage"
+    assert result == "Black has a clear advantage."
 
 
 def test_cp_to_bucket_winning():
     from generators.tier4_evaluation import _cp_to_bucket
 
     result = _cp_to_bucket(400)
-    assert result == "White has a winning"
+    assert result == "White is winning."
 
 
 def test_cp_to_bucket_zero_is_equal():
     from generators.tier4_evaluation import _cp_to_bucket
 
     result = _cp_to_bucket(0)
-    assert result == "equal"
+    assert result == "The position is equal."
 
 
 # ── _analyze_pawn_structure unit tests ──────────────────────────────

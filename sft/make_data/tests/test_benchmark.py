@@ -25,12 +25,21 @@ def test_gold_board_print():
     assert gold == expected
 
 
-def test_render_prompt_board_to_fen_bad_fen_preserves_empty_board_fallback():
+def test_render_prompt_board_to_fen_includes_full_fen_state():
     from validation.benchmark import _render_prompt
 
-    assert _render_prompt("board_to_fen", {"fen": "not a fen"}) == (
-        "Here is the current board:\n\nWrite the FEN for this position."
-    )
+    prompt = _render_prompt("board_to_fen", {"fen": STARTING_FEN})
+    assert prompt.startswith("Here is the current board:\n")
+    assert "State needed for full FEN:" in prompt
+    assert "Side to move: white" in prompt
+    assert "Castling rights: KQkq" in prompt
+
+
+def test_render_prompt_board_to_fen_bad_fen_cannot_derive_full_fen_state():
+    from validation.benchmark import _render_prompt
+
+    with pytest.raises(KeyError):
+        _render_prompt("board_to_fen", {"fen": "not a fen"})
 
 
 def test_gold_board_to_fen():
@@ -85,8 +94,10 @@ def test_gold_state_tracking():
 
     raw = {"fen": STARTING_FEN}
     gold = derive_gold_answer("state_tracking", raw, Random(42))
-    # Gold is a valid FEN, moves are stored in raw
-    chess.Board(gold)  # should not raise
+    # Gold is "Result FEN: <canonical fen>", moves are stored in raw
+    assert gold.startswith("Result FEN: ")
+    result_fen = gold[len("Result FEN: "):]
+    assert chess.Board(result_fen).fen() == result_fen
     assert "_state_tracking_moves" in raw
     assert raw["_state_tracking_moves"]  # non-empty
 
@@ -97,18 +108,22 @@ def test_gold_legality_check():
 
     raw = {"fen": STARTING_FEN}
     gold = derive_gold_answer("legality_check", raw, Random(42))
-    assert gold in ("Yes, the move is legal.", "No, the move is not legal.")
+    assert gold.startswith(("Yes, legal. Reason: ", "No, illegal. Reason: "))
+    assert gold.endswith(".")
     assert "_legality_check_move" in raw
+    assert "_legality_check_reason_label" in raw
 
 
 def test_gold_legal_moves():
     from random import Random
     from validation.benchmark import derive_gold_answer
-    from validation.eval_harness import answer_legal_moves
 
     raw = {"fen": STARTING_FEN}
     gold = derive_gold_answer("legal_moves", raw, Random(42))
-    assert gold == answer_legal_moves(STARTING_FEN)
+    expected_moves = " ".join(
+        sorted(m.uci() for m in chess.Board(STARTING_FEN).legal_moves)
+    )
+    assert gold == f"Side to move: white.\nLegal moves: {expected_moves}"
 
 
 def test_chess960_legal_moves_use_chess960_rules():
@@ -123,7 +138,7 @@ def test_chess960_legal_moves_use_chess960_rules():
         sorted(m.uci() for m in chess.Board(fen, chess960=True).legal_moves)
     )
 
-    assert gold == expected
+    assert gold == f"Side to move: white.\nLegal moves: {expected}"
 
 
 def test_chess960_castling_rules_require_legal_castle_moves():
@@ -540,13 +555,13 @@ def test_freeze_split_round_robin_perception():
     raw = [{"fen": STARTING_FEN}] * 10
     examples = freeze_split("perception", raw, seed=42)
     task_types = [ex.task_type for ex in examples]
-    # perception: board_print, board_to_fen, piece_id, material_count, state_tracking, ...
+    # perception: board_print, board_to_fen, piece_id, material_count, square_lookup, ...
     assert task_types[0] == "board_print"
     assert task_types[1] == "board_to_fen"
     assert task_types[2] == "piece_id"
     assert task_types[3] == "material_count"
-    assert task_types[4] == "state_tracking"
-    assert task_types[5] == "board_print"  # wraps around
+    assert task_types[4] == "square_lookup"
+    assert task_types[5] == "rank_lookup"
 
 
 def test_freeze_split_round_robin_rules():
@@ -555,12 +570,12 @@ def test_freeze_split_round_robin_rules():
     raw = [{"fen": STARTING_FEN}] * 10
     examples = freeze_split("rules", raw, seed=42)
     task_types = [ex.task_type for ex in examples]
-    # rules: legal_moves, check_detection, captures, special_rules, legality_check, ...
+    # rules: legal_moves, side_piece_inventory, piece_legal_moves, check_detection, ...
     assert task_types[0] == "legal_moves"
-    assert task_types[1] == "check_detection"
-    assert task_types[2] == "captures"
-    assert task_types[3] == "special_rules"
-    assert task_types[4] == "legality_check"
+    assert task_types[1] == "side_piece_inventory"
+    assert task_types[2] == "piece_legal_moves"
+    assert task_types[3] == "check_detection"
+    assert task_types[4] == "captures"
 
 
 def test_freeze_split_round_robin_tactics():
@@ -1135,13 +1150,16 @@ def test_partial_refreeze_uses_manifest_seed(tmp_path):
     }
 
     # Full freeze with seed=42
-    freeze_and_save(splits, str(tmp_path), seed=42, version="v1")
+    freeze_and_save(
+        splits, str(tmp_path), seed=42, version="v1", strict_coverage=False,
+    )
     full_rules = load_benchmark(str(tmp_path / "rules.jsonl"))
 
     # Partial refreeze of rules with a DIFFERENT seed arg
     freeze_and_save(
         {"rules": [{"fen": fen}] * 10},
         str(tmp_path), seed=999, version="v2", clean=False,
+        strict_coverage=False,
     )
     partial_rules = load_benchmark(str(tmp_path / "rules.jsonl"))
 

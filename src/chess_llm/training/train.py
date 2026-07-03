@@ -5,6 +5,7 @@ Usage:
     chess-llm-train --phase a                        # Train Phase A
     chess-llm-train --phase b                        # Train Phase B from A checkpoint
     chess-llm-train --phase c                        # Train Phase C from B checkpoint
+    chess-llm-train --phase schedule                 # One long run, time-varying tier mix
     chess-llm-train --phase a --eval-only            # Baseline eval only (no training)
     chess-llm-train --phase a --dry-run              # Print config + data summary, exit
     chess-llm-train --phase a --smoke-run            # Short end-to-end smoke test
@@ -26,9 +27,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chess_llm.training.model_loading import ATTENTION_IMPLEMENTATION_CHOICES
+from chess_llm.training.model_loading import (
+    ATTENTION_IMPLEMENTATION_CHOICES,
+    attention_candidates,
+)
 from chess_llm.training.eval_exit_codes import EVAL_INFRA_FAILURE_EXIT_CODE
 from chess_llm.training.logging_utils import configure_cli_logging
+from chess_llm.training.phase_gate import is_count_metric
 from chess_llm.training.wandb_utils import wandb_config_error
 
 # Default paths (override with CLI args or env vars)
@@ -43,6 +48,7 @@ SMOKE_MAX_TRAIN_EXAMPLES = 128
 SMOKE_MAX_EVAL_EXAMPLES = 64
 SMOKE_MAX_BENCHMARK_EXAMPLES_PER_SPLIT = 32
 SMOKE_MAX_STEPS = 10
+SHORT_RUN_CADENCE_MAX_STEPS = 500
 PACKING_CHOICES = ("auto", "on", "off")
 
 configure_cli_logging()
@@ -67,8 +73,11 @@ class RunOverrides:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chess SFT training harness")
     parser.add_argument(
-        "--phase", required=True, choices=["a", "b", "c"],
-        help="Training phase (a=Foundation, b=Understanding, c=Planning)",
+        "--phase", required=True, choices=["a", "b", "c", "schedule"],
+        help=(
+            "Training phase (a=Foundation, b=Understanding, c=Planning, "
+            "schedule=one long run over all tiers with a time-varying mix)"
+        ),
     )
     parser.add_argument(
         "--data-root", type=Path, default=DEFAULT_DATA_ROOT,
@@ -119,6 +128,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--schedule-total-examples", type=int, default=None,
+        help=(
+            "Total training-example budget for --phase schedule "
+            "(default: sum of tier train pools; further capped by "
+            "--max-train-examples). Ignored for phases a/b/c."
+        ),
+    )
+    parser.add_argument(
         "--max-eval-examples", type=int, default=None,
         help=(
             "Limit trainer eval dataset size after mixing "
@@ -138,7 +155,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-steps", type=int, default=None,
-        help="Override trainer max_steps; also tightens eval/save cadence for short runs",
+        help=(
+            "Override trainer max_steps; runs of <= "
+            f"{SHORT_RUN_CADENCE_MAX_STEPS} steps also tighten eval/save cadence"
+        ),
     )
     parser.add_argument(
         "--num-train-epochs",
@@ -243,6 +263,15 @@ def parse_args() -> argparse.Namespace:
         help="Maximum tokenized sequence length for SFT training examples.",
     )
     parser.add_argument(
+        "--pure-bf16",
+        action="store_true",
+        help=(
+            "Load training weights in the checkpoint dtype (bf16) instead of "
+            "fp32 master weights. Saves memory, but small Adam updates at "
+            "lr<=2e-5 can round to zero without fp32 master weights."
+        ),
+    )
+    parser.add_argument(
         "--eval-batch-size",
         type=int,
         default=16,
@@ -251,8 +280,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
-        default=256,
-        help="Benchmark generation max_new_tokens (default: 256)",
+        default=512,
+        help="Benchmark generation max_new_tokens (default: 512)",
     )
     parser.add_argument(
         "--eval-acpl-depth",
@@ -279,8 +308,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def _register_trl_flash_attention_variant(attn_implementation: str | None) -> None:
-    """Teach TRL about pinned HF kernel names before packing checks run."""
+    """Teach TRL about pinned HF flash-attention kernel names before packing checks run.
+
+    Only genuine FlashAttention backends are registered. Non-flash backends
+    (sdpa/eager) are left unregistered so TRL's packing cross-contamination
+    warning stays loud for them.
+    """
     if not attn_implementation:
+        return
+    from chess_llm.training.training_args import is_flash_attention_implementation
+
+    if not is_flash_attention_implementation(attn_implementation):
         return
     try:
         sft_trainer_module = importlib.import_module("trl.trainer.sft_trainer")
@@ -289,6 +327,16 @@ def _register_trl_flash_attention_variant(attn_implementation: str | None) -> No
     variants = getattr(sft_trainer_module, "FLASH_ATTENTION_VARIANTS", None)
     if isinstance(variants, set):
         variants.add(attn_implementation)
+
+
+def _training_torch_dtype(pure_bf16: bool) -> str:
+    """Weight-load dtype for full fine-tunes.
+
+    Default is fp32 master weights (bf16=True then autocasts compute);
+    loading in bf16 directly makes Adam updates at lr<=2e-5 round to zero.
+    Eval-only paths do not use this — they keep loading with 'auto'.
+    """
+    return "auto" if pure_bf16 else "float32"
 
 
 def _float_metric(value: Any) -> float | None:
@@ -342,7 +390,34 @@ def main() -> int:
     from chess_llm.training.data.mixer import build_phase_dataset, summarize_phase_data
     from chess_llm.training.phases import PHASES, resolve_checkpoint
 
-    phase = PHASES[args.phase]
+    phase = PHASES.get(args.phase)
+    is_schedule = phase is None
+    if is_schedule:
+        from chess_llm.training.schedule import SCHEDULES, validate_schedule
+
+        phase = SCHEDULES[args.phase]
+        validate_schedule(phase)
+        schedule_error = _schedule_mode_config_error(args)
+        if schedule_error is not None:
+            logger.error(schedule_error)
+            return 2
+        if not args.no_wandb and (args.run_name is None or args.wandb_group is None):
+            from datetime import datetime
+
+            default_run_id = f"schedule-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            if args.run_name is None:
+                args.run_name = default_run_id
+            if args.wandb_group is None:
+                args.wandb_group = default_run_id
+            logger.info("Schedule W&B run id: %s", default_run_id)
+
+    # Schedule runs measure against the full benchmark without hard gates.
+    eval_phase = None if is_schedule else phase.name
+    eval_full_benchmark = (
+        True if is_schedule else getattr(args, "full_benchmark_eval", False)
+    )
+    eval_soft_gate = True if is_schedule else not args.require_phase_gate
+
     output_dir = args.output_root / f"phase_{phase.name}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -362,6 +437,8 @@ def main() -> int:
 
     # --- Dry run ---
     if args.dry_run:
+        if is_schedule:
+            return _schedule_dry_run(phase, args, overrides, task_upsample)
         logger.info("--- DRY RUN: data summary ---")
         summary = summarize_phase_data(
             phase,
@@ -415,15 +492,19 @@ def main() -> int:
         logger.info("Epochs: %s", _format_epoch_count(effective_epochs))
         from chess_llm.training.training_args import resolve_packing_settings
 
+        # Resolve the attention backend the same way the real run will
+        # (first load candidate), so the packing report matches training.
+        dry_run_attn = attention_candidates(args.attn_implementation)[0]
         dry_run_packing, dry_run_padding_free = resolve_packing_settings(
-            None if args.attn_implementation == "auto" else args.attn_implementation,
+            dry_run_attn,
             packing=getattr(args, "packing", "auto"),
         )
         logger.info(
-            "Packing: %s (mode=%s, padding_free=%s), max_length: %d",
+            "Packing: %s (mode=%s, padding_free=%s, attn=%s), max_length: %d",
             dry_run_packing,
             getattr(args, "packing", "auto"),
             dry_run_padding_free,
+            dry_run_attn or "<default>",
             getattr(args, "max_length", 2048),
         )
         logger.info("Effective batch size: 32 (4 * 8 accumulation)")
@@ -462,8 +543,8 @@ def main() -> int:
     if not args.eval_only and not args.skip_eval:
         preflight_error = _post_training_eval_preflight_error(
             args.benchmark_dir,
-            phase=phase.name,
-            full_benchmark=getattr(args, "full_benchmark_eval", False),
+            phase=eval_phase,
+            full_benchmark=eval_full_benchmark,
             inference_backend=args.inference_backend,
         )
         if preflight_error is not None:
@@ -475,8 +556,15 @@ def main() -> int:
         # Evaluate this phase's own best/ checkpoint if it exists,
         # otherwise fall back to the starting checkpoint (base model / prev phase).
         best_dir = output_dir / "best"
-        eval_model = str(best_dir) if best_dir.exists() else model_path
-        pred_path = output_dir / "eval_predictions.jsonl"
+        if best_dir.exists():
+            eval_model = str(best_dir)
+            pred_path = output_dir / "eval_predictions.jsonl"
+        else:
+            # Untrained phase: write to a separate artifact so fallback-model
+            # metrics never land in eval_predictions.results.json, which
+            # _find_best_historical_baseline merges as this phase's baseline.
+            eval_model = model_path
+            pred_path = output_dir / "eval_only_predictions.jsonl"
         logger.info("Eval-only model: %s", eval_model)
 
         baseline_path = _find_best_historical_baseline(args.output_root, phase.name)
@@ -484,7 +572,7 @@ def main() -> int:
             eval_model, args.benchmark_dir,
             pred_path,
             baseline_path=baseline_path,
-            phase=phase.name,
+            phase=eval_phase,
             pass_k=8 if phase.name == "c" else 1,
             stockfish_path=args.stockfish_path,
             inference_backend=args.inference_backend,
@@ -494,9 +582,9 @@ def main() -> int:
             eval_acpl_depth=args.eval_acpl_depth,
             no_acpl=args.no_acpl,
             full_acpl_report=args.full_acpl_report,
-            soft_gate=not args.require_phase_gate,
+            soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
-            full_benchmark=getattr(args, "full_benchmark_eval", False),
+            full_benchmark=eval_full_benchmark,
             wandb_project=args.wandb_project,
             wandb_run_name=args.run_name or f"phase-{phase.name}-eval-only",
             wandb_group=args.wandb_group,
@@ -536,12 +624,28 @@ def main() -> int:
 
     # --- Build datasets ---
     logger.info("Building datasets...")
-    train_ds, eval_ds = build_phase_dataset(
-        phase,
-        args.data_root,
-        task_upsample=task_upsample,
-    )
-    train_ds = _limit_dataset(train_ds, overrides.max_train_examples, seed=42)
+    schedule_plans = None
+    schedule_boundaries = None
+    if is_schedule:
+        # The example budget flows into build_schedule_dataset; the train
+        # split must never pass through _limit_dataset, which would shuffle
+        # away the planned segment order.
+        train_ds, eval_ds, schedule_plans, schedule_boundaries = (
+            _build_schedule_training_data(
+                phase,
+                args,
+                overrides,
+                task_upsample,
+                output_dir,
+            )
+        )
+    else:
+        train_ds, eval_ds = build_phase_dataset(
+            phase,
+            args.data_root,
+            task_upsample=task_upsample,
+        )
+        train_ds = _limit_dataset(train_ds, overrides.max_train_examples, seed=42)
     eval_ds = _limit_dataset(eval_ds, overrides.max_eval_examples, seed=42)
     trainer_eval_ds, trainer_eval_enabled = _resolve_trainer_eval_dataset(
         eval_ds,
@@ -561,9 +665,11 @@ def main() -> int:
         tokenizer.pad_token = tokenizer.eos_token
         logger.info("Set pad_token to eos_token: %s", tokenizer.pad_token)
 
+    training_torch_dtype = _training_torch_dtype(getattr(args, "pure_bf16", False))
+    logger.info("Training weight load dtype: %s", training_torch_dtype)
     model_kwargs: dict = {
         "trust_remote_code": True,
-        "torch_dtype": "auto",
+        "torch_dtype": training_torch_dtype,
     }
     from chess_llm.training.model_loading import load_causal_lm_with_attention
 
@@ -600,16 +706,28 @@ def main() -> int:
             and not getattr(args, "disable_liger_fused_linear_ce", False)
         ),
         gradient_checkpointing=getattr(args, "gradient_checkpointing", False),
-        packing=getattr(args, "packing", "auto"),
+        # --packing auto could resolve on under flash attention, which is
+        # incompatible with the sequential schedule order (explicit "on" was
+        # already rejected by the schedule-mode validation).
+        packing="off" if is_schedule else getattr(args, "packing", "auto"),
         max_length=getattr(args, "max_length", 2048),
         max_steps=overrides.max_steps,
         eval_steps=overrides.eval_steps,
         save_steps=overrides.save_steps,
         logging_steps=overrides.logging_steps,
         trainer_eval=trainer_eval_enabled,
-        train_dataset_size=len(train_ds),
         attn_implementation=selected_attn,
+        sequential_dataset=is_schedule,
     )
+    if is_schedule:
+        assert getattr(sft_config, "train_sampling_strategy", None) == "sequential", (
+            "Schedule mode requires SFTConfig.train_sampling_strategy='sequential'; "
+            "the installed TRL dropped or ignored the kwarg."
+        )
+        assert sft_config.shuffle_dataset is False, (
+            "Schedule mode requires SFTConfig.shuffle_dataset=False; "
+            "the installed TRL dropped or ignored the kwarg."
+        )
     try:
         resume_checkpoint = _resolve_resume_checkpoint(
             output_dir,
@@ -626,13 +744,30 @@ def main() -> int:
     from trl import SFTTrainer
 
     _register_trl_flash_attention_variant(selected_attn)
+    mixing_callback = None
+    trainer_callbacks = None
+    if is_schedule:
+        from chess_llm.training.schedule_callback import MixingScheduleCallback
+
+        mixing_callback = MixingScheduleCallback(
+            schedule_plans,
+            schedule_boundaries,
+            # Forcing should_evaluate without an eval dataset would crash the
+            # Trainer mid-run under --skip-trainer-eval.
+            evaluate_at_boundaries=trainer_eval_enabled,
+        )
+        trainer_callbacks = [mixing_callback]
+
     trainer = SFTTrainer(
         model=model,
         args=sft_config,
         train_dataset=train_ds,
         eval_dataset=trainer_eval_ds,
         processing_class=tokenizer,
+        callbacks=trainer_callbacks,
     )
+    if mixing_callback is not None:
+        _promote_callback_to_front(trainer, mixing_callback)
 
     train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
     train_metrics = _augment_train_metrics_with_token_throughput(
@@ -664,7 +799,7 @@ def main() -> int:
         eval_rc = _run_eval(
             str(best_dir), args.benchmark_dir, pred_path,
             baseline_path=baseline_path,
-            phase=phase.name,
+            phase=eval_phase,
             pass_k=8 if phase.name == "c" else 1,
             stockfish_path=args.stockfish_path,
             inference_backend=args.inference_backend,
@@ -674,9 +809,9 @@ def main() -> int:
             eval_acpl_depth=args.eval_acpl_depth,
             no_acpl=args.no_acpl,
             full_acpl_report=args.full_acpl_report,
-            soft_gate=not args.require_phase_gate,
+            soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
-            full_benchmark=getattr(args, "full_benchmark_eval", False),
+            full_benchmark=eval_full_benchmark,
             wandb_project=args.wandb_project,
             wandb_run_name=(args.run_name or f"phase-{phase.name}-train") + "-post-eval",
             wandb_group=args.wandb_group,
@@ -776,7 +911,7 @@ def _resolve_run_overrides(args: argparse.Namespace) -> RunOverrides:
     eval_steps = args.trainer_eval_steps
     save_steps = args.trainer_save_steps
     logging_steps = None
-    if max_steps is not None and max_steps > 0:
+    if max_steps is not None and 0 < max_steps <= SHORT_RUN_CADENCE_MAX_STEPS:
         short_run_interval = max(1, min(50, max_steps // 2))
         if eval_steps is None and not skip_trainer_eval:
             eval_steps = short_run_interval
@@ -972,6 +1107,202 @@ def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:
     return result
 
 
+def _schedule_mode_config_error(args: argparse.Namespace) -> str | None:
+    """Return a clear error for CLI flags that conflict with schedule mode."""
+    if getattr(args, "require_phase_gate", False):
+        return (
+            "--require-phase-gate is not supported with --phase schedule: "
+            "gates are measurements in schedule mode, not hard requirements."
+        )
+    if getattr(args, "packing", "auto") == "on":
+        return (
+            "--packing on is not supported with --phase schedule: packing "
+            "reorders examples and would destroy the tier-mix schedule."
+        )
+    num_train_epochs = getattr(args, "num_train_epochs", None)
+    if num_train_epochs is not None and float(num_train_epochs) != 1.0:
+        return (
+            "--num-train-epochs must be 1 (or omitted) with --phase schedule: "
+            "the schedule is a single pass over the planned example budget."
+        )
+    return None
+
+
+def _resolve_schedule_total_examples(
+    schedule_total_examples: int | None,
+    max_train_examples: int | None,
+) -> int | None:
+    """Cap the schedule example budget; None keeps the full-pool default."""
+    values = [
+        value
+        for value in (schedule_total_examples, max_train_examples)
+        if value is not None
+    ]
+    return min(values) if values else None
+
+
+def _build_schedule_training_data(
+    schedule,
+    args: argparse.Namespace,
+    overrides: RunOverrides,
+    task_upsample: dict[str, int],
+    output_dir: Path,
+):
+    """Build the schedule train/eval datasets and persist the segment plan.
+
+    The example budget (--schedule-total-examples capped by
+    --max-train-examples) flows into ``build_schedule_dataset``; the train
+    split is returned in schedule order and must not be limited or shuffled.
+    """
+    from chess_llm.training.data.mixer import build_schedule_dataset
+    from chess_llm.training.schedule import boundary_steps
+
+    total_examples = _resolve_schedule_total_examples(
+        getattr(args, "schedule_total_examples", None),
+        overrides.max_train_examples,
+    )
+    train_ds, eval_ds, plans = build_schedule_dataset(
+        schedule,
+        args.data_root,
+        task_upsample=task_upsample,
+        total_examples=total_examples,
+    )
+    boundaries = boundary_steps(plans)
+    _write_schedule_plan(
+        output_dir,
+        schedule,
+        plans,
+        boundaries,
+        seed=42,
+        total_examples=len(train_ds),
+    )
+    return train_ds, eval_ds, plans, boundaries
+
+
+def _write_schedule_plan(
+    output_dir: Path,
+    schedule,
+    plans,
+    boundaries,
+    *,
+    seed: int,
+    total_examples: int,
+) -> Path:
+    """Persist the concrete segment plan next to the run's checkpoints."""
+    from chess_llm.training.schedule import DEFAULT_EFFECTIVE_BATCH
+
+    payload = {
+        "schedule": schedule.name,
+        "seed": seed,
+        "total_examples": total_examples,
+        "effective_batch": DEFAULT_EFFECTIVE_BATCH,
+        "boundary_steps": list(boundaries),
+        "segments": [
+            {
+                "index": plan.index,
+                "name": plan.name,
+                "start_row": plan.start_row,
+                "end_row": plan.end_row,
+                "tier_weights": {
+                    str(tier): weight for tier, weight in plan.tier_weights
+                },
+                "tier_rows": {str(tier): rows for tier, rows in plan.tier_rows},
+            }
+            for plan in plans
+        ],
+    }
+    plan_path = output_dir / "schedule_plan.json"
+    plan_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logger.info("Wrote schedule plan: %s", plan_path)
+    return plan_path
+
+
+def _schedule_dry_run(
+    schedule,
+    args: argparse.Namespace,
+    overrides: RunOverrides,
+    task_upsample: dict[str, int],
+) -> int:
+    """Print the schedule data plan, boundaries, and warmup, then exit."""
+    import math
+
+    from chess_llm.training.data.mixer import summarize_schedule_data
+
+    logger.info("--- DRY RUN: schedule data summary ---")
+    total_examples = _resolve_schedule_total_examples(
+        getattr(args, "schedule_total_examples", None),
+        overrides.max_train_examples,
+    )
+    summary = summarize_schedule_data(
+        schedule,
+        args.data_root,
+        task_upsample=task_upsample,
+        total_examples=total_examples,
+    )
+    logger.info("Total example budget: %d", summary["total_examples"])
+    for key, count in sorted(summary["tier_pool_sizes"].items()):
+        logger.info("  pool %-10s %10d", key, count)
+
+    boundaries = summary["boundary_steps"]
+    previous_boundary = 0
+    for segment, boundary in zip(summary["segments"], boundaries):
+        tier_bits = " ".join(
+            f"{key}={count}" for key, count in sorted(segment["tier_rows"].items())
+        )
+        logger.info(
+            "  segment %d %-12s rows %8d..%-8d steps %6d..%-6d %s",
+            segment["index"],
+            segment["name"],
+            segment["start_row"],
+            segment["end_row"],
+            previous_boundary,
+            boundary,
+            tier_bits,
+        )
+        segment_steps = boundary - previous_boundary
+        if segment_steps < 5000:
+            logger.warning(
+                "Segment %s spans only %d optimizer steps (< 5000); "
+                "consider a larger example budget.",
+                segment["name"],
+                segment_steps,
+            )
+        previous_boundary = boundary
+
+    total_steps = boundaries[-1] if boundaries else 0
+    warmup_steps = (
+        max(1, math.ceil(total_steps * schedule.warmup_ratio))
+        if schedule.warmup_ratio > 0 and total_steps > 0
+        else 0
+    )
+    logger.info("Estimated optimizer steps: %d (effective batch 32)", total_steps)
+    logger.info("Warmup steps: %d (ratio %g)", warmup_steps, schedule.warmup_ratio)
+    logger.info("Learning rate: %s", schedule.learning_rate)
+    return 0
+
+
+def _promote_callback_to_front(trainer, callback) -> bool:
+    """Move ``callback`` ahead of the report_to integration callbacks.
+
+    Trainer appends user callbacks after the W&B integration callback, so
+    W&B would consume ``on_log`` before the schedule callback injects its
+    ``schedule/*`` metrics. Repositioning to index 0 keeps the injected keys
+    visible to W&B on the trainer's own step axis (chosen over having the
+    callback call ``wandb.log(commit=False)`` directly).
+    """
+    handler = getattr(trainer, "callback_handler", None)
+    callbacks = getattr(handler, "callbacks", None)
+    if not isinstance(callbacks, list) or callback not in callbacks:
+        logger.warning(
+            "Could not reposition the schedule callback before integration "
+            "callbacks; schedule/* metrics may be missing from W&B."
+        )
+        return False
+    callbacks.remove(callback)
+    callbacks.insert(0, callback)
+    return True
+
+
 def _limit_dataset(ds, max_examples: int | None, *, seed: int = 42):
     """Deterministically cap a dataset after mixing."""
     if max_examples is None or max_examples >= len(ds):
@@ -1093,7 +1424,7 @@ def _find_best_historical_baseline(output_root: Path, current_phase: str) -> Pat
 
     Collects ``eval_predictions.results.json`` from phases that ran
     before ``current_phase`` and merges them by taking the per-metric
-    maximum (minimum for ACPL).
+    maximum (minimum for ACPL and count metrics, which are lower-is-better).
 
     Always rebuilds from individual phase results to avoid including
     metrics from future phases (e.g. Phase C metrics leaking into a
@@ -1104,8 +1435,13 @@ def _find_best_historical_baseline(output_root: Path, current_phase: str) -> Pat
     import json
 
     phase_order = ["a", "b", "c"]
-    cutoff = phase_order.index(current_phase)
-    prior_phases = phase_order[:cutoff]
+    if current_phase == "schedule":
+        # Schedule runs sit outside the a->b->c progression: merge every
+        # completed phase result as an informational best-ever reference.
+        prior_phases = phase_order
+    else:
+        cutoff = phase_order.index(current_phase)
+        prior_phases = phase_order[:cutoff]
 
     if not prior_phases:
         return None
@@ -1130,8 +1466,8 @@ def _find_best_historical_baseline(output_root: Path, current_phase: str) -> Pat
             for metric_name, value in metrics.items():
                 if not isinstance(value, (int, float)):
                     continue
-                if "acpl" in metric_name:
-                    # For ACPL, lower is better — take the min
+                if "acpl" in metric_name or is_count_metric(metric_name):
+                    # For ACPL and count metrics, lower is better — take the min
                     merged[split_name][metric_name] = min(
                         merged[split_name].get(metric_name, float("inf")), value,
                     )
@@ -1253,7 +1589,7 @@ def _run_eval(
     inference_backend: str = "transformers",
     attn_implementation: str = "auto",
     eval_batch_size: int = 16,
-    eval_max_new_tokens: int = 256,
+    eval_max_new_tokens: int = 512,
     eval_acpl_depth: int = 20,
     no_acpl: bool = False,
     full_acpl_report: bool = False,
@@ -1312,7 +1648,7 @@ def _build_eval_cmd(
     inference_backend: str = "transformers",
     attn_implementation: str = "auto",
     eval_batch_size: int = 16,
-    eval_max_new_tokens: int = 256,
+    eval_max_new_tokens: int = 512,
     eval_acpl_depth: int = 20,
     no_acpl: bool = False,
     full_acpl_report: bool = False,

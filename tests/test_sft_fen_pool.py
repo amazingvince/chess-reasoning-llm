@@ -88,6 +88,40 @@ def test_package_fen_pool_keeps_standard_and_chess960_identities_distinct():
         ]
 
 
+def test_package_fen_pool_finds_chess960_tagged_entry_by_bare_standard_fen():
+    from chess_llm.sft.fen_pool import FENPool
+
+    pool = FENPool()
+    pool.add(STARTING_FEN, source="chess960", metadata={"chess960_id": 518})
+
+    assert STARTING_FEN in pool
+    assert pool.get_tags(STARTING_FEN) == {
+        "source": "chess960",
+        "is_chess960": True,
+        "metadata": {"chess960_id": 518},
+    }
+
+    pool.remove(STARTING_FEN)
+
+    assert len(pool) == 0
+    assert STARTING_FEN not in pool
+
+
+def test_package_fen_pool_bare_lookup_prefers_standard_entry_over_chess960():
+    from chess_llm.sft.fen_pool import FENPool
+
+    pool = FENPool()
+    pool.add(STARTING_FEN, source="standard", is_chess960=False)
+    pool.add(STARTING_FEN, source="chess960", metadata={"chess960_id": 518})
+
+    assert pool.get_tags(STARTING_FEN)["source"] == "standard"
+
+    pool.remove(STARTING_FEN)
+
+    assert len(pool) == 1
+    assert pool.get_tags(STARTING_FEN)["source"] == "chess960"
+
+
 def test_package_fen_pool_exports_metadata_only_chess960_start_position():
     from chess_llm.sft.fen_pool import FENPool
 

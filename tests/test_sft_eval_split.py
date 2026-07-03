@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -8,6 +9,15 @@ from chess_llm.core.board import canonical_fen_key, variant_fen_key
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+
+def _game_fens(*ucis: str) -> list[str]:
+    board = chess.Board()
+    fens = [board.fen()]
+    for uci in ucis:
+        board.push_uci(uci)
+        fens.append(board.fen())
+    return fens
 
 
 def _clear_legacy_modules() -> None:
@@ -144,6 +154,114 @@ def test_package_eval_split_keeps_standard_and_chess960_fens_separate():
     ]
 
 
+def test_build_blocklist_blocks_every_pool_position_from_sampled_games():
+    from chess_llm.sft import eval_split
+
+    game_fens = _game_fens("e2e4", "e7e5")
+    other_fen = "k7/8/8/8/8/8/8/K7 w - - 0 1"
+    lone_fen = "7k/8/8/8/8/8/8/K7 w - - 0 1"
+    fen_pool = [
+        {"fen": game_fens[0], "game_id": "aaaa0000bbbb1111"},
+        {"fen": game_fens[1], "game_id": "aaaa0000bbbb1111"},
+        {"fen": game_fens[2], "game_id": "aaaa0000bbbb1111"},
+        {"fen": other_fen, "game_id": "cccc2222dddd3333"},
+        {"fen": lone_fen},
+    ]
+    splits = {"perception": [fen_pool[1]]}
+
+    blocklist = eval_split.build_blocklist(splits, fen_pool)
+
+    for fen in game_fens:
+        assert variant_fen_key(fen) in blocklist
+    assert variant_fen_key(other_fen) not in blocklist
+    assert variant_fen_key(lone_fen) not in blocklist
+
+
+def test_build_blocklist_without_pool_blocks_exact_positions_only():
+    from chess_llm.sft import eval_split
+
+    game_fens = _game_fens("e2e4")
+    splits = {"perception": [{"fen": game_fens[0], "game_id": "aaaa0000bbbb1111"}]}
+
+    blocklist = eval_split.build_blocklist(splits)
+
+    assert blocklist == frozenset({variant_fen_key(game_fens[0])})
+
+
+def test_save_eval_splits_persists_game_neighbors_and_extra_keys(tmp_path):
+    from chess_llm.sft import eval_split
+
+    game_fens = _game_fens("e2e4")
+    fen_pool = [
+        {"fen": game_fens[0], "game_id": "aaaa0000bbbb1111"},
+        {"fen": game_fens[1], "game_id": "aaaa0000bbbb1111"},
+    ]
+    splits = {"perception": [fen_pool[0]]}
+
+    eval_split.save_eval_splits(
+        splits,
+        tmp_path,
+        fen_pool=fen_pool,
+        extra_blocklist_keys={"std:legacy-key"},
+    )
+    loaded = eval_split.load_blocklist(tmp_path / "blocklist.txt")
+
+    assert variant_fen_key(game_fens[0]) in loaded
+    assert variant_fen_key(game_fens[1]) in loaded
+    assert "std:legacy-key" in loaded
+
+
+def test_rules_eval_split_stratifies_check_and_terminal_positions():
+    from chess_llm.sft import eval_split
+
+    board = chess.Board()
+    quiet = []
+    for move in board.legal_moves:
+        board.push(move)
+        quiet.append({"fen": board.fen()})
+        board.pop()
+    check_fen = "rnbqkbnr/ppp1pppp/8/1B1p4/4P3/8/PPPP1PPP/RNBQK1NR b KQkq - 1 2"
+    checkmate_fen = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"
+    stalemate_fen = "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1"
+    sources = {
+        "rules": quiet
+        + [{"fen": check_fen}, {"fen": checkmate_fen}, {"fen": stalemate_fen}]
+    }
+
+    splits = eval_split.generate_all_eval_splits(
+        sources,
+        seed=7,
+        split_sizes={"rules": 10},
+    )
+
+    fens = [row["fen"] for row in splits["rules"]]
+    assert len(fens) == 10
+    assert check_fen in fens
+    assert checkmate_fen in fens
+    assert stalemate_fen in fens
+
+
+def test_rules_eval_split_warns_loudly_when_pool_lacks_terminal_positions(caplog):
+    from chess_llm.sft import eval_split
+
+    board = chess.Board()
+    quiet = []
+    for move in board.legal_moves:
+        board.push(move)
+        quiet.append({"fen": board.fen()})
+        board.pop()
+
+    with caplog.at_level(logging.WARNING, logger="chess_llm.sft.eval_split"):
+        splits = eval_split.generate_all_eval_splits(
+            sources={"rules": quiet},
+            seed=7,
+            split_sizes={"rules": 10},
+        )
+
+    assert len(splits["rules"]) == 10
+    assert "RULES EVAL SPLIT IS UNDER-STRATIFIED" in caplog.text
+
+
 def test_partition_eco_codes_keeps_missing_eco_rows_in_train():
     from chess_llm.sft.eval_split import partition_eco_codes
 
@@ -231,6 +349,61 @@ def test_package_decontamination_does_not_cross_block_chess_variants(tmp_path):
 
     assert audit_output_files(output_dir, blocklist) == {
         str(train_path): [STARTING_FEN]
+    }
+
+
+def test_check_no_contamination_blocks_castleless_positions_across_variants():
+    from chess_llm.sft.decontamination import check_no_contamination
+
+    castleless_fen = "8/8/8/8/8/8/4K3/4k3 w - - 0 1"
+    blocklist = frozenset({variant_fen_key(castleless_fen, chess960=True)})
+
+    assert check_no_contamination(castleless_fen, blocklist, chess960=False) is False
+    assert check_no_contamination(castleless_fen, blocklist, chess960=True) is False
+
+    # Positions with castling rights stay variant-scoped.
+    castling_blocklist = frozenset({variant_fen_key(STARTING_FEN, chess960=True)})
+    assert check_no_contamination(STARTING_FEN, castling_blocklist, chess960=False) is True
+
+
+def test_row_level_contamination_catches_metadata_and_answer_fens(tmp_path):
+    from chess_llm.sft.decontamination import (
+        audit_output_files,
+        check_row_no_contamination,
+    )
+
+    blocked = "8/8/8/8/8/8/4K3/4k3 w - - 0 1"
+    clean = "k7/8/8/8/8/8/8/K7 w - - 0 1"
+    blocklist = frozenset({variant_fen_key(blocked)})
+
+    metadata_row = {"fen": clean, "metadata": {"result_fen": blocked}}
+    answer_row = {
+        "fen": clean,
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": f"FEN: {clean}"},
+            {"role": "assistant", "content": f"Result FEN: {blocked}"},
+        ],
+    }
+    clean_row = {"fen": clean, "metadata": {"result_fen": clean}}
+
+    assert check_row_no_contamination(metadata_row, blocklist) is False
+    assert check_row_no_contamination(answer_row, blocklist) is False
+    assert check_row_no_contamination(clean_row, blocklist) is True
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    train_path = output_dir / "tier.jsonl"
+    train_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (metadata_row, answer_row, clean_row)
+        ),
+        encoding="utf-8",
+    )
+
+    assert audit_output_files(output_dir, blocklist) == {
+        str(train_path): [blocked, blocked]
     }
 
 

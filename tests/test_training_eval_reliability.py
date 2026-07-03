@@ -5,6 +5,8 @@ import logging
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from chess_llm.evals.benchmark import BenchmarkExample
 
 
@@ -188,6 +190,49 @@ def test_qwen_eval_prompt_uses_template_thinking_flag_without_text_directive():
     assert captured["kwargs"]["enable_thinking"] is False
     assert captured["messages"][1]["content"] == _benchmark_example().prompt
     assert "/no_think" not in captured["messages"][1]["content"]
+
+
+def test_eval_prompt_disables_thinking_for_local_checkpoint_tokenizer():
+    from chess_llm.training import evaluate
+
+    captured = {}
+
+    class FakeLocalCheckpointTokenizer:
+        # A local checkpoint directory: no "qwen" anywhere in the path.
+        name_or_path = "/home/amazi/chess_sft_checkpoints/phase_a/best"
+
+        def apply_chat_template(self, messages, **kwargs):
+            captured["kwargs"] = kwargs
+            return "formatted prompt"
+
+    prompt = evaluate.format_prompt(
+        _benchmark_example(), FakeLocalCheckpointTokenizer()
+    )
+
+    assert prompt == "formatted prompt"
+    assert captured["kwargs"]["enable_thinking"] is False
+
+
+def test_eval_prompt_falls_back_when_template_rejects_thinking_flag():
+    from chess_llm.training import evaluate
+
+    calls = []
+
+    class FakeStrictTokenizer:
+        name_or_path = "/checkpoints/phase_a/best"
+
+        def apply_chat_template(
+            self, messages, *, tokenize, add_generation_prompt
+        ):
+            calls.append(
+                {"tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
+            )
+            return "formatted prompt"
+
+    prompt = evaluate.format_prompt(_benchmark_example(), FakeStrictTokenizer())
+
+    assert prompt == "formatted prompt"
+    assert calls == [{"tokenize": False, "add_generation_prompt": True}]
 
 
 def test_vllm_eval_reuses_one_generator_for_pass_k(monkeypatch, tmp_path):
@@ -385,6 +430,90 @@ def test_transformers_pass_k_samples_are_generated_in_one_batched_call(monkeypat
         "planning_00000": ["100", "101", "102"],
         "planning_00001": ["200", "201", "202"],
     }
+
+
+def test_transformers_pass_k_with_greedy_temperature_raises_value_error():
+    from chess_llm.training import evaluate
+
+    class FakeModel:
+        def generate(self, **_kwargs):
+            raise AssertionError("generation must not run for greedy pass@k")
+
+    with pytest.raises(ValueError, match="temperature > 0"):
+        evaluate.generate_predictions_transformers(
+            FakeModel(),
+            object(),
+            [_puzzle_example()],
+            num_samples=3,
+            temperature=0.0,
+        )
+
+
+def test_vllm_pass_k_with_greedy_temperature_raises_value_error(monkeypatch):
+    from chess_llm.training import evaluate
+
+    class FakeTokenizer:
+        name_or_path = "fake-tokenizer"
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeLLM:
+        def __init__(self, **_kwargs):
+            self.generate_calls = []
+
+        def generate(self, prompts, sampling_params):
+            self.generate_calls.append((list(prompts), sampling_params.kwargs))
+            raise AssertionError("generation must not run for greedy pass@k")
+
+    monkeypatch.setattr(evaluate, "format_prompt", lambda ex, _tokenizer: ex.prompt)
+
+    generator = evaluate.VllmPredictionGenerator(
+        "model-id",
+        FakeTokenizer(),
+        llm_cls=FakeLLM,
+        sampling_params_cls=FakeSamplingParams,
+    )
+
+    with pytest.raises(ValueError, match="temperature > 0"):
+        generator.generate(
+            [_puzzle_example()],
+            num_samples=2,
+            temperature=0.0,
+        )
+    assert generator.llm.generate_calls == []
+
+
+def test_run_evaluation_rejects_pass_k_with_zero_temperature_before_model_load(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def fail_model_load(*_args, **_kwargs):
+        raise AssertionError("model must not load for invalid pass@k config")
+
+    monkeypatch.setattr(evaluate, "load_model_and_tokenizer", fail_model_load)
+
+    with pytest.raises(ValueError, match="temperature > 0"):
+        evaluate.run_evaluation(
+            evaluate.EvaluationConfig(
+                model="model-id",
+                benchmark_dir=benchmark_dir,
+                output=tmp_path / "predictions.jsonl",
+                pass_k=3,
+                temperature=0.0,
+                no_acpl=True,
+                no_wandb=True,
+                report_only=True,
+                soft_gate=True,
+            )
+        )
 
 
 def test_merge_predictions_for_save_does_not_mutate_greedy_predictions():
@@ -841,6 +970,91 @@ def test_run_evaluation_returns_structured_result_without_cli_parsing(
     assert eval_run["gate"]["soft_gate"] is True
     assert eval_run["metadata"]["eval_run_path"] == str(result.eval_run_path)
     assert eval_run["metadata"]["prediction_analysis_path"] == str(analysis_path)
+
+
+def test_planning_legal_move_rate_counts_tagless_predictions_as_zero(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+
+    tagless_example = BenchmarkExample(
+        example_id="planning_00002",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={},
+    )
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: ("model", "tokenizer"),
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda _path, **_kwargs: [_benchmark_example(), tagless_example],
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "generate_predictions_transformers",
+        lambda *_args, **_kwargs: {
+            "planning_00000": [
+                "<think>claim the center</think><move>e2e4</move>",
+            ],
+            "planning_00002": ["I do not see a good continuation here."],
+        },
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=tmp_path / "predictions.jsonl",
+            no_acpl=True,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+        )
+    )
+
+    planning = result.split_results["planning"]
+    # The tag-less prediction stays in the denominator as 0.0 instead of
+    # silently inflating the Phase C gate metric.
+    assert planning["legal_move_rate"] == 0.5
+    assert planning["missing_move_tag_count"] == 1.0
+
+
+def test_eval_output_budget_defaults_to_512_tokens(monkeypatch):
+    from chess_llm.training import evaluate
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "chess-llm-evaluate",
+            "--model", "model-id",
+            "--benchmark-dir", "benchmark",
+            "--output", "predictions.jsonl",
+        ],
+    )
+
+    args = evaluate.parse_args()
+
+    assert args.max_new_tokens == 512
+    config = evaluate.EvaluationConfig(
+        model="model-id",
+        benchmark_dir=Path("benchmark"),
+        output=Path("predictions.jsonl"),
+    )
+    assert config.max_new_tokens == 512
 
 
 def test_phase_a_evaluation_loads_only_foundation_splits_by_default(

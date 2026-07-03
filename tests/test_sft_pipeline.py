@@ -603,7 +603,7 @@ def test_run_eval_splits_caps_split_targets_for_volume_smoke_run(
     monkeypatch.setattr(pipeline, "generate_all_eval_splits", fake_generate)
     monkeypatch.setattr(pipeline, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "freeze_and_save", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(pipeline, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     blocklist = pipeline.run_eval_splits(
         {
@@ -650,7 +650,7 @@ def test_run_eval_splits_scopes_strict_coverage_to_selected_tiers(
     monkeypatch.setattr(pipeline, "generate_all_eval_splits", fake_generate)
     monkeypatch.setattr(pipeline, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "freeze_and_save", fake_freeze)
-    monkeypatch.setattr(pipeline, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(pipeline, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     pipeline.run_eval_splits(
         {
@@ -689,7 +689,7 @@ def test_run_eval_splits_rebuilds_existing_blocklist_without_manifest(
     monkeypatch.setattr(pipeline, "generate_all_eval_splits", fake_generate)
     monkeypatch.setattr(pipeline, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "freeze_and_save", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline, "build_blocklist", lambda _splits: frozenset({"new-fen"}))
+    monkeypatch.setattr(pipeline, "build_blocklist", lambda *_args, **_kwargs: frozenset({"new-fen"}))
 
     blocklist = pipeline.run_eval_splits(
         {
@@ -704,7 +704,7 @@ def test_run_eval_splits_rebuilds_existing_blocklist_without_manifest(
         volume_override=20,
     )
 
-    assert blocklist == frozenset({"new-fen"})
+    assert blocklist == frozenset({"new-fen", "std:old-fen"})
     assert captured["split_sizes"] is not None
 
 
@@ -834,7 +834,7 @@ def test_volume_smoke_eval_split_does_not_block_all_tier1_fens(
     monkeypatch.setattr(
         pipeline,
         "save_eval_splits",
-        lambda splits, _path: captured.update(splits=splits),
+        lambda splits, _path, **_kwargs: captured.update(splits=splits),
     )
     monkeypatch.setattr(pipeline, "freeze_and_save", lambda *_args, **_kwargs: None)
 
@@ -859,6 +859,453 @@ def test_volume_smoke_eval_split_does_not_block_all_tier1_fens(
     )
 
     assert len(list(generator.generate())) == 20
+
+
+def _empty_source_fakes(monkeypatch, pipeline, tmp_path: Path) -> None:
+    monkeypatch.setattr(pipeline, "load_puzzles", lambda max_puzzles=None: [])
+    monkeypatch.setattr(pipeline, "load_openings", lambda max_openings=None: [])
+    monkeypatch.setattr(
+        pipeline,
+        "stream_evals",
+        lambda min_depth=None, max_rows=None: [],
+    )
+    monkeypatch.setattr(pipeline, "sample_chess960_positions", lambda **_kwargs: [])
+    monkeypatch.setattr(pipeline, "load_mate", lambda max_rows=None: [])
+    monkeypatch.setattr(pipeline, "POLYGLOT_DIR", str(tmp_path / "missing-books"))
+    monkeypatch.setattr(pipeline, "SYZYGY_PATH", str(tmp_path / "missing-syzygy"))
+
+
+def test_load_sources_threads_game_id_into_fen_pool_entries(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import hashlib
+
+    from chess_llm.sft import pipeline
+
+    movetext = "1. e4 e5"
+    game_id = hashlib.sha256(movetext.encode("utf-8")).hexdigest()[:16]
+    after_e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def fake_extract_game_positions(_game):
+        yield {
+            "fen": STARTING_FEN,
+            "move_played_uci": "e2e4",
+            "game_phase": "opening",
+            "material_balance": 0,
+            "ply": 0,
+            "game_id": game_id,
+        }
+        # Rows without game_id must be tolerated (exact-position fallback).
+        yield {
+            "fen": after_e4_fen,
+            "move_played_uci": "e7e5",
+            "game_phase": "opening",
+            "material_balance": 0,
+            "ply": 1,
+        }
+
+    monkeypatch.setattr(
+        pipeline,
+        "stream_games",
+        lambda **_kwargs: [{"moves": movetext}],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_game_positions",
+        fake_extract_game_positions,
+    )
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+
+    config = pipeline.load_sources(volume_override=2)
+
+    by_fen = {entry["fen"]: entry for entry in config["fen_pool"]}
+    assert by_fen[STARTING_FEN]["game_id"] == game_id
+    assert "game_id" not in by_fen[after_e4_fen]
+
+
+def _write_self_play_run(root: Path, rows: list[dict]) -> None:
+    run_dir = root / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "positions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _self_play_position(fen: str, move_uci: str, ply: int) -> dict:
+    return {
+        "fen": fen,
+        "move_played_uci": move_uci,
+        "game_phase": "opening",
+        "material_balance": 0,
+        "ply": ply,
+        "game_id": "abc123def456abcd",
+        "mover": "model",
+        "model_id": "test-model",
+        "run_id": "run-1",
+    }
+
+
+def test_load_sources_samples_self_play_positions_with_ratio_cap(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+
+    self_play_dir = tmp_path / "self_play"
+    after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    after_e4_e5 = (
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2"
+    )
+    _write_self_play_run(
+        self_play_dir,
+        [
+            _self_play_position(STARTING_FEN, "e2e4", 0),
+            _self_play_position(after_e4, "e7e5", 1),
+            _self_play_position(after_e4_e5, "g1f3", 2),
+        ],
+    )
+
+    def fake_extract_game_positions(_game):
+        for index in range(4):
+            yield {
+                "fen": f"base-fen-{index}",
+                "move_played_uci": "e2e4",
+                "game_phase": "opening",
+                "material_balance": 0,
+                "ply": index,
+            }
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [{"moves": "1. e4"}])
+    monkeypatch.setattr(pipeline, "extract_game_positions", fake_extract_game_positions)
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_DIR", self_play_dir)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_MAX_POSITIONS", 100)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_RATIO", 0.5)
+
+    config = pipeline.load_sources(volume_override=5)
+
+    self_play_entries = [
+        entry
+        for entry in config["fen_pool"]
+        if entry.get("source") == "self_play"
+    ]
+    # cap = min(100, int(0.5 * 4 base FENs)) = 2 of the 3 harvested rows.
+    assert len(self_play_entries) == 2
+    for entry in self_play_entries:
+        assert entry["is_chess960"] is False
+        assert entry["game_phase"] == "opening"
+        assert entry["game_id"] == "abc123def456abcd"
+    harvested_game_positions = [
+        pos for pos in config["game_positions"] if pos.get("mover") == "model"
+    ]
+    assert len(harvested_game_positions) == 2
+
+
+def test_load_sources_respects_self_play_max_positions(monkeypatch, tmp_path: Path):
+    from chess_llm.sft import pipeline
+
+    self_play_dir = tmp_path / "self_play"
+    _write_self_play_run(
+        self_play_dir,
+        [_self_play_position(STARTING_FEN, "e2e4", 0)],
+    )
+
+    def fake_extract_game_positions(_game):
+        for index in range(4):
+            yield {
+                "fen": f"base-fen-{index}",
+                "move_played_uci": "e2e4",
+                "game_phase": "opening",
+                "material_balance": 0,
+                "ply": index,
+            }
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [{"moves": "1. e4"}])
+    monkeypatch.setattr(pipeline, "extract_game_positions", fake_extract_game_positions)
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_DIR", self_play_dir)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_MAX_POSITIONS", 0)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_RATIO", 1.0)
+
+    config = pipeline.load_sources(volume_override=5)
+
+    assert not [
+        entry
+        for entry in config["fen_pool"]
+        if entry.get("source") == "self_play"
+    ]
+
+
+def test_load_sources_ignores_absent_self_play_dir(monkeypatch, tmp_path: Path):
+    from chess_llm.sft import pipeline
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(pipeline, "SELF_PLAY_DIR", tmp_path / "missing-self-play")
+
+    config = pipeline.load_sources(volume_override=2)
+
+    assert not [
+        entry
+        for entry in config["fen_pool"]
+        if entry.get("source") == "self_play"
+    ]
+
+
+def test_load_sources_normalizes_polyglot_weights_per_book(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from contextlib import contextmanager
+
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.sources import polyglot_books
+
+    books_dir = tmp_path / "books"
+    books_dir.mkdir()
+    (books_dir / "small.bin").write_bytes(b"")
+    (books_dir / "large.bin").write_bytes(b"")
+    per_book_moves = {
+        "small.bin": [("e2e4", 3), ("d2d4", 1)],
+        "large.bin": [("d2d4", 60_000), ("e2e4", 40_000)],
+    }
+
+    class FakeReader:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    @contextmanager
+    def fake_load_book(path: str):
+        yield FakeReader(Path(path).name)
+
+    monkeypatch.setattr(polyglot_books, "load_book", fake_load_book)
+    monkeypatch.setattr(
+        polyglot_books,
+        "get_weighted_moves",
+        lambda reader, _board: list(per_book_moves[reader.name]),
+    )
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(
+        pipeline,
+        "load_openings",
+        lambda max_openings=None: [
+            {"fen": STARTING_FEN, "eco": "B00", "name": "Test Opening"}
+        ],
+    )
+    monkeypatch.setattr(pipeline, "POLYGLOT_DIR", str(books_dir))
+
+    config = pipeline.load_sources(volume_override=1)
+
+    merged = dict(config["book_moves"][STARTING_FEN])
+    # Raw summing would rank d2d4 first (60_001 vs 40_003); per-book
+    # normalization ranks by aggregate relative popularity instead.
+    assert merged["e2e4"] == pytest.approx(0.75 + 0.4)
+    assert merged["d2d4"] == pytest.approx(0.25 + 0.6)
+    assert config["book_moves"][STARTING_FEN][0][0] == "e2e4"
+
+
+def test_load_sources_shuffles_depth_ordered_evals(monkeypatch, tmp_path: Path):
+    from chess_llm.sft import pipeline
+
+    rows = [
+        {"fen": f"fen-{index}", "depth": 60 - index, "best_move": "e2e4"}
+        for index in range(30)
+    ]
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(
+        pipeline,
+        "stream_evals",
+        lambda min_depth=None, max_rows=None: list(rows),
+    )
+
+    config = pipeline.load_sources(volume_override=5)
+
+    depth_ordered = [row["fen"] for row in rows]
+    position_order = [row["fen"] for row in config["position_evals"]]
+    best_move_order = [row["fen"] for row in config["best_move_evals"]]
+    assert sorted(position_order) == sorted(depth_ordered)
+    assert position_order != depth_ordered
+    assert sorted(best_move_order) == sorted(depth_ordered)
+    assert best_move_order != depth_ordered
+
+
+def test_task_rng_is_stable_and_order_independent(monkeypatch, tmp_path: Path):
+    from random import Random
+
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.output import PipelineStats
+
+    assert (
+        pipeline._task_rng("1.1_fen_to_board").random()
+        == Random(f"{pipeline.MASTER_SEED}:1.1_fen_to_board").random()
+    )
+    assert (
+        pipeline._task_rng("1.1_fen_to_board").random()
+        != pipeline._task_rng("1.2_board_to_fen").random()
+    )
+
+    def make_generator(task: str):
+        class FakeGenerator:
+            def __init__(self, config=None, blocklist=frozenset(), rng=None):
+                self.config = config or {}
+                self.rng = rng or Random()
+
+            def task_id(self) -> str:
+                return task
+
+            def target_volume(self) -> int:
+                return 2
+
+            def generate(self):
+                for idx in range(2):
+                    row = _valid_example(task, 9, idx)
+                    row["messages"][2]["content"] = f"answer {self.rng.random()}"
+                    row["metadata"] = {"example_identity": f"{task}-{idx}"}
+                    yield row
+
+        return FakeGenerator
+
+    generators = [make_generator("9.6_fake_a"), make_generator("9.7_fake_b")]
+
+    first_root = tmp_path / "first"
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", first_root)
+    monkeypatch.setitem(pipeline.TIER_GENERATORS, 9, generators)
+    pipeline.run_tier(9, {}, frozenset(), PipelineStats())
+    first_b = (first_root / "tier9" / "9.7_fake_b.jsonl").read_text(encoding="utf-8")
+
+    # Resume: task A already complete on disk, so only B regenerates. B's
+    # output must not depend on whether A actually ran in this invocation.
+    second_root = tmp_path / "second"
+    (second_root / "tier9").mkdir(parents=True)
+    (second_root / "tier9" / "9.6_fake_a.jsonl").write_text(
+        (first_root / "tier9" / "9.6_fake_a.jsonl").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", second_root)
+    pipeline.run_tier(9, {}, frozenset(), PipelineStats())
+    second_b = (second_root / "tier9" / "9.7_fake_b.jsonl").read_text(encoding="utf-8")
+
+    assert first_b == second_b
+
+
+def test_run_eval_splits_merges_blocklist_and_keeps_other_benchmark_splits(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.eval_split import load_blocklist
+
+    eval_dir = tmp_path / "eval_splits"
+    bench_dir = tmp_path / "benchmark"
+    monkeypatch.setattr(pipeline, "EVAL_SPLITS_DIR", eval_dir)
+    monkeypatch.setattr(pipeline, "BENCHMARK_DIR", bench_dir)
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path / "output")
+    eval_dir.mkdir(parents=True)
+    bench_dir.mkdir(parents=True)
+
+    old_key = variant_fen_key("8/8/8/8/8/8/4K3/4k3 w - - 0 1")
+    (eval_dir / "blocklist.txt").write_text(old_key + "\n", encoding="utf-8")
+    (bench_dir / "tactics.jsonl").write_text("{}\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_freeze(splits, _output_dir, **kwargs):
+        captured["clean"] = kwargs.get("clean")
+
+    monkeypatch.setattr(pipeline, "freeze_and_save", fake_freeze)
+
+    fen_pool = [
+        {"fen": "k7/8/8/8/8/8/8/K7 w - - 0 1", "is_chess960": False},
+        {"fen": "7k/8/8/8/8/8/8/K7 w - - 0 1", "is_chess960": False},
+        {"fen": "7k/8/8/8/8/8/8/1K6 w - - 0 1", "is_chess960": False},
+        {"fen": "k7/8/8/8/8/8/8/1K6 w - - 0 1", "is_chess960": False},
+    ]
+    blocklist = pipeline.run_eval_splits(
+        {
+            "fen_pool": fen_pool,
+            "openings": [],
+            "position_evals": [],
+            "puzzles": [],
+            "best_move_evals": [],
+            "endgame_positions": [],
+            "mate_rows": [],
+        },
+        volume_override=2,
+        tiers=[1],
+    )
+
+    saved = load_blocklist(eval_dir / "blocklist.txt")
+    assert old_key in saved
+    assert old_key in blocklist
+    assert len(saved) > 1
+    assert captured["clean"] is False
+    assert (bench_dir / "tactics.jsonl").exists()
+
+
+def test_source_fingerprints_cache_skips_reparsing_unchanged_sources(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+
+    rows = [{"fen": STARTING_FEN, "is_chess960": False}]
+    cache_path = tmp_path / "source_fingerprints.cache.json"
+
+    first = pipeline._source_fingerprints({"perception": rows}, cache_path=cache_path)
+    assert cache_path.exists()
+
+    def fail_fingerprint(_rows):
+        raise AssertionError("unchanged sources must reuse the cached fingerprint")
+
+    monkeypatch.setattr(pipeline, "_source_fingerprint", fail_fingerprint)
+    second = pipeline._source_fingerprints({"perception": rows}, cache_path=cache_path)
+    assert second == first
+
+    changed = rows + [{"fen": "8/8/8/8/8/8/4K3/4k3 w - - 0 1", "is_chess960": False}]
+    with pytest.raises(AssertionError):
+        pipeline._source_fingerprints({"perception": changed}, cache_path=cache_path)
+
+
+def test_batch_annotator_cache_lookup_respects_requested_depth(tmp_path: Path):
+    from chess_llm.sft.annotation import BatchAnnotator
+
+    annotator = BatchAnnotator(
+        stockfish=None,
+        cache_path=str(tmp_path / "annotations.sqlite"),
+    )
+    try:
+        annotator.preload_from_evals(
+            iter(
+                [
+                    {
+                        "fen": STARTING_FEN,
+                        "cp": 30,
+                        "mate": None,
+                        "best_move": "e2e4",
+                        "pv_line": "e2e4 e7e5",
+                        "depth": 12,
+                    }
+                ]
+            )
+        )
+
+        assert annotator.annotate(STARTING_FEN, depth=10)["best_move"] == "e2e4"
+        assert annotator.annotate(STARTING_FEN, depth=12)["best_move"] == "e2e4"
+        assert annotator.annotate(STARTING_FEN)["cp"] == 30
+        # A deeper request must not be satisfied by the shallow cached eval.
+        assert annotator.annotate(STARTING_FEN, depth=30) == {
+            "cp": None,
+            "mate": None,
+            "best_move": None,
+            "pv_line": "",
+        }
+    finally:
+        annotator.close()
 
 
 def test_pipeline_writes_source_readiness_report(monkeypatch, tmp_path: Path):

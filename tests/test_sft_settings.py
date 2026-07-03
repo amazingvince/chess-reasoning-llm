@@ -49,7 +49,8 @@ def test_apply_hf_cache_env_sets_default_when_missing(monkeypatch):
     apply_hf_cache_env(settings)
 
     assert os.environ["HF_HOME"] == DEFAULT_HF_CACHE_DIR
-    assert settings.output_dir == Path(DEFAULT_OUTPUT_DIR)
+    assert settings.output_dir.name == DEFAULT_OUTPUT_DIR
+    assert settings.output_dir.is_absolute()
 
 
 def test_default_paths_are_portable_and_not_machine_specific():
@@ -57,7 +58,6 @@ def test_default_paths_are_portable_and_not_machine_specific():
     values = [
         DEFAULT_OUTPUT_DIR,
         DEFAULT_STOCKFISH_PATH,
-        str(settings.output_dir),
         settings.stockfish_path,
         settings.syzygy_path,
         settings.polyglot_dir,
@@ -71,6 +71,25 @@ def test_default_paths_are_portable_and_not_machine_specific():
 
     assert Path(DEFAULT_HF_CACHE_DIR).is_absolute()
     assert "chess_sft_data" not in DEFAULT_HF_CACHE_DIR.replace("\\", "/")
+
+
+def test_default_output_dir_resolves_against_package_project_root():
+    import chess_llm.sft.settings as settings_module
+
+    settings = SftDataSettings.from_env(Path("unrelated-project"), env={})
+
+    expected_root = Path(settings_module.__file__).resolve().parents[3]
+    assert settings.output_dir == expected_root / DEFAULT_OUTPUT_DIR
+    assert settings.pool_dir == expected_root / DEFAULT_OUTPUT_DIR / "pool"
+
+
+def test_output_dir_env_override_is_used_as_given(tmp_path):
+    settings = SftDataSettings.from_env(
+        tmp_path / "project",
+        env={"CHESS_SFT_OUTPUT": str(tmp_path / "data")},
+    )
+
+    assert settings.output_dir == tmp_path / "data"
 
 
 def test_settings_support_explicit_asset_and_cache_overrides(tmp_path):

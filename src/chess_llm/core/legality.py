@@ -83,12 +83,22 @@ def classify_move_legality(
     if piece.color != board.turn:
         return MoveLegalityClassification(normalized_uci, False, "wrong_side_piece")
 
-    if _requires_promotion(piece, move) and move.promotion not in _PROMOTION_PIECES:
+    if (
+        _requires_promotion(piece, move)
+        and move.promotion not in _PROMOTION_PIECES
+        and board.is_pseudo_legal(
+            chess.Move(move.from_square, move.to_square, promotion=chess.QUEEN)
+        )
+    ):
         return MoveLegalityClassification(
             normalized_uci,
             False,
             "missing_or_invalid_promotion",
         )
+
+    castling_reason = _blocked_castling_reason(board, move)
+    if castling_reason is not None:
+        return MoveLegalityClassification(normalized_uci, False, castling_reason)
 
     target_piece = board.piece_at(move.to_square)
     if target_piece is not None and target_piece.color == board.turn:
@@ -112,6 +122,98 @@ def classify_move_legality(
         )
 
     return MoveLegalityClassification(normalized_uci, False, "king_would_be_in_check")
+
+
+_LEGAL_FILTER_TRACE_MAX_PIECES = 12
+_LEGAL_FILTER_TRACE_MAX_PSEUDO_MOVES = 32
+_LEGAL_FILTER_TRACE_MAX_CHARS = 1200
+
+_TRACE_PIECE_NAMES = {
+    chess.PAWN: "pawn",
+    chess.KNIGHT: "knight",
+    chess.BISHOP: "bishop",
+    chess.ROOK: "rook",
+    chess.QUEEN: "queen",
+    chess.KING: "king",
+}
+
+
+def _trace_piece_phrase(piece: chess.Piece) -> str:
+    color = "white" if piece.color == chess.WHITE else "black"
+    return f"{color} {_TRACE_PIECE_NAMES[piece.piece_type]}"
+
+
+def _trace_move_text(moves: list[str]) -> str:
+    return " ".join(moves) if moves else "none"
+
+
+def format_legal_filter_trace_answer(board: chess.Board) -> str | None:
+    """Format the 2.11 per-piece pseudo-legal -> rejected -> legal trace.
+
+    The ``Side to move:``/``Pieces:`` header lines and the final
+    ``All legal moves:`` line are byte-identical to the 2.9 grouped format.
+    Returns ``None`` when the position exceeds the trace caps
+    (>12 side-to-move pieces, >32 pseudo-legal moves, or >1200 characters).
+    """
+    side = "white" if board.turn == chess.WHITE else "black"
+    piece_squares = [
+        square
+        for square in chess.SQUARES
+        if (piece := board.piece_at(square)) is not None and piece.color == board.turn
+    ]
+    if len(piece_squares) > _LEGAL_FILTER_TRACE_MAX_PIECES:
+        return None
+
+    pseudo_by_square: dict[int, list[str]] = {square: [] for square in piece_squares}
+    total_pseudo = 0
+    for move in board.pseudo_legal_moves:
+        pseudo_by_square.setdefault(move.from_square, []).append(move.uci())
+        total_pseudo += 1
+    if total_pseudo > _LEGAL_FILTER_TRACE_MAX_PSEUDO_MOVES:
+        return None
+
+    legal_by_square: dict[int, list[str]] = {square: [] for square in piece_squares}
+    legal_moves: list[str] = []
+    for move in board.legal_moves:
+        legal_by_square.setdefault(move.from_square, []).append(move.uci())
+        legal_moves.append(move.uci())
+
+    pieces: list[str] = []
+    piece_lines: list[str] = []
+    for square in piece_squares:
+        piece = board.piece_at(square)
+        if piece is None:
+            continue
+        square_name = chess.square_name(square)
+        phrase = _trace_piece_phrase(piece)
+        pieces.append(f"{square_name} {phrase}")
+        pseudo = sorted(pseudo_by_square.get(square, []))
+        legal = sorted(legal_by_square.get(square, []))
+        rejected = sorted(set(pseudo) - set(legal))
+        if rejected:
+            rejected_text = "; ".join(
+                f"{move_uci} {classify_move_legality(board, move_uci).reason_label}"
+                for move_uci in rejected
+            )
+        else:
+            rejected_text = "none"
+        piece_lines.append(
+            f"{square_name} {phrase}: pseudo-legal {_trace_move_text(pseudo)} | "
+            f"rejected {rejected_text} | legal {_trace_move_text(legal)}"
+        )
+
+    answer = "\n".join(
+        [
+            f"Side to move: {side}.",
+            f"Pieces: {'; '.join(pieces) if pieces else 'none'}.",
+            "Filter by piece:",
+            *piece_lines,
+            f"All legal moves: {_trace_move_text(sorted(legal_moves))}",
+        ]
+    )
+    if len(answer) > _LEGAL_FILTER_TRACE_MAX_CHARS:
+        return None
+    return answer
 
 
 def random_illegal_move_with_reason(
@@ -206,6 +308,52 @@ def _requires_promotion(piece: chess.Piece, move: chess.Move) -> bool:
     return from_rank == 1 and to_rank == 0
 
 
+def _blocked_castling_reason(board: chess.Board, move: chess.Move) -> str | None:
+    """Return the king-safety label for castling blocked only by king safety.
+
+    Detects castling-shaped king moves that have castling rights and a clear
+    path, so the only rule they break is king safety (castling out of,
+    through, or into check).
+    """
+    if move.promotion is not None or not board.is_castling(move):
+        return None
+    king_sq = move.from_square
+    rank = chess.square_rank(king_sq)
+    kingside = chess.square_file(move.to_square) > chess.square_file(king_sq)
+    king_to = chess.square(6 if kingside else 2, rank)
+    if board.chess960:
+        # Chess960 castling is encoded as king-takes-own-rook.
+        required_rook = move.to_square
+    else:
+        if move.to_square != king_to:
+            return None
+        required_rook = None
+
+    backrank = chess.BB_RANK_1 if board.turn == chess.WHITE else chess.BB_RANK_8
+    rook_sq = None
+    for candidate in chess.SquareSet(board.clean_castling_rights() & backrank):
+        if required_rook is not None and candidate != required_rook:
+            continue
+        if (chess.square_file(candidate) > chess.square_file(king_sq)) == kingside:
+            rook_sq = candidate
+            break
+    if rook_sq is None:
+        return None
+
+    rook_to = chess.square(5 if kingside else 3, rank)
+    path = (
+        chess.SquareSet(chess.between(king_sq, king_to))
+        | chess.SquareSet(chess.between(rook_sq, rook_to))
+        | chess.SquareSet(chess.BB_SQUARES[king_to] | chess.BB_SQUARES[rook_to])
+    )
+    blockers = chess.SquareSet(board.occupied) - chess.SquareSet(
+        chess.BB_SQUARES[king_sq] | chess.BB_SQUARES[rook_sq]
+    )
+    if blockers & path:
+        return None
+    return "king_would_be_in_check"
+
+
 def _candidate_for_reason(
     board: chess.Board,
     reason: str,
@@ -296,13 +444,14 @@ def _missing_promotion_candidates(board: chess.Board, rng: Random):
         if piece is None or piece.color != board.turn or piece.piece_type != chess.PAWN:
             continue
         direction = 8 if piece.color == chess.WHITE else -8
-        forward = from_sq + direction
-        if chess.SQUARES[0] <= forward <= chess.SQUARES[-1]:
-            yield chess.square_name(from_sq) + chess.square_name(forward)
-        for offset in (direction - 1, direction + 1):
+        for offset in (direction, direction - 1, direction + 1):
             target = from_sq + offset
-            if chess.SQUARES[0] <= target <= chess.SQUARES[-1]:
-                yield chess.square_name(from_sq) + chess.square_name(target)
+            if not chess.SQUARES[0] <= target <= chess.SQUARES[-1]:
+                continue
+            queen_form = chess.Move(from_sq, target, promotion=chess.QUEEN)
+            if not board.is_pseudo_legal(queen_form):
+                continue
+            yield chess.square_name(from_sq) + chess.square_name(target)
 
 
 def _pseudo_illegal_candidates(board: chess.Board, rng: Random):
@@ -356,6 +505,7 @@ __all__ = [
     "LEGALITY_REASON_PHRASES",
     "MoveLegalityClassification",
     "classify_move_legality",
+    "format_legal_filter_trace_answer",
     "format_legality_answer",
     "legality_binary_accuracy",
     "legality_reason_accuracy",

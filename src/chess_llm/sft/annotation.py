@@ -117,7 +117,7 @@ class BatchAnnotator:
         Returns ``{cp, mate, best_move, pv_line}``.
         """
         # Check cache
-        cached = self._cache_lookup(fen)
+        cached = self._cache_lookup(fen, depth)
         if cached is not None:
             return cached
 
@@ -141,13 +141,22 @@ class BatchAnnotator:
         for fen in fens:
             yield self.annotate(fen, depth)
 
-    def _cache_lookup(self, fen: str) -> dict | None:
+    def _cache_lookup(self, fen: str, depth: int | None = None) -> dict | None:
         if self._conn is None:
             return None
-        row = self._conn.execute(
-            "SELECT cp, mate, best_move, pv_line FROM annotations WHERE fen = ?",
-            (fen,),
-        ).fetchone()
+        if depth is None:
+            row = self._conn.execute(
+                "SELECT cp, mate, best_move, pv_line FROM annotations WHERE fen = ?",
+                (fen,),
+            ).fetchone()
+        else:
+            # A cached eval only satisfies the request when it was computed
+            # at least as deep as the caller asked for.
+            row = self._conn.execute(
+                "SELECT cp, mate, best_move, pv_line FROM annotations "
+                "WHERE fen = ? AND depth >= ?",
+                (fen, depth),
+            ).fetchone()
         if row is None:
             return None
         return {

@@ -16,14 +16,18 @@ logger = logging.getLogger(__name__)
 _REQUIRED_COLS = ("messages", "task", "tier", "fen")
 _KEEP_COLS = ("messages", "task", "tier", "fen", "is_chess960", "chess960_id")
 
+# Bump whenever sanitization output changes (normalization logic, _KEEP_COLS)
+# so stale caches written by older code are not reused.
+_SANITIZER_VERSION = 2
+
 
 def _sanitized_jsonl_path(jsonl_file: Path, cache_root: Path) -> Path:
-    """Return cache path for a source JSONL, keyed by file identity."""
+    """Return cache path for a source JSONL, keyed by file and sanitizer identity."""
     stat = jsonl_file.stat()
     digest = _file_digest(jsonl_file)
     cache_name = (
-        f"{jsonl_file.stem}.{stat.st_size}.{stat.st_mtime_ns}."
-        f"{digest}.stripped.jsonl"
+        f"{jsonl_file.stem}.v{_SANITIZER_VERSION}.{stat.st_size}."
+        f"{stat.st_mtime_ns}.{digest}.stripped.jsonl"
     )
     return cache_root / cache_name
 
@@ -105,6 +109,7 @@ def load_tier_data(tier: int, data_root: Path) -> Dataset:
 __all__ = [
     "_KEEP_COLS",
     "_REQUIRED_COLS",
+    "_SANITIZER_VERSION",
     "_file_digest",
     "_load_sanitized_jsonl",
     "_sanitized_jsonl_path",

@@ -201,9 +201,9 @@ def test_validate_example_move_legality_correct():
         "messages": [
             {"role": "system", "content": "system"},
             {"role": "user", "content": f"FEN: {STARTING_FEN}\nIs e2e4 legal?"},
-            {"role": "assistant", "content": "Yes, the move is legal."},
+            {"role": "assistant", "content": "Yes, legal. Reason: legal."},
         ],
-        "metadata": {"tested_move": "e2e4"},
+        "metadata": {"tested_move": "e2e4", "legality_reason_label": "legal"},
     }
     passed, errors = validate_example(example)
     assert passed is True, errors

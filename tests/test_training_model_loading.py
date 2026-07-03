@@ -7,9 +7,12 @@ import pytest
 
 
 def test_package_model_loading_import_is_light(monkeypatch):
-    sys.modules.pop("chess_llm.training.model_loading", None)
-    sys.modules.pop("torch", None)
-    sys.modules.pop("transformers", None)
+    # delitem (not pop) so already-imported heavy modules are restored at
+    # teardown — re-importing torch from scratch in-process breaks its C
+    # extension loading on Windows.
+    monkeypatch.delitem(sys.modules, "chess_llm.training.model_loading", raising=False)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.delitem(sys.modules, "transformers", raising=False)
 
     original_import = __import__
 
@@ -394,7 +397,7 @@ def test_legacy_model_loading_reexports_package_objects():
 def test_legacy_model_loading_import_alias_preserves_monkeypatches(monkeypatch):
     legacy_dir = Path(__file__).resolve().parents[1] / "sft" / "training"
     monkeypatch.syspath_prepend(str(legacy_dir))
-    sys.modules.pop("model_loading", None)
+    monkeypatch.delitem(sys.modules, "model_loading", raising=False)
 
     legacy = importlib.import_module("model_loading")
     from chess_llm.training import model_loading as package

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import chess
@@ -238,6 +239,42 @@ def test_batch_judge_raises_for_unknown_example_id(tmp_path):
 
     with pytest.raises(ValueError, match="missing_00000"):
         judge_prediction_file(benchmark_dir, predictions, tmp_path / "artifacts", "model-a")
+
+
+def test_batch_judge_skips_prediction_rows_outside_requested_splits(tmp_path, caplog):
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    _write_jsonl(benchmark_dir / "planning.jsonl", [_benchmark_row()])
+    rules_row = dict(_benchmark_row("rules_00000"))
+    rules_row["split"] = "rules"
+    rules_row["task_type"] = "legal_moves"
+    _write_jsonl(benchmark_dir / "rules.jsonl", [rules_row])
+    predictions = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions,
+        [
+            {"example_id": "rules_00000", "prediction": "a2a3"},
+            {"example_id": "planning_00000", "prediction": "<move>e2e4</move>"},
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chess_llm.evals.batch_judge"):
+        result = judge_prediction_file(
+            benchmark_dir,
+            predictions,
+            tmp_path / "artifacts",
+            "model-a",
+            splits=["planning"],
+        )
+
+    assert result.prompt_count == 1
+    assert result.rollout_count == 1
+    assert result.judgment_count == 1
+    assert result.splits == ["planning"]
+    assert any(
+        "Skipped 1 prediction row(s)" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_batch_judge_cli_writes_expected_files(tmp_path):

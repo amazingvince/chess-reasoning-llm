@@ -130,6 +130,12 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'Answer format: return exactly four lines starting "Inventory:", '
         '"Counts:", "Values:", and "Balance:".'
     ),
+    "1.19_multi_move_state_tracking": (
+        'Answer format: return exactly "Result FEN: <complete six-field FEN>".'
+    ),
+    "multi_state_tracking": (
+        'Answer format: return exactly "Result FEN: <complete six-field FEN>".'
+    ),
     "2.1_legal_move_gen": (
         'Answer format: return exactly two lines: "Side to move: <white|black>." '
         'then "Legal moves: <space-separated UCI moves>".'
@@ -173,6 +179,26 @@ ANSWER_CONTRACTS: dict[str, str] = {
     "legal_moves_by_piece": (
         'Answer format: include "Side to move:", "Pieces:", "Moves by piece:", '
         'one line per side-to-move piece, and "All legal moves:".'
+    ),
+    "2.10_ray_walk": (
+        'Answer format: return a "Piece:" line, one "Ray <direction>:" line '
+        "per ray in the listed order, and a final \"Moves from rays:\" line "
+        'with space-separated UCI moves or "none".'
+    ),
+    "ray_walk": (
+        'Answer format: return a "Piece:" line, one "Ray <direction>:" line '
+        "per ray in the listed order, and a final \"Moves from rays:\" line "
+        'with space-separated UCI moves or "none".'
+    ),
+    "2.11_legal_filter_trace": (
+        'Answer format: include "Side to move:", "Pieces:", "Filter by piece:", '
+        'one line per side-to-move piece with "pseudo-legal ... | rejected ... '
+        '| legal ..." fields, and "All legal moves:".'
+    ),
+    "legal_filter_trace": (
+        'Answer format: include "Side to move:", "Pieces:", "Filter by piece:", '
+        'one line per side-to-move piece with "pseudo-legal ... | rejected ... '
+        '| legal ..." fields, and "All legal moves:".'
     ),
 }
 
@@ -355,12 +381,12 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nSide to move: {side_to_move}\nCastling rights: {castling_rights}\nEn passant: {en_passant_square}\nIs {move} legal?",
     ],
     "2.4_check_detection": [
-        "FEN: {fen}\nIs the king in check?",
+        "FEN: {fen}\nWhat is the check state: check, checkmate, stalemate, or normal?",
         "In this position, is either king in check, checkmate, or stalemate?\nFEN: {fen}",
         "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
         "Given FEN: {fen}\nIs this check, checkmate, stalemate, or a normal position?",
         "Position: {fen}\nWhat is the status of the position?",
-        "FEN: {fen}\nIs the side to move in check?",
+        "FEN: {fen}\nWhat is the check state for the side to move: check, checkmate, stalemate, or normal?",
         "Board:\n{board}\nSide to move: {side_to_move}\nWhat is the status of this position?",
     ],
     "2.5_special_rules": [
@@ -392,6 +418,16 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nGroup all legal moves by side-to-move piece.",
         "Position: {fen}\nList side-to-move pieces and their legal UCI moves, then all legal moves.",
         "Board:\n{board}\nSide to move: {side_to_move}\nReturn legal moves grouped by piece.",
+    ],
+    "2.10_ray_walk": [
+        "FEN: {fen}\nWalk each ray for the slider on {square}: list every square until a blocker, capture, or the board edge, then list the resulting moves.",
+        "Position: {fen}\nTrace the rays of the piece on {square} square by square and say why each ray stops.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nFor the slider on {square}, walk every ray and derive its moves.",
+    ],
+    "2.11_legal_filter_trace": [
+        "FEN: {fen}\nFor every side-to-move piece, list pseudo-legal moves, reject illegal ones with reasons, then give all legal moves.",
+        "Position: {fen}\nFilter each piece's pseudo-legal moves by king safety and combine the survivors into the full legal move list.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nTrace pseudo-legal -> rejected -> legal for each piece, then all legal moves.",
     ],
 
     # ---- Tier 3: Tactics ----
@@ -649,6 +685,10 @@ TEMPLATES: dict[str, list[str]] = {
         "Board:\n{board}\nSide to move: {side_to_move}\nAnalyze the consequences of {move}.",
     ],
 }
+
+# 1.19 reuses the 1.5 prompt surface so the multi-move variant differs only in
+# how many plies are applied, keeping the frozen 1-ply metric comparable.
+TEMPLATES["1.19_multi_move_state_tracking"] = TEMPLATES["1.5_state_tracking"]
 
 
 def select_template(task_id: str, rng: Random) -> str:

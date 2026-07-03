@@ -45,7 +45,10 @@ def generate_tactical_trace(
     elif "discoveredAttack" in themes:
         thoughts.append(f"Moving the {piece_name} from {from_sq} discovers an attack.")
     elif any("mate" in t.lower() for t in themes):
-        thoughts.append(f"This is a mating pattern. The {piece_name} delivers check from {to_sq}.")
+        if board.gives_check(move):
+            thoughts.append(f"This is a mating pattern. The {piece_name} delivers check from {to_sq}.")
+        else:
+            thoughts.append(f"This is a mating pattern. The {piece_name} move to {to_sq} tightens the mating net.")
     else:
         # Generic tactical reasoning
         captured = board.piece_at(move.to_square)

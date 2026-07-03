@@ -24,6 +24,7 @@ class StockfishEngineConfig:
     threads: int = 1
     hash_mb: int = 256
     syzygy_path: str | Path | None = None
+    limit_strength_elo: int | None = None
 
 
 def open_stockfish(
@@ -46,6 +47,7 @@ def open_stockfish(
             threads=config.threads,
             hash_mb=config.hash_mb,
             syzygy_path=config.syzygy_path,
+            limit_strength_elo=config.limit_strength_elo,
         )
     except Exception:
         engine.quit()
@@ -146,17 +148,44 @@ def configure_stockfish_engine(
     threads: int = 1,
     hash_mb: int = 256,
     syzygy_path: str | Path | None = None,
+    limit_strength_elo: int | None = None,
 ) -> None:
-    """Apply common UCI options to a Stockfish-like engine."""
-    options: dict[str, int | str] = {
+    """Apply common UCI options to a Stockfish-like engine.
+
+    ``limit_strength_elo`` enables ``UCI_LimitStrength`` at the requested
+    ``UCI_Elo``, clamped to the engine-reported option range; ``None`` leaves
+    strength limiting untouched.
+    """
+    options: dict[str, bool | int | str] = {
         "Threads": int(threads),
         "Hash": int(hash_mb),
     }
     if syzygy_path is not None:
         options["SyzygyPath"] = str(syzygy_path)
+    if limit_strength_elo is not None:
+        options["UCI_LimitStrength"] = True
+        options["UCI_Elo"] = clamp_uci_elo(engine, int(limit_strength_elo))
     configure = getattr(engine, "configure", None)
     if configure is not None:
         configure(options)
+
+
+def clamp_uci_elo(engine: Any, elo: int) -> int:
+    """Clamp a requested Elo to the engine-reported ``UCI_Elo`` range."""
+    engine_options = getattr(engine, "options", None)
+    option = None
+    if engine_options is not None:
+        try:
+            option = engine_options.get("UCI_Elo")
+        except (AttributeError, TypeError):
+            option = None
+    minimum = getattr(option, "min", None)
+    maximum = getattr(option, "max", None)
+    if minimum is not None:
+        elo = max(int(minimum), elo)
+    if maximum is not None:
+        elo = min(int(maximum), elo)
+    return elo
 
 
 def stockfish_engine_name(engine: Any) -> str | None:

@@ -55,6 +55,39 @@ def test_optional_tier_sources_do_not_make_report_fail():
     ]
 
 
+def test_self_play_count_is_informational_only():
+    report = build_source_readiness_report(
+        {
+            "fen_pool": [
+                {"fen": STANDARD_FEN, "source": "lichess_games"},
+                {"fen": STANDARD_FEN, "source": "self_play", "game_id": "abc"},
+            ],
+        },
+        tiers=[1, 2, 3, 4, 5, 6, 7],
+        strict_eval_splits=True,
+    )
+
+    assert report.counts["fen_pool_self_play"] == 1
+    assert "fen_pool_self_play" not in report.required_sources
+    assert "fen_pool_self_play" not in report.optional_sources
+
+
+def test_absent_self_play_never_appears_as_missing_or_optional_gap():
+    report = build_source_readiness_report(
+        {
+            "fen_pool": [{"fen": STANDARD_FEN, "is_chess960": False}],
+        },
+        tiers=[1, 2, 3, 4, 5, 6, 7],
+        strict_eval_splits=True,
+    )
+
+    assert report.counts["fen_pool_self_play"] == 0
+    issue_keys = {issue.source_key for issue in report.missing_required} | {
+        issue.source_key for issue in report.optional_gaps
+    }
+    assert "fen_pool_self_play" not in issue_keys
+
+
 def test_strict_eval_splits_require_eval_source_families():
     report = build_source_readiness_report(
         {

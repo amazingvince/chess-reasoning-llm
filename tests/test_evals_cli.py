@@ -225,6 +225,162 @@ def test_run_benchmark_cli_writes_prediction_analysis_report(tmp_path):
     assert analysis["tasks"]["board_to_fen"]["failure_count"] == 1
 
 
+def test_load_predictions_returns_normalized_and_raw_maps(tmp_path):
+    from chess_llm.evals.run_benchmark import load_predictions
+
+    path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "example_id": "a",
+                "prediction": "e2e4",
+                "raw_prediction": "<think>center</think><move>e2e4</move>",
+            },
+            {"example_id": "b", "prediction": "d2d4"},
+        ],
+    )
+
+    predictions, raw_predictions = load_predictions(path)
+
+    assert predictions == {"a": "e2e4", "b": "d2d4"}
+    assert raw_predictions == {
+        "a": "<think>center</think><move>e2e4</move>",
+        "b": "d2d4",
+    }
+
+
+def test_run_benchmark_cli_scores_format_compliance_on_raw_prediction(tmp_path, capsys):
+    from chess_llm.evals import run_benchmark
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    save_benchmark(
+        [
+            BenchmarkExample(
+                example_id="planning_00000",
+                split="planning",
+                task_type="best_move",
+                fen=STARTING_FEN,
+                prompt="FEN: ...\nWhat is the best move?",
+                gold_answer="e2e4",
+                metric_type="move_extraction",
+                metadata={},
+            )
+        ],
+        benchmark_dir / "planning.jsonl",
+    )
+    predictions_path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions_path,
+        [
+            {
+                "example_id": "planning_00000",
+                "prediction": "e2e4",
+                "raw_prediction": "<think>center</think>\n<move>e2e4</move>",
+            }
+        ],
+    )
+
+    exit_code = run_benchmark.main(
+        [
+            "--benchmark-dir",
+            str(benchmark_dir),
+            "--predictions",
+            str(predictions_path),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    format_line = next(
+        line for line in out.splitlines() if line.strip().startswith("format_compliance")
+    )
+    assert "100.0%" in format_line
+    best_move_line = next(
+        line for line in out.splitlines() if line.strip().startswith("best_move ")
+    )
+    assert "100.0%" in best_move_line
+
+
+def test_run_benchmark_cli_reports_uncovered_and_partially_covered_splits(tmp_path, capsys):
+    from chess_llm.evals import run_benchmark
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    save_benchmark(
+        [
+            BenchmarkExample(
+                example_id=f"perception_{index:05d}",
+                split="perception",
+                task_type="board_to_fen",
+                fen=STARTING_FEN,
+                prompt="Write the FEN.",
+                gold_answer=STARTING_FEN,
+                metric_type="fen_exact_match",
+                metadata={},
+            )
+            for index in range(2)
+        ],
+        benchmark_dir / "perception.jsonl",
+    )
+    save_benchmark(
+        [
+            BenchmarkExample(
+                example_id="planning_00000",
+                split="planning",
+                task_type="best_move",
+                fen=STARTING_FEN,
+                prompt="FEN: ...\nWhat is the best move?",
+                gold_answer="e2e4",
+                metric_type="move_extraction",
+                metadata={},
+            )
+        ],
+        benchmark_dir / "planning.jsonl",
+    )
+    predictions_path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions_path,
+        [{"example_id": "perception_00000", "prediction": STARTING_FEN}],
+    )
+
+    exit_code = run_benchmark.main(
+        [
+            "--benchmark-dir",
+            str(benchmark_dir),
+            "--predictions",
+            str(predictions_path),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert (
+        "[WARN] split 'planning': 0/1 examples have predictions; "
+        "split is uncovered and excluded from scoring and ACPL"
+    ) in out
+    assert "Planning (1 examples): UNCOVERED (0 predictions)" in out
+    assert "[WARN] split 'perception': MISSING predictions for 1/2 examples" in out
+    assert "coverage" in out
+    assert "1/2" in out
+    assert "best_move" not in out
+
+
+def test_prediction_analysis_result_fen_family_is_not_state_tracking_bleed():
+    from chess_llm.evals.prediction_analysis import (
+        is_prediction_format_bleed,
+        prediction_format_family,
+    )
+
+    family = prediction_format_family(f"Result FEN: {STARTING_FEN}")
+
+    assert family == "result_fen"
+    assert is_prediction_format_bleed("state_tracking", family) is False
+    assert prediction_format_family(STARTING_FEN) == "fen"
+    assert prediction_format_family("b2b4/8/8/8/7k/8/8/K7 w - - 0 1") == "fen"
+
+
 def test_legacy_eval_scripts_delegate_to_package():
     make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
     sys.path.insert(0, str(make_data_root))

@@ -30,9 +30,18 @@ _MOVE_TASK_TYPES = frozenset({"best_move", "puzzle_solve", "endgame_best_move"})
 _ACPL_INVALID_MOVE_PENALTY = 150.0
 
 
-def load_predictions(path: Path) -> dict[str, str | list[str]]:
-    """Load model predictions from JSONL."""
+def load_predictions(
+    path: Path,
+) -> tuple[dict[str, str | list[str]], dict[str, str | list[str]]]:
+    """Load model predictions from JSONL.
+
+    Returns ``(predictions, raw_predictions)``: the normalized ``prediction``
+    field used for answer accuracy, and the ``raw_prediction`` field (falling
+    back to ``prediction``) used for protocol metrics such as format
+    compliance.
+    """
     predictions: dict[str, list[str]] = defaultdict(list)
+    raw_predictions: dict[str, list[str]] = defaultdict(list)
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -40,11 +49,17 @@ def load_predictions(path: Path) -> dict[str, str | list[str]]:
                 continue
             row = json.loads(line)
             predictions[row["example_id"]].append(row["prediction"])
+            raw_predictions[row["example_id"]].append(
+                row.get("raw_prediction", row["prediction"])
+            )
 
-    result: dict[str, str | list[str]] = {}
-    for example_id, values in predictions.items():
-        result[example_id] = values[0] if len(values) == 1 else values
-    return result
+    def _flatten(values: dict[str, list[str]]) -> dict[str, str | list[str]]:
+        return {
+            example_id: entries[0] if len(entries) == 1 else entries
+            for example_id, entries in values.items()
+        }
+
+    return _flatten(predictions), _flatten(raw_predictions)
 
 
 def example_is_chess960(example: BenchmarkExample) -> bool:
@@ -153,6 +168,8 @@ def print_report(
     split_results: dict[str, dict[str, float]],
     split_counts: dict[str, int],
     has_acpl: bool = False,
+    split_coverage: dict[str, tuple[int, int]] | None = None,
+    uncovered_splits: list[str] | None = None,
 ) -> None:
     """Print benchmark evaluation report."""
     print(f"\n=== Benchmark Evaluation ({version}) ===\n")
@@ -160,13 +177,24 @@ def print_report(
         "perception", "rules", "tactics", "evaluation",
         "openings", "endgames", "planning", "chess960", "mate",
     ]
+    uncovered = set(uncovered_splits or [])
 
     for split_name in split_order:
+        if split_name in uncovered:
+            count = split_counts.get(split_name, 0)
+            print(
+                f"{split_name.capitalize()} ({count} examples): "
+                "UNCOVERED (0 predictions) -- excluded from scoring and ACPL\n"
+            )
+            continue
         if split_name not in split_results:
             continue
         metrics = split_results[split_name]
         count = split_counts.get(split_name, 0)
         print(f"{split_name.capitalize()} ({count} examples):")
+        if split_coverage and split_name in split_coverage:
+            covered, total = split_coverage[split_name]
+            print(f"  {'coverage':<35} {covered:>4}/{total}")
         for key, value in sorted(metrics.items()):
             if key in ("overall", "acpl"):
                 continue
@@ -215,10 +243,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest = json.load(fh)
         version = manifest.get("version", "unknown")
 
-    predictions_raw = load_predictions(predictions_path)
+    predictions_raw, raw_predictions_raw = load_predictions(predictions_path)
     flat_predictions = {
         example_id: value if isinstance(value, str) else value[0]
         for example_id, value in predictions_raw.items()
+    }
+    flat_raw_predictions = {
+        example_id: value if isinstance(value, str) else value[0]
+        for example_id, value in raw_predictions_raw.items()
     }
 
     engine = None
@@ -235,6 +267,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     split_results: dict[str, dict[str, float]] = {}
     split_counts: dict[str, int] = {}
+    split_coverage: dict[str, tuple[int, int]] = {}
+    uncovered_splits: list[str] = []
     examples_by_id: dict[str, BenchmarkExample] = {}
     manifest_splits = manifest.get("splits", {})
     score_splits = (
@@ -253,11 +287,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             examples_by_id.update({example.example_id: example for example in examples})
 
+            covered = sum(
+                1 for example in examples if example.example_id in flat_predictions
+            )
+            missing = len(examples) - covered
+            split_coverage[split_name] = (covered, len(examples))
+            if covered == 0:
+                uncovered_splits.append(split_name)
+                split_counts[split_name] = len(examples)
+                print(
+                    f"[WARN] split '{split_name}': 0/{len(examples)} examples have "
+                    "predictions; split is uncovered and excluded from scoring and ACPL"
+                )
+                continue
+            if missing:
+                print(
+                    f"[WARN] split '{split_name}': MISSING predictions for "
+                    f"{missing}/{len(examples)} examples; they score 0"
+                )
+
             acpl_scores = None
             if engine is not None:
                 acpl_scores = compute_acpl(engine, examples, flat_predictions, args.acpl_depth)
 
-            metrics = score_split(examples, flat_predictions, acpl_scores)
+            scoring_predictions = dict(flat_predictions)
+            for example in examples:
+                if example.task_type in ("best_move", "puzzle_solve"):
+                    raw = flat_raw_predictions.get(example.example_id)
+                    if raw is not None:
+                        scoring_predictions[example.example_id] = raw
+            metrics = score_split(examples, scoring_predictions, acpl_scores)
 
             puzzle_examples = [example for example in examples if example.task_type == "puzzle_solve"]
             if puzzle_examples:
@@ -270,27 +329,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                     metrics[f"puzzle_pass_at_{k}"] = hits / len(puzzle_examples)
 
             planning_predictions = [
-                (example, flat_predictions.get(example.example_id, ""))
+                (
+                    example,
+                    flat_raw_predictions.get(
+                        example.example_id,
+                        flat_predictions.get(example.example_id, ""),
+                    ),
+                )
                 for example in examples
                 if example.task_type in ("best_move", "puzzle_solve")
             ]
             if planning_predictions:
                 format_scores = [format_compliance(pred) for _, pred in planning_predictions]
-                legal_scores = [
-                    score
-                    for score in (
-                        legal_move_rate(
-                            pred,
-                            example.fen,
-                            chess960=example_is_chess960(example),
-                        )
-                        for example, pred in planning_predictions
+                raw_legal_scores = [
+                    legal_move_rate(
+                        pred,
+                        example.fen,
+                        chess960=example_is_chess960(example),
                     )
-                    if score is not None
+                    for example, pred in planning_predictions
+                ]
+                # A prediction with no move tag counts as 0.0: a missing move
+                # is not a legal move.
+                legal_scores = [
+                    0.0 if score is None else score for score in raw_legal_scores
                 ]
                 metrics["format_compliance"] = sum(format_scores) / len(format_scores)
-                if legal_scores:
-                    metrics["legal_move_rate"] = sum(legal_scores) / len(legal_scores)
+                metrics["legal_move_rate"] = sum(legal_scores) / len(legal_scores)
+                missing_tags = sum(1 for score in raw_legal_scores if score is None)
+                if missing_tags:
+                    metrics["missing_move_tag_count"] = float(missing_tags)
 
             split_results[split_name] = metrics
             split_counts[split_name] = len(examples)
@@ -298,7 +366,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if engine is not None:
             engine.quit()
 
-    print_report(version, split_results, split_counts, has_acpl)
+    print_report(
+        version,
+        split_results,
+        split_counts,
+        has_acpl,
+        split_coverage=split_coverage,
+        uncovered_splits=uncovered_splits,
+    )
     analysis_path = write_prediction_analysis_report(
         predictions_path,
         examples_by_id=examples_by_id,

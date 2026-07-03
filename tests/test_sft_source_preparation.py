@@ -1,8 +1,12 @@
-from chess_llm.sft.source_preparation import build_eval_split_sources
+from chess_llm.sft.source_preparation import (
+    EVAL_SPLIT_EXCLUDED_SOURCES,
+    build_eval_split_sources,
+)
 
 
 STANDARD_FEN = "8/8/8/8/8/8/4K3/4k3 w - - 0 1"
 CHESS960_FEN = "bqnnrkrb/pppppppp/8/8/8/8/PPPPPPPP/BQNNRKRB w KQkq - 0 1"
+SELF_PLAY_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
 
 def test_build_eval_split_sources_keeps_chess960_out_of_standard_splits():
@@ -50,6 +54,53 @@ def test_build_eval_split_sources_partitions_openings_and_enriches_eval_copy():
     ]
     assert "book_moves" not in opening
     assert prepared.sources["openings"] == prepared.eval_openings
+
+
+def test_build_eval_split_sources_excludes_self_play_rows_from_fen_pools():
+    assert "self_play" in EVAL_SPLIT_EXCLUDED_SOURCES
+    config = {
+        "fen_pool": [
+            {"fen": STANDARD_FEN, "source": "lichess_games"},
+            {"fen": SELF_PLAY_FEN, "source": "self_play", "game_id": "abc"},
+            {"fen": CHESS960_FEN, "source": "self_play", "metadata": {"chess960_id": 3}},
+        ],
+        "openings": [],
+        "position_evals": [],
+    }
+
+    prepared = build_eval_split_sources(config)
+
+    assert prepared.standard_fen_pool == [
+        {"fen": STANDARD_FEN, "source": "lichess_games"}
+    ]
+    assert prepared.sources["perception"] == prepared.standard_fen_pool
+    assert prepared.sources["rules"] == prepared.standard_fen_pool
+    assert prepared.chess960_fen_pool == []
+    assert prepared.sources["chess960"] == []
+
+
+def test_eval_split_manifest_is_stable_when_self_play_rows_appear():
+    from chess_llm.sft import pipeline
+
+    base_pool = [{"fen": STANDARD_FEN, "source": "lichess_games"}]
+    with_self_play = base_pool + [
+        {"fen": SELF_PLAY_FEN, "source": "self_play", "game_id": "abc"}
+    ]
+
+    manifests = []
+    for fen_pool in (base_pool, with_self_play):
+        prepared = build_eval_split_sources(
+            {"fen_pool": list(fen_pool), "openings": [], "position_evals": []}
+        )
+        manifests.append(
+            pipeline.build_eval_split_manifest(
+                prepared,
+                split_sizes={"perception": 1, "rules": 1},
+                volume_override=None,
+            )
+        )
+
+    assert manifests[0] == manifests[1]
 
 
 def test_build_eval_split_sources_filters_evaluation_by_depth():

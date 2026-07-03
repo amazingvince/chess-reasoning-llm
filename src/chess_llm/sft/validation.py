@@ -10,9 +10,11 @@ import chess
 from chess_llm.core.legality import (
     LEGALITY_REASON_LABELS,
     classify_move_legality,
+    format_legal_filter_trace_answer,
     parse_legality_reason_label,
     parse_legality_yes_no_answer,
 )
+from chess_llm.core.rays import SLIDER_RAY_DIRECTIONS, format_ray_walk_answer
 from chess_llm.core.board import is_legal_move, validate_fen as _validate_fen
 from chess_llm.formats import render_ascii_board
 from chess_llm.formats.answers import (
@@ -81,11 +83,14 @@ def _extract_legal_move_answer_moves(content: str) -> list[str]:
             if _is_no_move_answer(moves_text):
                 return []
             return moves_text.split()
+        # Only the final non-empty line may carry the labelled move list;
+        # never scan upward past unlabelled trailing lines to a stale list.
+        break
     return str(content or "").strip().split()
 
 
 _NO_MOVE_ANSWER_RE = re.compile(
-    r"^\s*(?:none|no\s+legal\s+moves?\.?|no\s+moves?\.?)\s*$",
+    r"^\s*(?:none|no\s+legal\s+moves?(?:\s+available)?\.?|no\s+moves?\.?)\s*$",
     re.IGNORECASE,
 )
 
@@ -191,6 +196,42 @@ def _piece_phrase(piece: chess.Piece | None) -> str:
         return "empty"
     color = "white" if piece.color == chess.WHITE else "black"
     return f"{color} {_PIECE_NAMES[piece.piece_type]}"
+
+
+_PIECE_TYPES_BY_NAME = {name: piece_type for piece_type, name in _PIECE_NAMES.items()}
+
+
+def _piece_identification_answer(
+    board: chess.Board,
+    metadata: Mapping,
+) -> str | None:
+    """Derive the 1.3 answer from the FEN and query metadata."""
+    query_kind = str(metadata.get("query_kind", "") or "")
+    square_name = str(metadata.get("square", "") or "")
+    if query_kind == "square_piece" or (not query_kind and square_name):
+        try:
+            square = chess.parse_square(square_name)
+        except ValueError:
+            return None
+        return _piece_phrase(board.piece_at(square))
+    if query_kind == "locate_pieces" or (not query_kind and metadata.get("piece")):
+        color_name = str(metadata.get("color", "") or "")
+        piece_name = str(metadata.get("piece", "") or "")
+        if color_name not in {"white", "black"}:
+            return None
+        piece_type = _PIECE_TYPES_BY_NAME.get(piece_name)
+        if piece_type is None:
+            return None
+        color = chess.WHITE if color_name == "white" else chess.BLACK
+        squares = sorted(
+            chess.square_name(square)
+            for square in chess.SQUARES
+            if (piece := board.piece_at(square)) is not None
+            and piece.color == color
+            and piece.piece_type == piece_type
+        )
+        return " ".join(squares)
+    return None
 
 
 def _side_piece_inventory(board: chess.Board) -> list[dict[str, str]]:
@@ -657,6 +698,47 @@ def _fen_assembly_answer(
     )
 
 
+def _fen_row_application_answer(
+    fen: str,
+    move_uci: str,
+    *,
+    chess960: bool = False,
+) -> tuple[str, str] | None:
+    """Derive the 1.10 answer (rank-row rewrites + result FEN) from the FEN."""
+    try:
+        before = chess.Board(fen, chess960=chess960)
+        move = before.parse_uci(move_uci)
+        after = before.copy(stack=False)
+        after.push(move)
+    except (ValueError, TypeError, AssertionError):
+        return None
+
+    changed_squares = _changed_square_edits(
+        before,
+        after,
+        preferred_order=[move.from_square, move.to_square],
+    )
+    before_rows = before.board_fen().split("/")
+    after_rows = after.board_fen().split("/")
+    affected_ranks: list[int] = []
+    for item in changed_squares:
+        rank = chess.square_rank(chess.parse_square(item["square"]))
+        if rank not in affected_ranks:
+            affected_ranks.append(rank)
+    rewrites = [
+        f"rank {rank + 1} {before_rows[7 - rank]}->{after_rows[7 - rank]}"
+        for rank in affected_ranks
+    ]
+    result_fen = after.fen()
+    answer = "\n".join(
+        [
+            f"Rows: {'; '.join(rewrites)}.",
+            f"Result FEN: {result_fen}",
+        ]
+    )
+    return answer, result_fen
+
+
 def _expected_target_move(metadata: dict) -> str | None:
     for key in (
         "target_move",
@@ -807,6 +889,25 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 "Board-to-FEN answer",
             )
         )
+
+    if task == "1.3_piece_identification" and validate_fen(fen, chess960=is_960):
+        board = chess.Board(fen, chess960=is_960)
+        actual_answer = _piece_identification_answer(board, metadata)
+        if actual_answer is None:
+            errors.append("Missing or invalid metadata for piece identification")
+        else:
+            expected_answer = metadata.get("expected_answer")
+            if expected_answer is not None and str(expected_answer) != actual_answer:
+                errors.append(
+                    "Piece identification expected_answer metadata does not match actual FEN"
+                )
+            errors.extend(
+                _require_exact_assistant_answer(
+                    messages,
+                    actual_answer,
+                    "Piece identification",
+                )
+            )
 
     if task == "1.4_piece_counting":
         expected_answer = metadata.get("expected_answer", "")
@@ -981,25 +1082,57 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
         before_row = metadata.get("before_row", "")
         after_fen = metadata.get("after_fen", "")
         after_row = metadata.get("after_row", "")
+        move = metadata.get("move", "")
         if not expected_answer or not rank or not file_name or not before_row or not after_fen:
             errors.append(
                 "Missing rank/file/before_row/after_fen/expected_answer metadata "
                 "for FEN rank cell edit"
             )
         else:
-            try:
-                rank_int = int(str(rank))
-                actual_answer = _rank_cell_edit_answer(
-                    str(before_row),
-                    rank_int,
-                    str(file_name),
-                    str(after_fen),
-                )
-                actual_after_row = actual_answer.split(" -> ", 1)[1]
-            except (TypeError, ValueError):
-                actual_answer = ""
-                actual_after_row = ""
-                errors.append("Invalid metadata for FEN rank cell edit")
+            actual_answer = ""
+            actual_after_row = ""
+            if move and validate_fen(fen, chess960=is_960):
+                # Derive both rank rows from the move applied to the FEN so
+                # multi-edit ranks (castling, en passant) stay truthful.
+                try:
+                    rank_int = int(str(rank))
+                    board_before = chess.Board(fen, chess960=is_960)
+                    parsed_move = board_before.parse_uci(str(move))
+                    board_after = board_before.copy(stack=False)
+                    board_after.push(parsed_move)
+                    actual_before_row = _fen_rank_row(board_before, rank_int)
+                    actual_after_row = _fen_rank_row(board_after, rank_int)
+                    actual_answer = (
+                        f"rank {rank_int}: {actual_before_row} -> {actual_after_row}"
+                    )
+                    cells = _expand_fen_rank_row(actual_after_row)
+                    file_index = chess.FILE_NAMES.index(str(file_name))
+                    if str(before_row) != actual_before_row:
+                        errors.append(
+                            "FEN rank cell edit before_row metadata does not match actual FEN"
+                        )
+                    if cells[file_index] != str(after_fen):
+                        errors.append(
+                            "FEN rank cell edit after_fen metadata does not match actual FEN"
+                        )
+                except (TypeError, ValueError, AssertionError):
+                    actual_answer = ""
+                    actual_after_row = ""
+                    errors.append("Invalid metadata for FEN rank cell edit")
+            else:
+                try:
+                    rank_int = int(str(rank))
+                    actual_answer = _rank_cell_edit_answer(
+                        str(before_row),
+                        rank_int,
+                        str(file_name),
+                        str(after_fen),
+                    )
+                    actual_after_row = actual_answer.split(" -> ", 1)[1]
+                except (TypeError, ValueError):
+                    actual_answer = ""
+                    actual_after_row = ""
+                    errors.append("Invalid metadata for FEN rank cell edit")
             if actual_after_row and after_row and str(after_row) != actual_after_row:
                 errors.append("FEN rank cell edit after_row metadata does not match edit")
             if actual_answer and str(expected_answer) != actual_answer:
@@ -1143,6 +1276,50 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 )
             )
 
+    if task == "1.10_fen_row_application":
+        expected_answer = metadata.get("expected_answer", "")
+        move = metadata.get("move", "")
+        result_fen = metadata.get("result_fen", "")
+        if not expected_answer or not move or not result_fen:
+            errors.append(
+                "Missing move/result_fen/expected_answer metadata for FEN row application"
+            )
+        elif validate_fen(fen, chess960=is_960) and not validate_move_legal(
+            fen,
+            str(move),
+            chess960=is_960,
+        ):
+            errors.append("FEN row application metadata move is not legal in FEN")
+        elif validate_fen(fen, chess960=is_960):
+            actual = _fen_row_application_answer(fen, str(move), chess960=is_960)
+            if actual is None:
+                errors.append("FEN row application metadata move cannot be applied")
+            else:
+                actual_answer, actual_result_fen = actual
+                if str(result_fen) != actual_result_fen:
+                    errors.append(
+                        "FEN row application result_fen metadata does not match actual FEN"
+                    )
+                if str(expected_answer) != actual_answer:
+                    errors.append(
+                        "FEN row application expected_answer metadata does not match actual FEN"
+                    )
+                errors.extend(
+                    _require_exact_assistant_answer(
+                        messages,
+                        actual_answer,
+                        "FEN row application",
+                    )
+                )
+        else:
+            errors.extend(
+                _require_exact_assistant_answer(
+                    messages,
+                    str(expected_answer),
+                    "FEN row application",
+                )
+            )
+
     if task == "2.1_legal_move_gen" and validate_fen(fen, chess960=is_960):
         for msg in messages:
             if msg["role"] == "assistant" and msg["content"]:
@@ -1218,6 +1395,69 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 )
             )
 
+    if task == "2.10_ray_walk" and validate_fen(fen, chess960=is_960):
+        board = chess.Board(fen, chess960=is_960)
+        source_square = metadata.get("source_square") or metadata.get("square")
+        actual_answer = None
+        if not source_square:
+            errors.append("Missing source_square metadata for ray walk")
+        else:
+            try:
+                square = chess.parse_square(str(source_square))
+            except ValueError:
+                square = None
+                errors.append("Invalid source_square metadata for ray walk")
+            if square is not None:
+                piece = board.piece_at(square)
+                if (
+                    piece is None
+                    or piece.color != board.turn
+                    or piece.piece_type not in SLIDER_RAY_DIRECTIONS
+                ):
+                    errors.append("Ray walk source square is not a side-to-move slider")
+                else:
+                    actual_answer = format_ray_walk_answer(board, square)
+        if actual_answer is not None:
+            expected_answer = metadata.get("expected_answer", "")
+            if not expected_answer:
+                errors.append("Missing expected_answer metadata for ray walk")
+            elif str(expected_answer) != actual_answer:
+                errors.append("Ray walk expected_answer metadata does not match actual FEN")
+            errors.extend(
+                _require_exact_assistant_answer(
+                    messages,
+                    actual_answer,
+                    "Ray walk",
+                )
+            )
+
+    if task == "2.11_legal_filter_trace" and validate_fen(fen, chess960=is_960):
+        board = chess.Board(fen, chess960=is_960)
+        actual_answer = format_legal_filter_trace_answer(board)
+        if actual_answer is None:
+            errors.append("Legal filter trace position exceeds the trace caps")
+        else:
+            expected_answer = metadata.get("expected_answer", "")
+            if not expected_answer:
+                errors.append("Missing expected_answer metadata for legal filter trace")
+            elif str(expected_answer) != actual_answer:
+                errors.append(
+                    "Legal filter trace expected_answer metadata does not match actual FEN"
+                )
+            metadata_moves = metadata.get("legal_moves")
+            actual_moves = _move_text(sorted(move.uci() for move in board.legal_moves))
+            if metadata_moves is not None and str(metadata_moves) != actual_moves:
+                errors.append(
+                    "Legal filter trace legal_moves metadata does not match actual FEN"
+                )
+            errors.extend(
+                _require_exact_assistant_answer(
+                    messages,
+                    actual_answer,
+                    "Legal filter trace",
+                )
+            )
+
     if task == "2.3_move_legality_check" and validate_fen(fen, chess960=is_960):
         tested_move = metadata.get("tested_move", "")
         if not tested_move:
@@ -1283,13 +1523,20 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 )
             )
 
-    if task == "1.5_state_tracking" and validate_fen(fen, chess960=is_960):
+    if task in {
+        "1.5_state_tracking",
+        "1.19_multi_move_state_tracking",
+    } and validate_fen(fen, chess960=is_960):
         result_fen = metadata.get("result_fen", "")
         moves_str = metadata.get("moves", "")
         if not result_fen or not moves_str:
             errors.append("Missing state tracking metadata: result_fen and moves are required")
         else:
-            move_list = moves_str.split()
+            move_list = str(moves_str).split()
+            if task == "1.19_multi_move_state_tracking" and len(move_list) < 2:
+                errors.append(
+                    "Multi-move state tracking requires at least 2 moves"
+                )
             if not validate_state_tracking(
                 fen,
                 move_list,

@@ -9,6 +9,11 @@ from chess_llm.sft.context import raw_is_chess960
 from chess_llm.sft.eval_split import partition_eco_codes
 from chess_llm.sft.settings import DEFAULT_MIN_DEPTH_EVAL_BENCHMARK
 
+# FEN-pool sources that must never seed eval splits.  Self-play positions
+# depend on the current checkpoint, so letting them into eval splits would
+# churn the frozen benchmark (and its manifest) between harvest runs.
+EVAL_SPLIT_EXCLUDED_SOURCES: frozenset[str] = frozenset({"self_play"})
+
 
 @dataclass(frozen=True)
 class EvalSplitSourcePreparation:
@@ -61,7 +66,11 @@ def build_eval_split_sources(
         if row.get("depth", 0) >= min_depth_eval_benchmark
     ]
 
-    fen_pool = config.get("fen_pool", [])
+    fen_pool = [
+        row
+        for row in config.get("fen_pool", [])
+        if not _is_eval_split_excluded(row)
+    ]
     chess960_fen_pool = [row for row in fen_pool if raw_is_chess960(row)]
     if include_chess960_in_standard_splits:
         standard_fen_pool = list(fen_pool)
@@ -116,6 +125,12 @@ def reserve_training_rows_for_volume(
     return adjusted
 
 
+def _is_eval_split_excluded(row: object) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    return row.get("source") in EVAL_SPLIT_EXCLUDED_SOURCES
+
+
 def _reserve_shared_source_budget(
     split_sizes: dict[str, int],
     *,
@@ -133,6 +148,7 @@ def _reserve_shared_source_budget(
 
 
 __all__ = [
+    "EVAL_SPLIT_EXCLUDED_SOURCES",
     "EvalSplitSourcePreparation",
     "build_eval_split_sources",
     "reserve_training_rows_for_volume",

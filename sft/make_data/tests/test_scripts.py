@@ -67,7 +67,7 @@ def test_run_pipeline_eval_splits_filter_chess960_from_standard_sources(
     }
     captured: dict[str, dict] = {}
 
-    def fake_generate(sources):
+    def fake_generate(sources, **_kwargs):
         captured["sources"] = sources
         return {
             "perception": sources["perception"],
@@ -78,13 +78,13 @@ def test_run_pipeline_eval_splits_filter_chess960_from_standard_sources(
     monkeypatch.setattr(run_pipeline, "EVAL_SPLITS_DIR", tmp_path / "splits")
     monkeypatch.setattr(run_pipeline, "BENCHMARK_DIR", tmp_path / "benchmark")
     monkeypatch.setattr(run_pipeline, "generate_all_eval_splits", fake_generate)
-    monkeypatch.setattr(run_pipeline, "save_eval_splits", lambda _splits, _path: None)
+    monkeypatch.setattr(run_pipeline, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         run_pipeline,
         "freeze_and_save",
         lambda *_args, **_kwargs: {"splits": {}},
     )
-    monkeypatch.setattr(run_pipeline, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(run_pipeline, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     run_pipeline.run_eval_splits(config)
 
@@ -110,10 +110,10 @@ def test_run_eval_split_volume_relaxes_freeze_coverage(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         run_eval_split,
         "generate_all_eval_splits",
-        lambda _sources, seed: {"perception": []},
+        lambda _sources, seed, **_kwargs: {"perception": []},
     )
-    monkeypatch.setattr(run_eval_split, "save_eval_splits", lambda _splits, _path: None)
-    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(run_eval_split, "save_eval_splits", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     def fake_freeze(_splits, _output_dir, *, seed, strict_coverage=True):
         strict_values.append(strict_coverage)

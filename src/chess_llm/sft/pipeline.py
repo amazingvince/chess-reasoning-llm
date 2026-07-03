@@ -14,8 +14,11 @@ from typing import Mapping, Sequence
 
 from chess_llm.evals.benchmark import freeze_and_save
 from chess_llm.sft.completeness import audit_output_completeness
-from chess_llm.sft.context import raw_fen_identity_key, raw_is_chess960
-from chess_llm.sft.decontamination import audit_output_files, check_no_contamination
+from chess_llm.sft.context import raw_fen_identity_key
+from chess_llm.sft.decontamination import (
+    audit_output_files,
+    check_row_no_contamination,
+)
 from chess_llm.sft.eval_split import (
     build_blocklist,
     effective_eval_split_sizes,
@@ -46,6 +49,7 @@ from chess_llm.sft.sources import (
     load_mate,
     load_openings,
     load_puzzles,
+    load_self_play_positions,
     sample_chess960_positions,
     stream_evals,
     stream_games,
@@ -78,8 +82,12 @@ MIN_DEPTH_TRAINING = SETTINGS.min_depth_training
 MIN_DEPTH_BESTMOVE = SETTINGS.min_depth_bestmove
 MIN_DEPTH_EVAL_BENCHMARK = SETTINGS.min_depth_eval_benchmark
 EVAL_SPLIT_SIZES = dict(SETTINGS.eval_split_sizes)
+SELF_PLAY_DIR = SETTINGS.self_play_dir
+SELF_PLAY_MAX_POSITIONS = SETTINGS.self_play_max_positions
+SELF_PLAY_RATIO = SETTINGS.self_play_ratio
 VOLUME_LICHESS_GAME_DATA_FILES = tuple(SETTINGS.volume_lichess_game_data_files)
 EVAL_SPLIT_MANIFEST_NAME = "manifest.json"
+EVAL_SPLIT_FINGERPRINT_CACHE_NAME = "source_fingerprints.cache.json"
 
 
 def _load_generator_registry() -> dict[int, list[type]]:
@@ -150,6 +158,8 @@ def load_sources(volume_override: int | None = None) -> dict:
                     "game_phase": pos["game_phase"],
                     "is_chess960": False,
                 }
+                if pos.get("game_id"):
+                    entry["game_id"] = pos["game_id"]
                 fen_pool_entries.append(entry)
                 game_positions.append(pos)
                 if len(fen_pool_entries) >= max_items:
@@ -198,6 +208,11 @@ def load_sources(volume_override: int | None = None) -> dict:
     except Exception as exc:  # pragma: no cover - depends on external datasets
         logger.warning("Lichess evals loading failed: %s", exc)
 
+    # The eval cache streams rows in depth order; shuffle so consumers do not
+    # see a depth-sorted slice (fen_pool_entries gets the same treatment below).
+    rng.shuffle(position_evals)
+    rng.shuffle(best_move_evals)
+
     for ev in position_evals:
         fen_pool_entries.append(
             {
@@ -233,11 +248,58 @@ def load_sources(volume_override: int | None = None) -> dict:
             len(game_positions),
         )
 
+    logger.info("Loading self-play positions...")
+    self_play_positions: list[dict] = []
+    try:
+        self_play_positions = load_self_play_positions(SELF_PLAY_DIR)
+    except Exception as exc:  # pragma: no cover - depends on local harvest runs
+        logger.warning("Self-play position loading failed: %s", exc)
+
+    if self_play_positions:
+        from chess_llm.core.board import is_legal_move
+
+        self_play_cap = min(
+            SELF_PLAY_MAX_POSITIONS,
+            int(SELF_PLAY_RATIO * len(fen_pool_entries)),
+        )
+        if len(self_play_positions) > self_play_cap:
+            self_play_positions = (
+                rng.sample(self_play_positions, self_play_cap)
+                if self_play_cap > 0
+                else []
+            )
+        added_self_play = 0
+        for pos in self_play_positions:
+            if not is_legal_move(pos["fen"], pos["move_played_uci"]):
+                logger.warning(
+                    "Skipping self-play position with illegal move %s in %s",
+                    pos["move_played_uci"],
+                    pos["fen"],
+                )
+                continue
+            fen_pool_entries.append(
+                {
+                    "fen": pos["fen"],
+                    "source": "self_play",
+                    "game_phase": pos["game_phase"],
+                    "is_chess960": False,
+                    "game_id": pos["game_id"],
+                }
+            )
+            game_positions.append(pos)
+            added_self_play += 1
+        logger.info(
+            "Added %d self-play FENs to pool (cap: %d, total: %d)",
+            added_self_play,
+            self_play_cap,
+            len(fen_pool_entries),
+        )
+
     logger.info("Loading Polyglot opening books...")
     import chess
     from chess_llm.sft.sources.polyglot_books import get_weighted_moves, load_book
 
-    book_moves: dict[str, dict[str, int]] = {}
+    book_moves: dict[str, dict[str, float]] = {}
     polyglot_dir = Path(POLYGLOT_DIR)
     if polyglot_dir.exists():
         for bin_file in polyglot_dir.glob("*.bin"):
@@ -248,13 +310,18 @@ def load_sources(volume_override: int | None = None) -> dict:
                         moves = get_weighted_moves(reader, board)
                         if not moves:
                             continue
+                        # Each book uses its own weight scale; normalize per
+                        # position so merged weights reflect relative popularity.
+                        book_total = sum(weight for _, weight in moves)
+                        if book_total <= 0:
+                            continue
                         merged = book_moves.setdefault(opening["fen"], {})
                         for uci, weight in moves:
-                            merged[uci] = merged.get(uci, 0) + weight
+                            merged[uci] = merged.get(uci, 0.0) + weight / book_total
             except Exception as exc:  # pragma: no cover - depends on local book files
                 logger.warning("Polyglot book %s failed: %s", bin_file, exc)
 
-    sorted_book_moves: dict[str, list[tuple[str, int]]] = {}
+    sorted_book_moves: dict[str, list[tuple[str, float]]] = {}
     for fen, move_weights in book_moves.items():
         sorted_book_moves[fen] = sorted(
             move_weights.items(),
@@ -403,6 +470,7 @@ def run_eval_splits(
         split_sizes=split_sizes,
         volume_override=volume_override,
         eval_split_volume=eval_split_volume,
+        fingerprint_cache_path=EVAL_SPLITS_DIR / EVAL_SPLIT_FINGERPRINT_CACHE_NAME,
     )
     if blocklist_path.exists() and eval_split_manifest_matches(
         EVAL_SPLITS_DIR,
@@ -414,6 +482,7 @@ def run_eval_splits(
             logger.info("Benchmark missing; freezing from existing eval splits...")
             _freeze_from_disk(split_names=split_sizes)
         return blocklist
+    existing_blocklist: frozenset[str] = frozenset()
     if blocklist_path.exists():
         if _has_existing_tier_outputs(tiers) and not refresh_eval_splits:
             raise RuntimeError(
@@ -422,8 +491,9 @@ def run_eval_splits(
             )
         logger.info(
             "Existing eval blocklist does not match current generation settings; "
-            "rebuilding eval splits."
+            "rebuilding eval splits (merging with the existing blocklist)."
         )
+        existing_blocklist = load_blocklist(blocklist_path)
 
     logger.info("Generating eval splits...")
     all_evals = config.get("position_evals", [])
@@ -434,16 +504,23 @@ def run_eval_splits(
         MIN_DEPTH_EVAL_BENCHMARK,
     )
 
+    fen_pool = config.get("fen_pool", [])
     splits = generate_all_eval_splits(selected_sources, split_sizes=split_sizes)
-    save_eval_splits(splits, EVAL_SPLITS_DIR)
+    save_eval_splits(
+        splits,
+        EVAL_SPLITS_DIR,
+        fen_pool=fen_pool,
+        extra_blocklist_keys=existing_blocklist,
+    )
     write_eval_split_manifest(expected_manifest, EVAL_SPLITS_DIR)
     freeze_and_save(
         splits,
         BENCHMARK_DIR,
         seed=MASTER_SEED,
+        clean=not _benchmark_has_other_split_files(split_sizes),
         strict_coverage=(volume_override is None and eval_split_volume is None),
     )
-    return build_blocklist(splits)
+    return build_blocklist(splits, fen_pool) | existing_blocklist
 
 
 def build_eval_split_manifest(
@@ -452,24 +529,33 @@ def build_eval_split_manifest(
     split_sizes: dict[str, int],
     volume_override: int | None,
     eval_split_volume: int | None = None,
+    master_seed: int | None = None,
+    min_depth_eval_benchmark: int | None = None,
+    fingerprint_cache_path: str | Path | None = None,
 ) -> dict:
     """Build a deterministic manifest for deciding eval split reuse."""
     return {
         "artifact_type": "sft_eval_split_manifest",
         "schema_version": "1.0",
-        "master_seed": MASTER_SEED,
+        "master_seed": MASTER_SEED if master_seed is None else master_seed,
         "volume_override": volume_override,
         "eval_split_volume": eval_split_volume,
-        "min_depth_eval_benchmark": MIN_DEPTH_EVAL_BENCHMARK,
+        "min_depth_eval_benchmark": (
+            MIN_DEPTH_EVAL_BENCHMARK
+            if min_depth_eval_benchmark is None
+            else min_depth_eval_benchmark
+        ),
         "split_sizes": dict(sorted(split_sizes.items())),
         "source_counts": {
             name: len(rows)
             for name, rows in sorted(prepared_sources.sources.items())
         },
-        "source_fingerprints": {
-            name: _source_fingerprint(rows)
-            for name, rows in sorted(prepared_sources.sources.items())
-        },
+        "source_fingerprints": _source_fingerprints(
+            prepared_sources.sources,
+            cache_path=(
+                Path(fingerprint_cache_path) if fingerprint_cache_path else None
+            ),
+        ),
     }
 
 
@@ -502,6 +588,93 @@ def _source_fingerprint(rows: list[dict]) -> str:
         digest.update(raw_fen_identity_key(row).encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _source_fingerprint_cache_key(rows: list[dict]) -> str:
+    """Cheap content hash over the raw fields _source_fingerprint depends on."""
+    digest = hashlib.sha256()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            digest.update(str(row).encode("utf-8"))
+            digest.update(b"\n")
+            continue
+        digest.update(str(row.get("fen", "")).encode("utf-8"))
+        digest.update(b"|1" if row.get("is_chess960") else b"|0")
+        chess960_id = row.get("chess960_id")
+        metadata = row.get("metadata")
+        if isinstance(metadata, Mapping):
+            if chess960_id is None:
+                chess960_id = metadata.get("chess960_id")
+            if metadata.get("is_chess960"):
+                digest.update(b"|m")
+        digest.update(str(chess960_id).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _load_fingerprint_cache(cache_path: Path) -> dict:
+    try:
+        with cache_path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("sources") if isinstance(payload, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _source_fingerprints(
+    sources: Mapping[str, list[dict]],
+    *,
+    cache_path: Path | None = None,
+) -> dict[str, str]:
+    """Fingerprint sources, reusing cached digests for unchanged row sets.
+
+    ``_source_fingerprint`` parses every row with python-chess, which is slow
+    at scale; the sidecar cache keyed on a cheap raw-content hash lets repeat
+    invocations with unchanged sources skip the re-parse entirely.
+    """
+    cached = _load_fingerprint_cache(cache_path) if cache_path else {}
+    fingerprints: dict[str, str] = {}
+    updated: dict[str, dict[str, str]] = {}
+    for name, rows in sorted(sources.items()):
+        cache_key = _source_fingerprint_cache_key(rows)
+        entry = cached.get(name)
+        if (
+            isinstance(entry, Mapping)
+            and entry.get("cache_key") == cache_key
+            and entry.get("fingerprint")
+        ):
+            fingerprints[name] = str(entry["fingerprint"])
+        else:
+            fingerprints[name] = _source_fingerprint(rows)
+        updated[name] = {"cache_key": cache_key, "fingerprint": fingerprints[name]}
+    if cache_path is not None and updated != cached:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with cache_path.open("w", encoding="utf-8", newline="\n") as fh:
+                json.dump(
+                    {
+                        "artifact_type": "sft_source_fingerprint_cache",
+                        "schema_version": "1.0",
+                        "sources": updated,
+                    },
+                    fh,
+                    indent=2,
+                    sort_keys=True,
+                )
+                fh.write("\n")
+        except OSError:  # pragma: no cover - depends on filesystem state
+            logger.warning("Could not write fingerprint cache to %s", cache_path)
+    return fingerprints
+
+
+def _benchmark_has_other_split_files(split_names: Sequence[str]) -> bool:
+    """Return True when the benchmark dir holds splits outside *split_names*."""
+    benchmark_dir = Path(BENCHMARK_DIR)
+    if not benchmark_dir.exists():
+        return False
+    keep = {f"{split_name}.jsonl" for split_name in split_names}
+    return any(path.name not in keep for path in benchmark_dir.glob("*.jsonl"))
 
 
 def _freeze_from_disk(*, split_names: Sequence[str] | None = None) -> None:
@@ -554,13 +727,8 @@ def _scan_task_output(
             passed, _ = validate_example(obj)
             if obj.get("task") != task_id:
                 passed = False
-            fen = obj.get("fen", "")
-            if passed and blocklist is not None and fen:
-                passed = check_no_contamination(
-                    fen,
-                    blocklist,
-                    chess960=raw_is_chess960(obj),
-                )
+            if passed and blocklist is not None:
+                passed = check_row_no_contamination(obj, blocklist)
             if not passed:
                 errors += 1
             if stats is not None:
@@ -610,13 +778,8 @@ def _scan_task_output_identities(
             passed, _ = validate_example(obj)
             if obj.get("task") != task_id:
                 passed = False
-            fen = obj.get("fen", "")
-            if passed and blocklist is not None and fen:
-                passed = check_no_contamination(
-                    fen,
-                    blocklist,
-                    chess960=raw_is_chess960(obj),
-                )
+            if passed and blocklist is not None:
+                passed = check_row_no_contamination(obj, blocklist)
             if not passed:
                 errors += 1
                 continue
@@ -698,7 +861,7 @@ def _extend_task_output(
     candidate_config = dict(gen_config)
     if candidate_config.get("volume_override") is not None:
         candidate_config["volume_override"] = target + existing_count
-    gen = gen_cls(config=candidate_config, blocklist=blocklist, rng=Random(MASTER_SEED + int(task_id.split(".", 1)[0])))
+    gen = gen_cls(config=candidate_config, blocklist=blocklist, rng=_task_rng(task_id))
     tmp_path = output_path.with_name(output_path.name + ".tmp")
     appended = 0
     skipped_duplicate = 0
@@ -725,13 +888,8 @@ def _extend_task_output(
                 passed, _ = validate_example(example)
                 if example.get("task") != task_id:
                     passed = False
-                fen = example.get("fen", "")
-                if passed and fen:
-                    passed = check_no_contamination(
-                        fen,
-                        blocklist,
-                        chess960=raw_is_chess960(example),
-                    )
+                if passed:
+                    passed = check_row_no_contamination(example, blocklist)
                 if not passed:
                     errors += 1
                     continue
@@ -751,6 +909,11 @@ def _extend_task_output(
         if tmp_path.exists():
             tmp_path.unlink()
         raise
+
+
+def _task_rng(task_id: str) -> Random:
+    """Return a per-task RNG that is stable regardless of task run order."""
+    return Random(f"{MASTER_SEED}:{task_id}")
 
 
 def _assert_task_complete(task_id: str, count: int, errors: int, target: int) -> None:
@@ -774,7 +937,6 @@ def run_tier(
         logger.warning("No generators for tier %d", tier)
         return
 
-    rng = Random(MASTER_SEED + tier)
     tier_dir = TIER_OUTPUT_DIR / f"tier{tier}"
     tier_dir.mkdir(parents=True, exist_ok=True)
 
@@ -784,8 +946,10 @@ def run_tier(
     source_fingerprint = _generation_source_fingerprint(gen_config)
 
     for gen_cls in generators:
-        gen = gen_cls(config=gen_config, blocklist=blocklist, rng=rng)
-        task_id = gen.task_id()
+        task_id = gen_cls(config=gen_config, blocklist=blocklist).task_id()
+        # A per-task RNG keeps generated data independent of which sibling
+        # tasks were skipped or resumed in this invocation.
+        gen = gen_cls(config=gen_config, blocklist=blocklist, rng=_task_rng(task_id))
         target = gen.target_volume()
         output_path = tier_dir / f"{task_id}.jsonl"
 

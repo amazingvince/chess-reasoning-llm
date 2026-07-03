@@ -122,8 +122,27 @@ def test_package_freeze_uses_explicit_no_legal_moves_for_stalemate():
 
     assert len(examples) == 1
     assert examples[0].task_type == "legal_moves"
-    assert examples[0].gold_answer == "Side to move: black.\nLegal moves: No legal moves available."
+    assert examples[0].gold_answer == "Side to move: black.\nLegal moves: none"
     assert packaged.validate_oracle(examples) == []
+
+
+def test_package_terminal_legal_moves_scoring_accepts_none_and_legacy_phrasing():
+    rng = Random(42)
+    gold = packaged.derive_gold_answer("legal_moves", {"fen": STALEMATE_FEN}, rng)
+
+    assert gold == "Side to move: black.\nLegal moves: none"
+
+    example = _example(
+        task_type="legal_moves",
+        gold_answer=gold,
+        metric_type="uci_set_jaccard",
+    )
+    assert packaged.score_prediction(
+        example, "Side to move: black.\nLegal moves: none"
+    )["primary"] == 1.0
+    assert packaged.score_prediction(example, "No legal moves available.")["primary"] == 1.0
+    assert packaged.score_prediction(example, "Legal moves: e7e5")["primary"] == 0.0
+    assert packaged.score_prediction(example, "")["primary"] == 0.0
 
 
 def test_package_board_to_fen_prompt_includes_full_fen_state():
@@ -261,6 +280,38 @@ def test_package_state_tracking_benchmark_uses_one_ply_by_default():
     moves, _result_fen = packaged._derive_state_tracking(STARTING_FEN, Random(1))
 
     assert len(moves.split()) == 1
+
+
+def test_package_state_tracking_skips_terminal_positions():
+    rng = Random(42)
+
+    assert packaged._derive_state_tracking(STALEMATE_FEN, rng) == ("", "")
+    assert packaged.derive_gold_answer("state_tracking", {"fen": STALEMATE_FEN}, rng) == ""
+
+
+def test_package_freeze_resamples_terminal_positions_away_from_state_tracking():
+    examples = packaged.freeze_split(
+        "perception",
+        [{"fen": STALEMATE_FEN} for _ in range(14)],
+        seed=42,
+    )
+
+    assert examples
+    assert all(example.task_type != "state_tracking" for example in examples)
+    assert all("After the moves ," not in example.prompt for example in examples)
+
+
+def test_package_state_tracking_gold_fen_is_canonical():
+    gold = packaged.derive_gold_answer(
+        "state_tracking",
+        {"fen": "4k3/8/8/8/8/8/4P3/4K3 w - -"},
+        Random(42),
+    )
+
+    assert gold.startswith("Result FEN: ")
+    result_fen = gold[len("Result FEN: "):]
+    assert len(result_fen.split()) == 6
+    assert chess.Board(result_fen).fen() == result_fen
 
 
 def test_package_board_to_fen_gold_canonicalizes_to_complete_fen():
@@ -750,6 +801,31 @@ def test_package_uci_set_jaccard_parses_prose_and_punctuation():
     assert scores["primary"] == 1.0
 
 
+def test_package_uci_set_jaccard_ignores_fen_rows_that_look_like_uci():
+    fen_with_uci_like_row = "b2b4/8/8/8/7k/8/8/K7 w - - 0 1"
+    example = _example(
+        task_type="legal_moves",
+        gold_answer="d2d4 e2e4",
+        metric_type="uci_set_jaccard",
+    )
+
+    scores = packaged.score_prediction(
+        example,
+        f"FEN: {fen_with_uci_like_row}\nLegal moves: e2e4 d2d4",
+    )
+
+    assert scores["primary"] == 1.0
+
+
+def test_package_extract_move_strips_fen_strings_before_prose_fallback():
+    fen_with_uci_like_row = "b2b4/8/8/8/7k/8/8/K7 w - - 0 1"
+
+    assert packaged.extract_move(
+        f"The position is {fen_with_uci_like_row} and I recommend g1f3"
+    ) == "g1f3"
+    assert packaged.extract_move(fen_with_uci_like_row) is None
+
+
 def test_package_uci_set_jaccard_accepts_no_move_variants():
     example = _example(
         task_type="captures",
@@ -784,6 +860,19 @@ def test_package_check_state_metric_accepts_semantic_labels():
     assert packaged.score_prediction(example, "Normal")["primary"] == 1.0
     assert packaged.score_prediction(example, "none")["primary"] == 1.0
     assert packaged.score_prediction(example, "Check.")["primary"] == 0.0
+
+
+def test_package_check_state_handles_negated_checkmate_mentions():
+    gold_check = "Check."
+    gold_normal = "Normal position -- no check, checkmate, or stalemate."
+    gold_stalemate = "Stalemate."
+    negated_mate_prediction = "no checkmate here, but the king is in check"
+
+    assert packaged.check_state_accuracy(negated_mate_prediction, gold_check) == 1.0
+    assert packaged.check_state_accuracy(negated_mate_prediction, gold_normal) == 0.0
+    assert packaged.check_state_accuracy("no check", gold_normal) == 1.0
+    assert packaged.check_state_accuracy("stalemate, not checkmate", gold_stalemate) == 1.0
+    assert packaged.check_state_accuracy("stalemate, not checkmate", "Checkmate.") == 0.0
 
 
 def test_package_check_detection_exact_metric_uses_semantic_labels_for_legacy_benchmarks():
@@ -1115,6 +1204,281 @@ def test_package_binary_choice_rejects_prompt_echo_without_choice():
 def test_package_eval_bucket_requires_correct_side():
     assert packaged.eval_bucket_accuracy("Black has a slight edge.", "White has a slight edge.") == 0.0
     assert packaged.eval_bucket_accuracy("White has a slight edge.", "White has a slight edge.") == 1.0
+
+
+def test_package_cp_bucket_gold_uses_grammatical_side_attributed_text():
+    rng = Random(42)
+    raw = {"fen": STARTING_FEN}
+
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": 0}, rng) == (
+        "The position is equal."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": -30}, rng) == (
+        "The position is equal."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": 49}, rng) == (
+        "The position is equal."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": 100}, rng) == (
+        "White has a slight edge."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": -200}, rng) == (
+        "Black has a clear advantage."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": 400}, rng) == (
+        "White is winning."
+    )
+    assert packaged.derive_gold_answer("eval_bucket", {**raw, "cp": -700}, rng) == (
+        "Black has a decisive advantage."
+    )
+
+
+def test_package_cp_bucket_clamps_out_of_range_cp_to_last_bucket():
+    rng = Random(42)
+
+    assert packaged.derive_gold_answer(
+        "eval_bucket", {"fen": STARTING_FEN, "cp": 250_000}, rng
+    ) == "White has a decisive advantage."
+    assert packaged.derive_gold_answer(
+        "eval_bucket", {"fen": STARTING_FEN, "cp": -250_000}, rng
+    ) == "Black has a decisive advantage."
+
+
+def test_package_eval_bucket_gold_answers_self_score_as_oracle():
+    rng = Random(42)
+    examples = []
+    for index, cp in enumerate((0, 100, -200, 400, -700, 250_000)):
+        gold = packaged.derive_gold_answer("eval_bucket", {"fen": STARTING_FEN, "cp": cp}, rng)
+        examples.append(
+            _example(
+                example_id=f"evaluation_{index:05d}",
+                task_type="eval_bucket",
+                gold_answer=gold,
+                metric_type="eval_bucket",
+            )
+        )
+
+    assert packaged.validate_oracle(examples) == []
+
+
+def test_package_eval_bucket_scoring_ignores_side_for_equal_only():
+    gold_equal = "The position is equal."
+
+    assert packaged.eval_bucket_accuracy("The position is equal.", gold_equal) == 1.0
+    assert packaged.eval_bucket_accuracy("White has an equal position.", gold_equal) == 1.0
+    assert packaged.eval_bucket_accuracy("White is winning.", "White is winning.") == 1.0
+    assert packaged.eval_bucket_accuracy("Black is winning.", "White is winning.") == 0.0
+    assert packaged.eval_bucket_accuracy("White has a clear advantage.", "White is winning.") == 0.0
+    assert packaged.eval_bucket_accuracy(
+        "Black has a decisive advantage.", "Black has a decisive advantage."
+    ) == 1.0
+
+
+PINNED_ROOK_FEN = "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1"
+
+
+def test_package_new_diagnostic_task_gold_answers_self_score_primary():
+    rng = Random(42)
+    cases = [
+        ("ray_walk", {"fen": PINNED_ROOK_FEN}),
+        ("legal_filter_trace", {"fen": PINNED_ROOK_FEN}),
+        ("multi_state_tracking", {"fen": STARTING_FEN}),
+    ]
+
+    for task_type, raw in cases:
+        gold = packaged.derive_gold_answer(task_type, raw, rng)
+        assert gold, task_type
+        example = _example(
+            task_type=task_type,
+            gold_answer=gold,
+            metric_type=packaged.TASK_METRIC_TYPE[task_type],
+        )
+        assert packaged.score_prediction(example, gold)["primary"] == 1.0, task_type
+
+
+def test_package_multi_state_tracking_benchmark_uses_two_to_three_plies():
+    moves, result_fen = packaged._derive_multi_state_tracking(STARTING_FEN, Random(1))
+
+    assert len(moves.split()) in (2, 3)
+    assert result_fen
+    assert chess.Board(result_fen).fen() == result_fen
+    # Positions where fewer than 2 plies are playable are rejected.
+    assert packaged._derive_multi_state_tracking(STALEMATE_FEN, Random(1)) == ("", "")
+    assert packaged.derive_gold_answer(
+        "multi_state_tracking", {"fen": STALEMATE_FEN}, Random(1)
+    ) == ""
+
+
+def test_package_freeze_includes_new_diagnostic_tasks_with_filled_metadata():
+    rules_examples = packaged.freeze_split(
+        "rules",
+        [{"fen": PINNED_ROOK_FEN} for _ in range(13)],
+        seed=42,
+    )
+    by_task = {example.task_type: example for example in rules_examples}
+
+    ray = by_task["ray_walk"]
+    assert ray.metric_type == "text_exact_match"
+    assert ray.metadata["diagnostic"] is True
+    assert ray.metadata["hard_gate"] is False
+    # First side-to-move slider in a1..h8 order is the e2 rook.
+    assert ray.metadata["source_square"] == "e2"
+    assert "slider on e2" in ray.prompt
+    assert "{source_square}" not in ray.prompt
+    assert ray.gold_answer.startswith("Piece: e2 white rook.")
+    assert ray.gold_answer.splitlines()[-1].startswith("Moves from rays: ")
+
+    trace = by_task["legal_filter_trace"]
+    assert trace.metric_type == "text_exact_match"
+    assert trace.metadata["diagnostic"] is True
+    assert trace.metadata["hard_gate"] is False
+    assert "Filter by piece:" in trace.gold_answer
+    assert trace.gold_answer.splitlines()[-1].startswith("All legal moves: ")
+
+    perception_examples = packaged.freeze_split(
+        "perception",
+        [{"fen": "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1"} for _ in range(19)],
+        seed=42,
+    )
+    multi = next(
+        example
+        for example in perception_examples
+        if example.task_type == "multi_state_tracking"
+    )
+    assert multi.metric_type == "fen_exact_match"
+    assert multi.metadata["diagnostic"] is True
+    assert multi.metadata["hard_gate"] is False
+    assert len(multi.metadata["moves"].split()) in (2, 3)
+    assert multi.metadata["moves"] in multi.prompt
+    assert "{moves}" not in multi.prompt
+    assert "State needed for full FEN:" in multi.prompt
+    assert packaged.validate_oracle([ray, trace, multi]) == []
+
+
+def test_package_legal_filter_trace_derivation_caps_fall_back_at_freeze():
+    # The starting position has 16 side-to-move pieces (> the 12-piece cap).
+    assert packaged._derive_legal_filter_trace(STARTING_FEN) == ""
+
+    examples = packaged.freeze_split(
+        "rules",
+        [{"fen": STARTING_FEN} for _ in range(13)],
+        seed=42,
+    )
+
+    assert examples
+    assert all(example.task_type != "legal_filter_trace" for example in examples)
+
+
+def test_package_piece_legal_filter_near_miss_earns_partial_set_f1():
+    gold = (
+        "Pseudo-legal from e2: e2d2 e2e3 e2e4.\n"
+        "Legal: e2e3 e2e4.\n"
+        "Rejected: e2d2 pinned_piece_exposes_king."
+    )
+    example = _example(
+        task_type="piece_legal_filter",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+    )
+
+    near_miss = (
+        "Pseudo-legal from e2: e2d2 e2e3 e2e4.\n"
+        "Legal: e2e3.\n"
+        "Rejected: e2d2 pinned_piece_exposes_king."
+    )
+    scores = packaged.score_prediction(example, near_miss)
+
+    assert scores["primary"] == 0.0
+    assert 0.0 < scores["set_f1"] < 1.0
+    assert packaged.score_prediction(example, gold) == {"primary": 1.0, "set_f1": 1.0}
+
+
+def test_package_legal_filter_trace_near_miss_earns_partial_final_jaccard():
+    gold = packaged.derive_gold_answer(
+        "legal_filter_trace",
+        {"fen": PINNED_ROOK_FEN},
+        Random(42),
+    )
+    example = _example(
+        task_type="legal_filter_trace",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+    )
+
+    near_miss = (
+        gold.rsplit("All legal moves:", 1)[0] + "All legal moves: e1d1 e2e3 e2e4"
+    )
+    scores = packaged.score_prediction(example, near_miss)
+
+    assert scores["primary"] == 0.0
+    assert scores["final_jaccard"] == 0.3
+    assert packaged.score_prediction(example, gold)["final_jaccard"] == 1.0
+    # Degenerate predictions without the final marker skip the secondary.
+    assert packaged.score_prediction(example, "garbage")["final_jaccard"] is None
+
+
+def test_package_legal_moves_by_piece_reports_set_f1_secondary():
+    gold = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook; e1 white king.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1b1\n"
+        "e1 white king: e1d1\n"
+        "All legal moves: a1a2 a1b1 e1d1"
+    )
+    prediction = (
+        "Side to move: white.\n"
+        "Pieces: a1 white rook; e1 white king.\n"
+        "Moves by piece:\n"
+        "a1 white rook: a1a2 a1a3\n"
+        "e1 white king: no legal moves"
+    )
+    example = _example(
+        task_type="legal_moves_by_piece",
+        gold_answer=gold,
+        metric_type="text_exact_match",
+    )
+
+    scores = packaged.score_prediction(example, prediction)
+
+    # F1 from all-moves precision 0.5 and recall 1/3.
+    assert round(scores["set_f1"], 3) == 0.4
+    assert packaged.score_prediction(example, gold)["set_f1"] == 1.0
+
+
+def test_package_score_split_reports_new_composite_secondary_names():
+    trace_gold = packaged.derive_gold_answer(
+        "legal_filter_trace",
+        {"fen": PINNED_ROOK_FEN},
+        Random(42),
+    )
+    filter_gold = (
+        "Pseudo-legal from e2: e2d2 e2e3.\n"
+        "Legal: e2e3.\n"
+        "Rejected: e2d2 pinned_piece_exposes_king."
+    )
+    examples = [
+        _example(
+            example_id="rules_00000",
+            task_type="piece_legal_filter",
+            gold_answer=filter_gold,
+            metric_type="text_exact_match",
+        ),
+        _example(
+            example_id="rules_00001",
+            task_type="legal_filter_trace",
+            gold_answer=trace_gold,
+            metric_type="text_exact_match",
+        ),
+    ]
+
+    metrics = packaged.score_split(
+        examples,
+        {"rules_00000": filter_gold, "rules_00001": trace_gold},
+    )
+
+    assert metrics["piece_legal_filter_set_f1"] == 1.0
+    assert metrics["legal_filter_trace_final_jaccard"] == 1.0
 
 
 def test_package_and_legacy_score_prediction_parity():

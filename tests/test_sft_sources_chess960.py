@@ -45,6 +45,32 @@ def test_chess960_sample_reports_actual_moves_when_rollout_stops_early(monkeypat
     assert rows[0]["fen"] == terminal_board.fen()
 
 
+def test_chess960_generate_random_resamples_standard_start_id_518():
+    from chess_llm.sft.sources.chess960 import generate_random
+
+    class ScriptedRandom:
+        def __init__(self, values):
+            self._values = list(values)
+
+        def randint(self, low, high):
+            assert (low, high) == (0, 959)
+            return self._values.pop(0)
+
+    board, position_id = generate_random(ScriptedRandom([518, 27]))
+
+    assert position_id == 27
+    assert board.chess960 is True
+    assert board.board_fen() != chess.Board().board_fen()
+
+
+def test_chess960_generate_random_never_yields_standard_start():
+    from chess_llm.sft.sources.chess960 import generate_random
+
+    for seed in range(200):
+        _, position_id = generate_random(Random(seed))
+        assert position_id != 518
+
+
 def test_package_chess960_generate_all_covers_960_ids():
     from chess_llm.sft.sources.chess960 import generate_all
 

@@ -1,6 +1,7 @@
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import chess
 import chess.engine
@@ -9,6 +10,7 @@ import pytest
 from chess_llm.external.stockfish import (
     StockfishEngineConfig,
     StockfishWrapper,
+    clamp_uci_elo,
     configure_stockfish_engine,
     open_stockfish,
 )
@@ -160,6 +162,51 @@ def test_configure_stockfish_engine_skips_syzygy_when_not_configured():
     configure_stockfish_engine(engine, threads=3, hash_mb=64)
 
     assert engine.configured == [{"Threads": 3, "Hash": 64}]
+
+
+def test_configure_stockfish_engine_sets_clamped_limit_strength_elo():
+    engine = FakeEngine()
+    engine.options = {"UCI_Elo": SimpleNamespace(min=1320, max=3190)}
+
+    configure_stockfish_engine(engine, limit_strength_elo=1000)
+    configure_stockfish_engine(engine, limit_strength_elo=5000)
+    configure_stockfish_engine(engine, limit_strength_elo=1700)
+
+    assert [options["UCI_Elo"] for options in engine.configured] == [1320, 3190, 1700]
+    assert all(options["UCI_LimitStrength"] is True for options in engine.configured)
+
+
+def test_configure_stockfish_engine_none_elo_leaves_strength_untouched():
+    engine = FakeEngine()
+
+    configure_stockfish_engine(engine, limit_strength_elo=None)
+
+    assert engine.configured == [{"Threads": 1, "Hash": 256}]
+
+
+def test_clamp_uci_elo_without_engine_bounds_returns_requested_elo():
+    assert clamp_uci_elo(FakeEngine(), 1500) == 1500
+
+
+def test_open_stockfish_passes_limit_strength_elo_from_config(tmp_path):
+    stockfish_path = tmp_path / "stockfish"
+    stockfish_path.write_text("", encoding="utf-8")
+    engine = FakeEngine()
+    engine.options = {"UCI_Elo": SimpleNamespace(min=1320, max=3190)}
+
+    open_stockfish(
+        StockfishEngineConfig(stockfish_path, limit_strength_elo=1250),
+        engine_factory=lambda _path: engine,
+    )
+
+    assert engine.configured == [
+        {
+            "Threads": 1,
+            "Hash": 256,
+            "UCI_LimitStrength": True,
+            "UCI_Elo": 1320,
+        }
+    ]
 
 
 def test_legacy_stockfish_wrapper_delegates_to_package(monkeypatch):

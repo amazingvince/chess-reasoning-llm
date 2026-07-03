@@ -49,12 +49,15 @@ TASK_DESCRIPTIONS = {
     "1.7_rank_lookup": "Read one compressed rank row from FEN",
     "1.8_move_square_edits": "Trace square lookups and rank edits for one move",
     "1.9_fen_assembly": "Apply one move and assemble the resulting full FEN",
+    "1.19_multi_move_state_tracking": "Apply two to three moves and report the resulting FEN",
     "2.0_side_piece_inventory": "List side-to-move pieces and squares before move generation",
     "2.1_legal_move_gen": "List all legal moves for the side to move",
     "2.2_piece_specific_moves": "List legal moves for a specific piece",
     "2.3_move_legality_check": "Determine whether a move is legal",
     "2.4_check_detection": "Detect check, checkmate, or stalemate",
     "2.5_special_rules": "Handle castling, en passant, promotion, and 50-move rule",
+    "2.10_ray_walk": "Walk each slider ray square by square to derive its moves",
+    "2.11_legal_filter_trace": "Filter every piece's pseudo-legal moves into rejected and legal moves",
     "3.1_available_captures": "Find available capture moves",
     "3.2_threats": "Identify pieces that are threatening enemy pieces",
     "3.3_attacked_defended": "Determine attacked or defended squares",
@@ -165,6 +168,8 @@ def collect_eval_file_stats(
     bench_root = Path(benchmark_dir)
     if not eval_root.exists():
         raise FileNotFoundError(f"eval splits dir not found: {eval_root}")
+    if not bench_root.exists():
+        raise FileNotFoundError(f"benchmark dir not found: {bench_root}")
 
     eval_stats = [
         UploadFileStat(
@@ -186,6 +191,11 @@ def collect_eval_file_stats(
         )
         for path in sorted(bench_root.glob("*.jsonl"))
     ]
+    if not bench_stats:
+        raise ValueError(
+            f"no benchmark JSONL files found in {bench_root}; refusing to "
+            "publish an eval dataset without its frozen benchmark"
+        )
     return eval_stats, bench_stats
 
 

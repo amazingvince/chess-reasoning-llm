@@ -16,6 +16,7 @@ from chess_llm.sft.sources.lichess_evals import (
 from chess_llm.sft.sources.lichess_puzzles import load_puzzles, preprocess_puzzle
 from chess_llm.sft.sources.lichess_openings import load_openings, parse_opening_row
 from chess_llm.sft.sources.mate import load_mate, process_mate_row, validate_uci
+from chess_llm.sft.sources.self_play import load_self_play_positions
 from chess_llm.sft.sources.polyglot_books import (
     get_weighted_moves,
     load_book,
@@ -47,6 +48,7 @@ __all__ = [
     "load_book",
     "load_mate",
     "load_openings",
+    "load_self_play_positions",
     "material_balance",
     "normalize_pv_line",
     "partition_evals",

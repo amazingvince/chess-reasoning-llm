@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import sys
 from pathlib import Path
@@ -57,7 +58,45 @@ def test_extract_game_positions_accepts_pgn_comments_and_variations():
     ]
 
 
+def test_extract_game_positions_emits_sha256_game_id_on_every_position():
+    moves = "1. e4 e5 2. Nf3 Nc6 1/2-1/2"
+    expected_game_id = hashlib.sha256(moves.encode("utf-8")).hexdigest()[:16]
+
+    positions = list(extract_game_positions({"moves": moves}))
+
+    assert len(positions) == 4
+    assert all(pos["game_id"] == expected_game_id for pos in positions)
+
+
+def test_extract_game_positions_keeps_valid_prefix_of_partially_corrupt_pgn():
+    moves = "1. e4 e5 2. Nf3 Nc6 3. Bb5 NotAMove 4. O-O"
+
+    positions = list(extract_game_positions({"movetext": moves}))
+
+    assert [pos["move_played_uci"] for pos in positions] == [
+        "e2e4",
+        "e7e5",
+        "g1f3",
+        "b8c6",
+        "f1b5",
+    ]
+    expected_game_id = hashlib.sha256(moves.encode("utf-8")).hexdigest()[:16]
+    assert all(pos["game_id"] == expected_game_id for pos in positions)
+
+
+def test_extract_game_positions_keeps_exactly_four_ply_recovered_prefix():
+    positions = list(extract_game_positions({"movetext": "1. e4 e5 2. Nf3 Nc6 3. Ke3"}))
+
+    assert [pos["move_played_uci"] for pos in positions] == [
+        "e2e4",
+        "e7e5",
+        "g1f3",
+        "b8c6",
+    ]
+
+
 def test_extract_game_positions_rejects_malformed_partial_pgn():
+    # Recovered prefix is only 3 plies, below MIN_RECOVERED_PLIES.
     positions = list(extract_game_positions({"movetext": "1. e4 e5 2. Nf3 NotAMove 3. Bb5"}))
 
     assert positions == []

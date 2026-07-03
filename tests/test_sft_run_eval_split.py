@@ -46,6 +46,11 @@ def test_freeze_existing_eval_splits_loads_jsonl_and_uses_non_strict_coverage(
     split_dir = tmp_path / "splits"
     benchmark_dir = tmp_path / "benchmark"
     _write_jsonl(split_dir / "rules.jsonl", [{"fen": "fen-a"}])
+    (split_dir / "blocklist.txt").write_text("std:fen-a\n", encoding="utf-8")
+    (split_dir / "manifest.json").write_text(
+        json.dumps({"split_sizes": {"rules": 1}}),
+        encoding="utf-8",
+    )
     captured: dict[str, object] = {}
 
     def fake_freeze(splits, output_dir, *, seed, strict_coverage=True):
@@ -72,6 +77,74 @@ def test_freeze_existing_eval_splits_loads_jsonl_and_uses_non_strict_coverage(
         "seed": 123,
         "strict_coverage": False,
     }
+
+
+def test_freeze_existing_eval_splits_skips_stale_and_uncovered_splits(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+):
+    import logging
+
+    from chess_llm.sft import run_eval_split
+
+    split_dir = tmp_path / "splits"
+    benchmark_dir = tmp_path / "benchmark"
+    _write_jsonl(split_dir / "rules.jsonl", [{"fen": "fen-a"}])
+    _write_jsonl(split_dir / "perception.jsonl", [{"fen": "fen-uncovered"}])
+    _write_jsonl(split_dir / "tactics.jsonl", [{"fen": "fen-a"}])
+    (split_dir / "blocklist.txt").write_text("std:fen-a\n", encoding="utf-8")
+    (split_dir / "manifest.json").write_text(
+        json.dumps({"split_sizes": {"rules": 1, "perception": 1}}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_freeze(splits, _output_dir, *, seed, strict_coverage=True):
+        captured["splits"] = splits
+        return {"splits": {name: len(rows) for name, rows in splits.items()}}
+
+    monkeypatch.setattr(run_eval_split, "freeze_and_save", fake_freeze)
+
+    with caplog.at_level(logging.WARNING, logger="chess_llm.sft.run_eval_split"):
+        count = run_eval_split.freeze_existing_eval_splits(
+            split_dir,
+            benchmark_dir,
+            seed=123,
+        )
+
+    assert count == 1
+    assert captured["splits"] == {"rules": [{"fen": "fen-a"}]}
+    assert "Skipping stale eval split 'tactics'" in caplog.text
+    assert "Skipping eval split 'perception'" in caplog.text
+
+
+def test_freeze_existing_eval_splits_skips_everything_without_blocklist(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import run_eval_split
+
+    split_dir = tmp_path / "splits"
+    _write_jsonl(split_dir / "rules.jsonl", [{"fen": "fen-a"}])
+    (split_dir / "manifest.json").write_text(
+        json.dumps({"split_sizes": {"rules": 1}}),
+        encoding="utf-8",
+    )
+
+    def fail_freeze(*_args, **_kwargs):
+        raise AssertionError("uncovered splits must not be frozen")
+
+    monkeypatch.setattr(run_eval_split, "freeze_and_save", fail_freeze)
+
+    assert (
+        run_eval_split.freeze_existing_eval_splits(
+            split_dir,
+            tmp_path / "benchmark",
+            seed=123,
+        )
+        == 0
+    )
 
 
 def test_run_eval_split_generates_splits_and_relaxes_volume_freeze(
@@ -108,11 +181,15 @@ def test_run_eval_split_generates_splits_and_relaxes_volume_freeze(
         return {"perception": list(sources["perception"])[: split_sizes["perception"]]}
 
     monkeypatch.setattr(run_eval_split, "generate_all_eval_splits", fake_generate)
-    monkeypatch.setattr(run_eval_split, "save_eval_splits", lambda splits, path: captured.update(saved=(splits, path)))
+    monkeypatch.setattr(
+        run_eval_split,
+        "save_eval_splits",
+        lambda splits, path, **_kwargs: captured.update(saved=(splits, path)),
+    )
     monkeypatch.setattr(
         run_eval_split,
         "build_blocklist",
-        lambda splits: {
+        lambda splits, *_args, **_kwargs: {
             row["fen"]
             for rows in splits.values()
             for row in rows
@@ -168,7 +245,7 @@ def test_run_eval_split_caps_split_targets_for_volume_smoke_run(
     monkeypatch.setattr(run_eval_split, "generate_all_eval_splits", fake_generate)
     monkeypatch.setattr(run_eval_split, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(run_eval_split, "freeze_and_save", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     result = run_eval_split.generate_eval_splits(
         volume_override=20,
@@ -246,7 +323,7 @@ def test_run_eval_split_passes_seed_to_opening_holdout(monkeypatch, tmp_path: Pa
     )
     monkeypatch.setattr(run_eval_split, "save_eval_splits", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(run_eval_split, "freeze_and_save", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda _splits: frozenset())
+    monkeypatch.setattr(run_eval_split, "build_blocklist", lambda *_args, **_kwargs: frozenset())
 
     run_eval_split.generate_eval_splits(
         volume_override=1,
@@ -265,6 +342,65 @@ def test_run_eval_split_passes_seed_to_opening_holdout(monkeypatch, tmp_path: Pa
     eval_seed_2 = [row["fen"] for row in captured["sources"]["openings"]]
 
     assert eval_seed_1 != eval_seed_2
+
+
+def test_generate_eval_splits_writes_manifest_the_pipeline_reuses(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline, run_eval_split
+
+    def make_config() -> dict:
+        return {
+            "fen_pool": [
+                {"fen": "k7/8/8/8/8/8/8/K7 w - - 0 1", "is_chess960": False},
+                {"fen": "7k/8/8/8/8/8/8/K7 w - - 0 1", "is_chess960": False},
+                {"fen": "7k/8/8/8/8/8/8/1K6 w - - 0 1", "is_chess960": False},
+                {"fen": "k7/8/8/8/8/8/8/1K6 w - - 0 1", "is_chess960": False},
+            ],
+            "openings": [],
+            "position_evals": [],
+            "puzzles": [],
+            "best_move_evals": [],
+            "endgame_positions": [],
+            "mate_rows": [],
+            "book_moves": {},
+        }
+
+    splits_dir = tmp_path / "splits"
+    benchmark_dir = tmp_path / "benchmark"
+    monkeypatch.setattr(
+        run_eval_split,
+        "load_sources",
+        lambda volume_override=None: make_config(),
+    )
+    monkeypatch.setattr(run_eval_split, "freeze_and_save", lambda *_args, **_kwargs: None)
+
+    run_eval_split.generate_eval_splits(
+        volume_override=2,
+        eval_splits_dir=splits_dir,
+        benchmark_dir=benchmark_dir,
+    )
+
+    assert (splits_dir / "manifest.json").exists()
+    assert (splits_dir / "blocklist.txt").exists()
+
+    monkeypatch.setattr(pipeline, "EVAL_SPLITS_DIR", splits_dir)
+    monkeypatch.setattr(pipeline, "BENCHMARK_DIR", benchmark_dir)
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(pipeline, "freeze_and_save", lambda *_args, **_kwargs: None)
+
+    def fail_generate(*_args, **_kwargs):
+        raise AssertionError("pipeline must reuse the CLI-generated eval splits")
+
+    monkeypatch.setattr(pipeline, "generate_all_eval_splits", fail_generate)
+
+    from chess_llm.sft.eval_split import load_blocklist
+
+    blocklist = pipeline.run_eval_splits(make_config(), volume_override=2)
+
+    assert blocklist == load_blocklist(splits_dir / "blocklist.txt")
+    assert len(blocklist) == 2
 
 
 def test_run_eval_split_module_help_runs_as_python_m():

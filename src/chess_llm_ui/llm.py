@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from typing import Any
 from urllib import error, request
 
-import chess
-
-from chess_llm.inference import InferenceRequest, InferenceResponse
+from chess_llm.inference import (
+    DeterministicLegalMoveClient,
+    InferenceRequest,
+    InferenceResponse,
+    _fen_from_request,
+)
 
 
 class LLMClientError(RuntimeError):
@@ -32,37 +34,15 @@ class StaticLLMClient:
         )
 
 
-class DeterministicLegalMoveClient:
-    """Local test client that always returns one deterministic legal move."""
-
-    def __init__(self, *, model_id: str = "deterministic-legal-stub") -> None:
-        self.model_id = model_id
-
-    def complete(self, inference_request: InferenceRequest) -> InferenceResponse:
-        fen = _fen_from_request(inference_request)
-        move_uci: str | None = None
-        if fen:
-            try:
-                board = chess.Board(fen)
-            except ValueError:
-                board = None
-            if board is not None:
-                legal_moves = sorted(move.uci() for move in board.legal_moves)
-                move_uci = legal_moves[0] if legal_moves else None
-
-        if move_uci is None:
-            raw_text = "<think>Deterministic legal stub found no legal move.</think>"
-        else:
-            raw_text = (
-                f"<think>Deterministic legal stub selected {move_uci} "
-                "from the sorted legal move list.</think>\n"
-                f"<move>{move_uci}</move>"
-            )
-        return InferenceResponse(
-            model_id=inference_request.model_id or self.model_id,
-            raw_text=raw_text,
-            metadata={"client": "deterministic_legal_stub", "fen": fen},
-        )
+# DeterministicLegalMoveClient now lives in chess_llm.inference so headless
+# consumers (self-play harvesting) can use it without the UI package; the
+# import above keeps the historical ``chess_llm_ui.llm`` path working.
+__all__ = [
+    "DeterministicLegalMoveClient",
+    "LLMClientError",
+    "OpenAICompatibleLLMClient",
+    "StaticLLMClient",
+]
 
 
 class OpenAICompatibleLLMClient:
@@ -122,15 +102,3 @@ class OpenAICompatibleLLMClient:
                 "usage": parsed.get("usage"),
             },
         )
-
-
-def _fen_from_request(inference_request: InferenceRequest) -> str | None:
-    fen = inference_request.metadata.get("fen")
-    if isinstance(fen, str) and fen.strip():
-        return fen.strip()
-
-    for message in reversed(inference_request.messages):
-        match = re.search(r"FEN:\s*(.+)", message.content)
-        if match:
-            return match.group(1).splitlines()[0].strip()
-    return None

@@ -15,6 +15,7 @@ from chess_llm.evals.benchmark import (
     normalize_prediction,
     score_prediction,
 )
+from chess_llm.formats.answers import strip_fen_strings
 
 PREDICTION_ANALYSIS_SCHEMA_VERSION = "prediction_analysis.v1"
 _PREDICTION_FAILURE_EXAMPLE_LIMIT = 5
@@ -138,7 +139,7 @@ def prediction_format_family(prediction: str) -> str:
         return "fen_row_rewrite_trace"
     if _looks_like_square_edit_trace(lines):
         return "square_edit_trace"
-    if _UCI_RE.search(normalize_prediction(text).lower()):
+    if _UCI_RE.search(strip_fen_strings(normalize_prediction(text).lower())):
         return "uci_moves"
     if parse_legality_yes_no_answer(normalize_prediction(text)) is not None:
         return "legality_answer"
@@ -337,7 +338,7 @@ def _looks_like_square_edit_trace(lines: list[str]) -> bool:
     )
     inline_trace = any(
         marker in " ".join(lines).lower()
-        for marker in ("lookup:", "squares:", "ranks:", "result fen:")
+        for marker in ("lookup:", "squares:", "ranks:")
     )
     return (
         source_or_destination + rank_edits >= 2

@@ -15,6 +15,9 @@ SOURCE_KEYS: tuple[str, ...] = (
     "fen_pool",
     "fen_pool_standard",
     "fen_pool_chess960",
+    # Informational only: self-play harvests are optional for every tier, so
+    # this key is never listed in TIER_REQUIRED_SOURCES/TIER_OPTIONAL_SOURCES.
+    "fen_pool_self_play",
     "game_positions",
     "puzzles",
     "openings",
@@ -222,14 +225,18 @@ def source_counts(config: Mapping[str, Any]) -> dict[str, int]:
     fen_pool = config.get("fen_pool", [])
     standard = 0
     chess960 = 0
+    self_play = 0
     if isinstance(fen_pool, (list, tuple)):
         for row in fen_pool:
+            if isinstance(row, Mapping) and row.get("source") == "self_play":
+                self_play += 1
             if isinstance(row, Mapping) and raw_is_chess960(row):
                 chess960 += 1
             else:
                 standard += 1
     counts["fen_pool_standard"] = standard
     counts["fen_pool_chess960"] = chess960
+    counts["fen_pool_self_play"] = self_play
     counts["fen_pool"] = counts.get("fen_pool", 0)
     return counts
 

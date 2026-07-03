@@ -42,11 +42,16 @@ def _filter_supported_sft_kwargs(config_kwargs: dict) -> dict:
     return {key: value for key, value in config_kwargs.items() if key in supported}
 
 
-def _supports_flash_attention_packing(attn_implementation: str | None) -> bool:
+def is_flash_attention_implementation(attn_implementation: str | None) -> bool:
+    """Return whether the backend is a genuine FlashAttention implementation."""
     if not attn_implementation:
         return False
     base_implementation = attn_implementation.split("@", 1)[0]
     return bool(base_implementation in FLASH_ATTENTION_VARIANTS)
+
+
+def _supports_flash_attention_packing(attn_implementation: str | None) -> bool:
+    return is_flash_attention_implementation(attn_implementation)
 
 
 def resolve_packing_settings(
@@ -81,7 +86,11 @@ def estimate_training_steps(
     gradient_accumulation_steps: int = GRADIENT_ACCUMULATION_STEPS,
     world_size: int | None = None,
 ) -> int:
-    """Estimate optimizer update steps for warmup scheduling."""
+    """Estimate optimizer update steps for dry-run reporting.
+
+    The estimate counts unpacked examples, so packed runs finish in fewer
+    actual steps; the LR schedule itself uses ``warmup_ratio``.
+    """
     if max_steps is not None and max_steps > 0:
         return max_steps
     if train_dataset_size <= 0:
@@ -93,12 +102,6 @@ def estimate_training_steps(
     updates_per_epoch = max(1, math.ceil(batches_per_epoch / gradient_accumulation_steps))
     effective_epochs = phase.epochs if num_train_epochs is None else num_train_epochs
     return max(1, math.ceil(updates_per_epoch * effective_epochs))
-
-
-def _warmup_steps_from_ratio(ratio: float, total_steps: int) -> int:
-    if ratio <= 0 or total_steps <= 0:
-        return 0
-    return max(1, math.ceil(total_steps * ratio))
 
 
 def build_sft_config(
@@ -114,15 +117,19 @@ def build_sft_config(
     save_steps: int | None = None,
     logging_steps: int | None = None,
     trainer_eval: bool = True,
-    train_dataset_size: int | None = None,
-    world_size: int | None = None,
     attn_implementation: str | None = None,
     liger_fused_linear_cross_entropy: bool = False,
     gradient_checkpointing: bool = False,
     packing: str = "auto",
     max_length: int = 2048,
+    sequential_dataset: bool = False,
 ) -> SFTConfig:
     """Build a TRL SFTConfig for the given phase.
+
+    ``sequential_dataset=True`` (schedule mode) trains the dataset in its
+    stored order: it requires TRL's ``train_sampling_strategy`` field, sets
+    it to ``'sequential'`` with ``shuffle_dataset=False``, and rejects
+    packing (which would reorder examples across segment boundaries).
 
     Key optimizations:
     - Liger kernels with Qwen3.5 fused linear CE disabled by default
@@ -147,11 +154,32 @@ def build_sft_config(
             "Refusing to train with prompt tokens included in the loss."
         )
 
+    if sequential_dataset:
+        missing_sequential_fields = [
+            field
+            for field in ("train_sampling_strategy", "shuffle_dataset")
+            if field not in signature
+        ]
+        if missing_sequential_fields:
+            raise RuntimeError(
+                "Installed TRL SFTConfig does not support "
+                f"{', '.join(missing_sequential_fields)}. Refusing sequential "
+                "(schedule) training: _filter_supported_sft_kwargs would drop "
+                "the kwarg silently and the Trainer would fall back to a "
+                "RandomSampler, destroying the tier schedule."
+            )
+
     is_qwen3_family = _is_qwen3_family(model_type)
     packing_enabled, padding_free_enabled = resolve_packing_settings(
         attn_implementation,
         packing=packing,
     )
+
+    if sequential_dataset and packing_enabled:
+        raise ValueError(
+            "sequential_dataset is incompatible with packing: packing reorders "
+            "examples across the planned segment order. Use packing='off'."
+        )
 
     if use_liger_kernel and is_qwen3_family and "liger_kernel_config" not in signature:
         logger.warning(
@@ -166,19 +194,6 @@ def build_sft_config(
         DEFAULT_TRAINER_SAVE_STEPS if save_steps is None else save_steps
     )
     effective_save_strategy = "steps" if trainer_eval or save_without_eval else "no"
-    warmup_steps = None
-    if train_dataset_size is not None:
-        warmup_total_steps = estimate_training_steps(
-            phase,
-            train_dataset_size=train_dataset_size,
-            num_train_epochs=effective_num_train_epochs,
-            max_steps=max_steps,
-            world_size=world_size,
-        )
-        warmup_steps = _warmup_steps_from_ratio(
-            phase.warmup_ratio,
-            warmup_total_steps,
-        )
 
     config_kwargs = dict(
         output_dir=str(output_dir),
@@ -188,6 +203,10 @@ def build_sft_config(
         # Training
         num_train_epochs=effective_num_train_epochs,
         learning_rate=phase.learning_rate,
+        # Warmup is a ratio of the Trainer's actual optimizer steps, so it
+        # stays correct for packed runs where per-example step estimates
+        # overcount the schedule length.
+        warmup_ratio=phase.warmup_ratio,
         weight_decay=phase.weight_decay,
         lr_scheduler_type="cosine",
         # Batch
@@ -230,6 +249,10 @@ def build_sft_config(
         padding_free=padding_free_enabled,
     )
 
+    if sequential_dataset:
+        config_kwargs["train_sampling_strategy"] = "sequential"
+        config_kwargs["shuffle_dataset"] = False
+
     if packing_enabled:
         config_kwargs["packing_strategy"] = "bfd"
 
@@ -259,10 +282,5 @@ def build_sft_config(
 
     if max_steps is not None:
         config_kwargs["max_steps"] = max_steps
-
-    if warmup_steps is not None and "warmup_steps" in signature:
-        config_kwargs["warmup_steps"] = warmup_steps
-    else:
-        config_kwargs["warmup_ratio"] = phase.warmup_ratio
 
     return SFTConfig(**_filter_supported_sft_kwargs(config_kwargs))

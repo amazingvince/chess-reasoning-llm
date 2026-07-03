@@ -147,6 +147,137 @@ def test_package_phase_gate_excludes_diagnostic_mechanics_from_regression_checks
     assert "rules/piece_legal_moves" not in output
 
 
+def test_package_phase_gate_excludes_new_diagnostic_metric_names_from_floor_checks():
+    results = {
+        "perception": {
+            "board_print": 0.95,
+            "state_tracking": 0.85,
+            "multi_state_tracking": 0.0,
+        },
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            "ray_walk": 0.0,
+            "legal_filter_trace": 0.0,
+            "legal_filter_trace_final_jaccard": 0.0,
+            "piece_legal_filter_set_f1": 0.0,
+            "legal_moves_by_piece_set_f1": 0.0,
+        },
+    }
+
+    failures, output = _capture_gate(results, phase="a")
+
+    assert failures == 0
+    assert "perception/multi_state_tracking" not in output
+    assert "rules/ray_walk" not in output
+    assert "rules/legal_filter_trace" not in output
+    assert "rules/legal_filter_trace_final_jaccard" not in output
+    assert "rules/piece_legal_filter_set_f1" not in output
+    assert "rules/legal_moves_by_piece_set_f1" not in output
+
+
+def test_package_phase_gate_excludes_new_diagnostic_metric_names_from_regression_checks():
+    results = {
+        "perception": {
+            "board_print": 0.95,
+            "state_tracking": 0.85,
+            "multi_state_tracking": 0.0,
+        },
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            "ray_walk": 0.0,
+            "legal_filter_trace_final_jaccard": 0.0,
+        },
+    }
+    baseline = {
+        "perception": {
+            "board_print": 0.95,
+            "state_tracking": 0.85,
+            "multi_state_tracking": 1.0,
+        },
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            "ray_walk": 1.0,
+            "legal_filter_trace_final_jaccard": 1.0,
+        },
+    }
+
+    failures, output = _capture_gate(results, baseline=baseline, phase="a")
+
+    assert failures == 0
+    assert "perception/multi_state_tracking" not in output
+    assert "rules/ray_walk" not in output
+    assert "rules/legal_filter_trace_final_jaccard" not in output
+
+
+def test_package_phase_gate_identifies_count_metrics_by_name_pattern():
+    from chess_llm.training.phase_gate import is_count_metric
+
+    assert is_count_metric("legal_moves_by_piece_illegal_extra_count") is True
+    assert is_count_metric("missing_move_count") is True
+    assert is_count_metric("material_piece_counts") is False
+    assert is_count_metric("board_print") is False
+
+
+def test_package_phase_gate_excludes_count_metrics_from_floor_checks():
+    results = {
+        "perception": {"board_print": 0.95, "state_tracking": 0.85},
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            # Perfect count outcomes (0 extras / 0 misses) must not be read
+            # as 0% accuracies and fail the floor.
+            "legal_moves_by_piece_illegal_extra_count": 0.0,
+            "missing_move_count": 0.0,
+        },
+    }
+
+    failures, output = _capture_gate(results, phase="a")
+
+    assert failures == 0
+    assert "rules/legal_moves_by_piece_illegal_extra_count" not in output
+    assert "rules/missing_move_count" not in output
+
+
+def test_package_phase_gate_reports_count_metrics_as_informational_in_regression():
+    results = {
+        "perception": {"board_print": 0.95, "state_tracking": 0.85},
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            "missing_move_count": 2.0,
+            "legal_moves_by_piece_illegal_extra_count": 40.0,
+        },
+    }
+    baseline = {
+        "perception": {"board_print": 0.95, "state_tracking": 0.85},
+        "rules": {
+            "legal_moves": 0.90,
+            "legality_check": 0.95,
+            # Improvement (40 -> 2) used to be flagged as a >5% accuracy drop.
+            "missing_move_count": 40.0,
+            # Worsening (2 -> 40) is reported but not gated.
+            "legal_moves_by_piece_illegal_extra_count": 2.0,
+        },
+    }
+
+    failures, output = _capture_gate(results, baseline=baseline, phase="a")
+
+    assert failures == 0
+    assert (
+        "[INFO] rules/missing_move_count: count metric "
+        "baseline=40 current=2 (informational, not gated)"
+    ) in output
+    assert (
+        "[INFO] rules/legal_moves_by_piece_illegal_extra_count: count metric "
+        "baseline=2 current=40 (informational, not gated)"
+    ) in output
+    assert "[FAIL] rules/missing_move_count" not in output
+    assert "[PASS] All metrics within 5% of best-historical baseline" in output
+
+
 def test_legacy_phase_gate_reexports_package_function():
     import importlib.util
     from pathlib import Path

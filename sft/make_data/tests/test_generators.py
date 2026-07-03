@@ -110,10 +110,12 @@ def test_board_to_fen_prompt_includes_state_needed_for_full_fen(monkeypatch):
 
     assert "Side to move: black" in user_prompt
     assert "Castling rights: KQkq" in user_prompt
-    assert "En passant: e3" in user_prompt
+    # board.fen() uses the 'legal' en-passant convention: the phantom e3
+    # square (no legal capture) is dropped from the canonical FEN.
+    assert "En passant: none" in user_prompt
     assert "Halfmove clock: 0" in user_prompt
     assert "Fullmove number: 1" in user_prompt
-    assert ex["messages"][2]["content"] == AFTER_E4
+    assert ex["messages"][2]["content"] == chess.Board(AFTER_E4).fen()
     assert "{" not in user_prompt
 
 
@@ -168,7 +170,11 @@ def test_piece_counting_color_template(monkeypatch):
     )
 
     gen = PieceCounting(
-        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        config={
+            "fen_pool": [{"fen": STARTING_FEN}],
+            "volume_override": 1,
+            "piece_counting_include_partial": True,
+        },
         rng=Random(42),
     )
     examples = list(gen.generate())
@@ -210,7 +216,11 @@ def test_piece_counting_minor_pieces_template(monkeypatch):
     )
 
     gen = PieceCounting(
-        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        config={
+            "fen_pool": [{"fen": STARTING_FEN}],
+            "volume_override": 1,
+            "piece_counting_include_partial": True,
+        },
         rng=Random(42),
     )
     examples = list(gen.generate())
@@ -232,7 +242,11 @@ def test_piece_counting_board_template(monkeypatch):
     )
 
     gen = PieceCounting(
-        config={"fen_pool": [{"fen": STARTING_FEN}], "volume_override": 1},
+        config={
+            "fen_pool": [{"fen": STARTING_FEN}],
+            "volume_override": 1,
+            "piece_counting_include_partial": True,
+        },
         rng=Random(42),
     )
     ex = list(gen.generate())[0]
@@ -291,11 +305,12 @@ def test_state_tracking_valid_metadata(monkeypatch):
     assert "result_fen" in metadata
     assert "moves" in metadata
     answer = ex["messages"][2]["content"]
-    assert "Lookup:" in answer
-    assert "Squares:" in answer
-    assert "Ranks:" in answer
+    # The answer teaches the result FEN only; move traces live in metadata.
+    assert answer == f"Result FEN: {metadata['result_fen']}"
+    assert "Lookup:" not in answer
+    assert "Squares:" not in answer
+    assert "Ranks:" not in answer
     assert "Result placement:" not in answer
-    assert answer.splitlines()[-1] == f"Result FEN: {metadata['result_fen']}"
 
 
 def test_fen_assembly_legacy_import_valid_metadata(monkeypatch):
@@ -381,8 +396,8 @@ def test_legal_move_gen_correct_moves(monkeypatch):
     answer = examples[0]["messages"][2]["content"]
 
     board = chess.Board(STARTING_FEN)
-    expected = sorted(m.uci() for m in board.legal_moves)
-    assert answer.strip().split() == expected
+    expected = " ".join(sorted(m.uci() for m in board.legal_moves))
+    assert answer == f"Side to move: white.\nLegal moves: {expected}"
 
 
 def test_legal_move_gen_board_state_template(monkeypatch):
@@ -801,7 +816,7 @@ def test_move_consequence_pv_inside_think(monkeypatch):
 
 
 def test_best_move_selection_budget(monkeypatch):
-    """8 evals + 4 MATE rows, target=10 -> MATE budget=2, eval budget=8."""
+    """MATE rows are excluded from 7.1; evals fill the whole budget."""
     from generators.tier7_planning import BestMoveSelection
 
     tpl = "FEN: {fen}\nWhat is the best move?"
@@ -834,11 +849,11 @@ def test_best_move_selection_budget(monkeypatch):
         rng=Random(42),
     )
     examples = list(gen.generate())
-    assert len(examples) == 10
+    assert len(examples) == 8
 
     sources = [ex["metadata"].get("source") for ex in examples]
-    assert "lichess_evals" in sources
-    assert "mate_dataset" in sources
+    assert set(sources) == {"lichess_evals"}
+    assert "mate_dataset" not in sources
 
 
 def test_best_move_selection_tier7_format(monkeypatch):
@@ -1224,9 +1239,8 @@ def test_endgame_generators_preserve_chess960_metadata(monkeypatch, generator_na
 
 
 def test_best_move_selection_mate_only(monkeypatch):
-    """When only MATE rows are provided (no evals), they fill the budget."""
+    """MATE rows are no longer consumed by 7.1: no evals -> no examples."""
     from generators.tier7_planning import BestMoveSelection
-    from validation.validator import validate_think_move_format
 
     tpl = "FEN: {fen}\nWhat is the best move?"
     monkeypatch.setattr(
@@ -1251,14 +1265,11 @@ def test_best_move_selection_mate_only(monkeypatch):
         rng=Random(42),
     )
     examples = list(gen.generate())
-    assert len(examples) == 3
-
-    for ex in examples:
-        assert ex["metadata"]["source"] == "mate_dataset"
-        assert validate_think_move_format(ex["messages"][2]["content"])
+    assert examples == []
 
 
-def test_best_move_selection_uses_parser_preserved_mate_annotations(monkeypatch):
+def test_best_move_selection_ignores_parser_preserved_mate_rows(monkeypatch):
+    """Parsed MATE rows (A-vs-B comparisons) are excluded from 7.1."""
     from chess_llm.sft.sources.mate import process_mate_row
     from generators.tier7_planning import BestMoveSelection
 
@@ -1286,10 +1297,4 @@ def test_best_move_selection_uses_parser_preserved_mate_annotations(monkeypatch)
         },
         rng=Random(42),
     )
-    example = list(gen.generate())[0]
-    answer = example["messages"][2]["content"]
-
-    assert example["metadata"]["strategy"] == "control the center"
-    assert example["metadata"]["tactic"] == "central pawn push"
-    assert "control the center" in answer
-    assert "central pawn push" in answer
+    assert list(gen.generate()) == []

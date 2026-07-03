@@ -28,17 +28,26 @@ _PIECE_VALUES = {
 
 
 def _cp_to_bucket(cp: int) -> str:
-    """Map centipawn value to evaluation bucket label."""
+    """Map a White-POV centipawn value to the shared bucket sentence.
+
+    Values beyond the last bucket bound clamp to the last bucket.
+    """
     abs_cp = abs(cp)
-    for low, high, label in DEFAULT_EVAL_BUCKETS:
+    label = DEFAULT_EVAL_BUCKETS[-1][2]
+    for low, high, bucket_label in DEFAULT_EVAL_BUCKETS:
         if low <= abs_cp < high:
-            if cp > 0:
-                return f"White has a {label}"
-            elif cp < 0:
-                return f"Black has a {label}"
-            else:
-                return label
-    return "decisive"
+            label = bucket_label
+            break
+    if label == "equal":
+        return "The position is equal."
+    side = "White" if cp > 0 else "Black"
+    if label == "slight edge":
+        return f"{side} has a slight edge."
+    if label == "clear advantage":
+        return f"{side} has a clear advantage."
+    if label == "winning":
+        return f"{side} is winning."
+    return f"{side} has a decisive advantage."
 
 
 class MaterialBalance(TaskGenerator):
@@ -130,7 +139,7 @@ class PositionEvaluation(TaskGenerator):
                 else:
                     answer = "Black has a decisive advantage (forced mate)."
             elif cp is not None:
-                answer = _cp_to_bucket(cp) + "."
+                answer = _cp_to_bucket(cp)
             else:
                 continue
 

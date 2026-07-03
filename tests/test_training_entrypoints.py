@@ -10,19 +10,41 @@ import types
 import warnings
 
 
+def _expire_module(monkeypatch, module_name):
+    """Force *module_name* to re-import during this test only.
+
+    The original module object is restored at teardown both in sys.modules and
+    as its parent package's attribute, so later tests never see a
+    stub-flavored or freshly re-imported module. Re-importing torch from
+    scratch in-process would also break its C extension loading on Windows.
+    """
+    original = sys.modules.get(module_name)
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    if original is not None and "." in module_name:
+        parent_name, attr = module_name.rsplit(".", 1)
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            monkeypatch.setattr(parent, attr, original, raising=False)
+
+
+def _expire_training_args(monkeypatch):
+    """Drop the cached training_args module so it re-imports under this test's
+    stubbed trl."""
+    _expire_module(monkeypatch, "chess_llm.training.training_args")
+
+
 def test_training_entrypoint_modules_import_without_heavy_gpu_deps(monkeypatch):
-    for module_name in list(sys.modules):
-        if module_name in {
-            "chess_llm.training.evaluate",
-            "chess_llm.training.run_curriculum",
-            "chess_llm.training.train",
-            "torch",
-            "transformers",
-            "tqdm",
-            "trl",
-            "vllm",
-        }:
-            sys.modules.pop(module_name, None)
+    for module_name in [
+        "chess_llm.training.evaluate",
+        "chess_llm.training.run_curriculum",
+        "chess_llm.training.train",
+        "torch",
+        "transformers",
+        "tqdm",
+        "trl",
+        "vllm",
+    ]:
+        _expire_module(monkeypatch, module_name)
 
     original_import = builtins.__import__
 
@@ -67,6 +89,12 @@ def test_train_cli_accepts_base_model_override(monkeypatch):
 def test_train_registers_pinned_flash_attention_variant(monkeypatch):
     from chess_llm.training import train
 
+    monkeypatch.setitem(
+        sys.modules,
+        "trl",
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+    )
     fake_sft_trainer = types.SimpleNamespace(FLASH_ATTENTION_VARIANTS=set())
 
     def fake_import_module(name: str):
@@ -81,6 +109,47 @@ def test_train_registers_pinned_flash_attention_variant(monkeypatch):
     assert fake_sft_trainer.FLASH_ATTENTION_VARIANTS == {
         "kernels-community/flash-attn2@abc",
     }
+
+
+def test_train_does_not_register_non_flash_attention_variants(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trl",
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+    )
+    fake_sft_trainer = types.SimpleNamespace(FLASH_ATTENTION_VARIANTS=set())
+    monkeypatch.setattr(
+        train.importlib,
+        "import_module",
+        lambda name: fake_sft_trainer,
+    )
+
+    # sdpa/eager must stay unregistered so TRL's packing contamination
+    # guard stays loud for non-flash backends.
+    for attn_implementation in ["sdpa", "eager", None]:
+        train._register_trl_flash_attention_variant(attn_implementation)
+
+    assert fake_sft_trainer.FLASH_ATTENTION_VARIANTS == set()
+
+
+def test_training_args_identify_genuine_flash_attention_backends(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "trl",
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+    )
+    from chess_llm.training.training_args import is_flash_attention_implementation
+
+    assert is_flash_attention_implementation("flash_attention_2") is True
+    assert is_flash_attention_implementation("flash_attention_3") is True
+    assert is_flash_attention_implementation("kernels-community/flash-attn2@abc") is True
+    assert is_flash_attention_implementation("sdpa") is False
+    assert is_flash_attention_implementation("eager") is False
+    assert is_flash_attention_implementation(None) is False
 
 
 def test_train_metrics_adds_token_throughput_from_trainer_state():
@@ -223,11 +292,13 @@ def test_train_cli_accepts_auto_resume_checkpoint(monkeypatch):
 
 
 def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_path: Path):
-    sys.modules.setdefault(
+    monkeypatch.setitem(
+        sys.modules,
         "trl",
-        types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
     )
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training import train
     from chess_llm.training.phases import PHASE_A
@@ -256,11 +327,6 @@ def test_dry_run_training_details_reports_rehearsal_schedule(monkeypatch, tmp_pa
         overrides,
         train_dataset_size=725000,
     )
-    training_pkg = sys.modules.get("chess_llm.training")
-    if training_pkg is not None and hasattr(training_pkg, "training_args"):
-        delattr(training_pkg, "training_args")
-    sys.modules.pop("chess_llm.training.training_args", None)
-
     assert "Estimated optimizer steps: 22657" in details
     assert "Warmup steps: 680 (ratio 0.03)" in details
     assert "Trainer eval: disabled" in details
@@ -336,6 +402,233 @@ def test_train_dry_run_estimates_steps_from_actual_train_split(monkeypatch, tmp_
 
     assert train.main() == 0
     assert captured["train_dataset_size"] == 90
+
+
+def test_train_dry_run_resolves_attn_like_real_run_for_packing_report(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "trl",
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+    )
+    import chess_llm.training.training_args as training_args_module
+    from chess_llm.training import train
+    from chess_llm.training.data import mixer
+
+    class FakeDataset:
+        def __len__(self):
+            return 10
+
+    monkeypatch.setattr(
+        mixer,
+        "summarize_phase_data",
+        lambda *args, **kwargs: {"total": 10},
+    )
+    monkeypatch.setattr(
+        mixer,
+        "build_phase_dataset",
+        lambda *args, **kwargs: (FakeDataset(), FakeDataset()),
+    )
+    monkeypatch.setattr(
+        train,
+        "_build_dry_run_training_details",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        train,
+        "attention_candidates",
+        lambda requested: ["flash_attention_2", "sdpa", None],
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_resolve_packing_settings(attn_implementation, packing="auto"):
+        captured["attn"] = attn_implementation
+        captured["packing"] = packing
+        return True, True
+
+    monkeypatch.setattr(
+        training_args_module,
+        "resolve_packing_settings",
+        fake_resolve_packing_settings,
+    )
+    monkeypatch.setattr(
+        train,
+        "parse_args",
+        lambda: Namespace(
+            phase="a",
+            data_root=tmp_path / "data",
+            output_root=tmp_path / "checkpoints",
+            benchmark_dir=tmp_path / "benchmark",
+            base_model=None,
+            dry_run=True,
+            smoke_run=False,
+            eval_only=False,
+            skip_eval=True,
+            require_phase_gate=False,
+            max_train_examples=None,
+            task_upsample=[],
+            max_eval_examples=None,
+            max_benchmark_examples_per_split=None,
+            full_benchmark_eval=False,
+            max_steps=None,
+            num_train_epochs=None,
+            trainer_eval_steps=None,
+            trainer_save_steps=None,
+            skip_trainer_eval=False,
+            resume_from_checkpoint=None,
+            wandb_project="chess-sft",
+            no_wandb=True,
+            allow_wandb_offline=False,
+            run_name=None,
+            wandb_group=None,
+            inference_backend="transformers",
+            attn_implementation="auto",
+            packing="auto",
+            max_length=2048,
+        ),
+    )
+
+    assert train.main() == 0
+    # The dry run must report packing for the backend the real run would
+    # select, not for a literal attn=None under --attn-implementation auto.
+    assert captured["attn"] == "flash_attention_2"
+    assert captured["packing"] == "auto"
+
+
+def _eval_only_args(tmp_path: Path) -> Namespace:
+    return Namespace(
+        phase="a",
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "checkpoints",
+        benchmark_dir=tmp_path / "benchmark",
+        base_model=None,
+        dry_run=False,
+        smoke_run=False,
+        eval_only=True,
+        skip_eval=False,
+        require_phase_gate=False,
+        max_train_examples=None,
+        task_upsample=[],
+        max_eval_examples=None,
+        max_benchmark_examples_per_split=None,
+        full_benchmark_eval=False,
+        max_steps=None,
+        num_train_epochs=None,
+        trainer_eval_steps=None,
+        trainer_save_steps=None,
+        skip_trainer_eval=False,
+        resume_from_checkpoint=None,
+        wandb_project="chess-sft",
+        no_wandb=True,
+        allow_wandb_offline=False,
+        run_name=None,
+        wandb_group=None,
+        inference_backend="transformers",
+        attn_implementation="auto",
+        eval_batch_size=16,
+        eval_max_new_tokens=256,
+        eval_acpl_depth=20,
+        no_acpl=True,
+        full_acpl_report=False,
+        stockfish_path=None,
+    )
+
+
+def test_eval_only_on_untrained_phase_writes_separate_artifact(monkeypatch, tmp_path: Path):
+    from chess_llm.training import train
+
+    captured: dict[str, object] = {}
+
+    def fake_run_eval(model_path, benchmark_dir, pred_path, **kwargs):
+        captured["model"] = model_path
+        captured["pred_path"] = pred_path
+        return 0
+
+    monkeypatch.setattr(train, "_run_eval", fake_run_eval)
+    monkeypatch.setattr(train, "parse_args", lambda: _eval_only_args(tmp_path))
+
+    assert train.main() == 0
+    # No best/ checkpoint: fallback-model metrics must not land in
+    # eval_predictions.results.json, which later merges as this phase's
+    # historical baseline.
+    assert captured["pred_path"] == (
+        tmp_path / "checkpoints" / "phase_a" / "eval_only_predictions.jsonl"
+    )
+    assert captured["model"] != str(tmp_path / "checkpoints" / "phase_a" / "best")
+
+
+def test_eval_only_on_trained_phase_keeps_results_artifact(monkeypatch, tmp_path: Path):
+    from chess_llm.training import train
+
+    best_dir = tmp_path / "checkpoints" / "phase_a" / "best"
+    best_dir.mkdir(parents=True)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_eval(model_path, benchmark_dir, pred_path, **kwargs):
+        captured["model"] = model_path
+        captured["pred_path"] = pred_path
+        return 0
+
+    monkeypatch.setattr(train, "_run_eval", fake_run_eval)
+    monkeypatch.setattr(train, "parse_args", lambda: _eval_only_args(tmp_path))
+
+    assert train.main() == 0
+    assert captured["model"] == str(best_dir)
+    assert captured["pred_path"] == (
+        tmp_path / "checkpoints" / "phase_a" / "eval_predictions.jsonl"
+    )
+
+
+def test_find_best_historical_baseline_takes_min_for_count_metrics(tmp_path: Path):
+    import json
+
+    from chess_llm.training.train import _find_best_historical_baseline
+
+    phase_results = {
+        "a": {"rules": {"legal_moves": 0.80, "missing_move_count": 40.0, "acpl": 250.0}},
+        "b": {"rules": {"legal_moves": 0.70, "missing_move_count": 2.0, "acpl": 100.0}},
+    }
+    for phase_name, results in phase_results.items():
+        phase_dir = tmp_path / f"phase_{phase_name}"
+        phase_dir.mkdir(parents=True)
+        (phase_dir / "eval_predictions.results.json").write_text(
+            json.dumps(results), encoding="utf-8"
+        )
+
+    baseline_path = _find_best_historical_baseline(tmp_path, "c")
+
+    assert baseline_path is not None
+    merged = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert merged["rules"]["legal_moves"] == 0.80
+    # Count metrics are lower-is-better: best-ever is the min, not the max.
+    assert merged["rules"]["missing_move_count"] == 2.0
+    assert merged["rules"]["acpl"] == 100.0
+
+
+def test_train_cli_accepts_pure_bf16_flag(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["chess-llm-train", "--phase", "a", "--pure-bf16"],
+    )
+    assert train.parse_args().pure_bf16 is True
+
+    monkeypatch.setattr(sys, "argv", ["chess-llm-train", "--phase", "a"])
+    assert train.parse_args().pure_bf16 is False
+
+
+def test_training_weight_dtype_defaults_to_fp32_master_weights():
+    from chess_llm.training.train import _training_torch_dtype
+
+    assert _training_torch_dtype(False) == "float32"
+    assert _training_torch_dtype(True) == "auto"
 
 
 def test_resolve_resume_checkpoint_auto_uses_latest_numbered_checkpoint(tmp_path: Path):
@@ -638,7 +931,7 @@ def test_legacy_training_wrappers_alias_package_modules(monkeypatch):
     monkeypatch.syspath_prepend(str(legacy_dir))
 
     for module_name in ["evaluate", "run_curriculum", "train"]:
-        sys.modules.pop(module_name, None)
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     legacy_train = importlib.import_module("train")
     legacy_evaluate = importlib.import_module("evaluate")
@@ -657,12 +950,9 @@ def test_legacy_training_args_wrapper_aliases_package_module(monkeypatch):
         pass
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    for module_name in [
-        "config",
-        "config.training_args",
-        "chess_llm.training.training_args",
-    ]:
-        sys.modules.pop(module_name, None)
+    for module_name in ["config", "config.training_args"]:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    _expire_training_args(monkeypatch)
 
     legacy = importlib.import_module("config.training_args")
     package = importlib.import_module("chess_llm.training.training_args")
@@ -720,7 +1010,7 @@ def test_qwen35_uses_qwen_safe_liger_config(monkeypatch, tmp_path: Path):
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -762,7 +1052,7 @@ def test_build_sft_config_uses_flash_attention_packing_when_available(
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -805,7 +1095,7 @@ def test_build_sft_config_can_force_packing_without_padding_free(
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -842,7 +1132,7 @@ def test_build_sft_config_can_disable_flash_attention_packing(
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -873,7 +1163,7 @@ def test_qwen35_can_opt_into_liger_fused_linear_ce(monkeypatch, tmp_path: Path):
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -891,12 +1181,14 @@ def test_qwen35_can_opt_into_liger_fused_linear_ce(monkeypatch, tmp_path: Path):
     }
 
 
-def test_training_step_estimate_accounts_for_accumulation_and_world_size():
-    sys.modules.setdefault(
+def test_training_step_estimate_accounts_for_accumulation_and_world_size(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
         "trl",
-        types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
+        sys.modules.get("trl")
+        or types.SimpleNamespace(SFTConfig=type("FakeSFTConfig", (), {})),
     )
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import estimate_training_steps
@@ -933,12 +1225,13 @@ def test_build_sft_config_honors_num_train_epochs_override(
             assistant_only_loss=None,
             num_train_epochs=None,
             warmup_steps=None,
+            warmup_ratio=None,
         ):
             self.kwargs = dict(locals())
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -946,16 +1239,15 @@ def test_build_sft_config_honors_num_train_epochs_override(
     cfg = build_sft_config(
         PHASE_A,
         tmp_path,
-        train_dataset_size=3200,
         num_train_epochs=1,
-        world_size=2,
     )
 
     assert cfg.kwargs["num_train_epochs"] == 1
-    assert cfg.kwargs["warmup_steps"] == 2
+    assert cfg.kwargs["warmup_ratio"] == PHASE_A.warmup_ratio
+    assert cfg.kwargs["warmup_steps"] is None
 
 
-def test_build_sft_config_prefers_warmup_steps_when_dataset_size_known(
+def test_build_sft_config_uses_warmup_ratio_not_example_count_estimates(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -968,13 +1260,14 @@ def test_build_sft_config_prefers_warmup_steps_when_dataset_size_known(
             assistant_only_loss=None,
             num_train_epochs=None,
             warmup_steps=None,
+            warmup_ratio=None,
             max_steps=None,
         ):
             self.kwargs = dict(locals())
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -982,11 +1275,13 @@ def test_build_sft_config_prefers_warmup_steps_when_dataset_size_known(
     cfg = build_sft_config(
         PHASE_A,
         tmp_path,
-        train_dataset_size=128,
         max_steps=10,
     )
 
-    assert cfg.kwargs["warmup_steps"] == 1
+    # Warmup must track the Trainer's actual optimizer steps (packing-aware),
+    # so build_sft_config passes warmup_ratio and never a derived step count.
+    assert cfg.kwargs["warmup_ratio"] == 0.03
+    assert cfg.kwargs["warmup_steps"] is None
     assert cfg.kwargs["max_steps"] == 10
 
 
@@ -1011,7 +1306,7 @@ def test_skip_trainer_eval_disables_step_checkpoint_saves_by_default(monkeypatch
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -1050,7 +1345,7 @@ def test_skip_trainer_eval_can_still_save_periodic_checkpoints(monkeypatch, tmp_
             self.kwargs.pop("self")
 
     monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    sys.modules.pop("chess_llm.training.training_args", None)
+    _expire_training_args(monkeypatch)
 
     from chess_llm.training.phases import PHASE_A
     from chess_llm.training.training_args import build_sft_config
@@ -1116,3 +1411,524 @@ def test_bounded_trainer_eval_keeps_short_eval_save_cadence():
     assert overrides.eval_steps == 25
     assert overrides.save_steps == 25
     assert overrides.logging_steps == 5
+
+
+def test_bounded_short_run_cadence_applies_up_to_threshold():
+    from chess_llm.training import train
+
+    args = Namespace(
+        smoke_run=False,
+        max_train_examples=None,
+        max_eval_examples=None,
+        max_benchmark_examples_per_split=None,
+        max_steps=train.SHORT_RUN_CADENCE_MAX_STEPS,
+        trainer_eval_steps=None,
+        trainer_save_steps=None,
+        skip_trainer_eval=False,
+    )
+
+    overrides = train._resolve_run_overrides(args)
+
+    assert overrides.eval_steps == 50
+    assert overrides.save_steps == 50
+    assert overrides.logging_steps == 25
+
+
+def _schedule_args(tmp_path: Path, **overrides) -> Namespace:
+    ns = Namespace(
+        phase="schedule",
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "checkpoints",
+        benchmark_dir=tmp_path / "benchmark",
+        base_model=None,
+        dry_run=False,
+        smoke_run=False,
+        eval_only=False,
+        skip_eval=True,
+        require_phase_gate=False,
+        max_train_examples=None,
+        task_upsample=[],
+        max_eval_examples=None,
+        max_benchmark_examples_per_split=None,
+        full_benchmark_eval=False,
+        max_steps=None,
+        num_train_epochs=None,
+        trainer_eval_steps=None,
+        trainer_save_steps=None,
+        skip_trainer_eval=False,
+        resume_from_checkpoint=None,
+        wandb_project="chess-sft",
+        no_wandb=True,
+        allow_wandb_offline=False,
+        run_name=None,
+        wandb_group=None,
+        inference_backend="transformers",
+        attn_implementation="auto",
+        packing="auto",
+        max_length=2048,
+        schedule_total_examples=None,
+    )
+    for key, value in overrides.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def test_train_cli_accepts_schedule_phase_and_budget(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "schedule",
+            "--schedule-total-examples",
+            "500000",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.phase == "schedule"
+    assert args.schedule_total_examples == 500000
+
+
+def test_schedule_mode_rejects_incompatible_flags(monkeypatch, tmp_path: Path):
+    from chess_llm.training import train
+
+    for overrides in (
+        {"require_phase_gate": True},
+        {"packing": "on"},
+        {"num_train_epochs": 3.0},
+    ):
+        monkeypatch.setattr(
+            train,
+            "parse_args",
+            lambda overrides=overrides: _schedule_args(tmp_path, **overrides),
+        )
+        assert train.main() == 2, overrides
+
+
+def test_schedule_mode_config_error_allows_compatible_flags():
+    from chess_llm.training import train
+
+    assert train._schedule_mode_config_error(
+        Namespace(require_phase_gate=False, packing="auto", num_train_epochs=None)
+    ) is None
+    assert train._schedule_mode_config_error(
+        Namespace(require_phase_gate=False, packing="off", num_train_epochs=1.0)
+    ) is None
+
+
+def test_resolve_schedule_total_examples_takes_min_of_caps():
+    from chess_llm.training.train import _resolve_schedule_total_examples
+
+    assert _resolve_schedule_total_examples(None, None) is None
+    assert _resolve_schedule_total_examples(100_000, None) == 100_000
+    assert _resolve_schedule_total_examples(None, 50_000) == 50_000
+    assert _resolve_schedule_total_examples(100_000, 50_000) == 50_000
+    assert _resolve_schedule_total_examples(20_000, 50_000) == 20_000
+
+
+def test_schedule_training_budget_flows_into_builder_not_limit_dataset(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import json
+
+    from chess_llm.training import train
+    from chess_llm.training.data import mixer
+    from chess_llm.training.schedule import SCHEDULE_V1, SegmentPlan
+
+    plans = [
+        SegmentPlan(
+            index=0,
+            name="only",
+            start_row=0,
+            end_row=64,
+            tier_weights=((1, 1.0),),
+            tier_rows=((1, 64),),
+        ),
+    ]
+
+    class FakeDataset:
+        def __init__(self, size: int):
+            self.size = size
+
+        def __len__(self):
+            return self.size
+
+    captured: dict[str, object] = {}
+
+    def fake_build_schedule_dataset(
+        schedule,
+        data_root,
+        eval_fraction=0.02,
+        seed=42,
+        task_upsample=None,
+        total_examples=None,
+    ):
+        captured["total_examples"] = total_examples
+        return FakeDataset(64), FakeDataset(4), plans
+
+    monkeypatch.setattr(mixer, "build_schedule_dataset", fake_build_schedule_dataset)
+
+    limit_calls: list[object] = []
+
+    def fake_limit(ds, max_examples, *, seed=42):
+        limit_calls.append(max_examples)
+        return ds
+
+    monkeypatch.setattr(train, "_limit_dataset", fake_limit)
+
+    output_dir = tmp_path / "phase_schedule"
+    output_dir.mkdir(parents=True)
+    args = _schedule_args(tmp_path, schedule_total_examples=100)
+    overrides = train.RunOverrides(max_train_examples=64)
+
+    train_ds, eval_ds, out_plans, boundaries = train._build_schedule_training_data(
+        SCHEDULE_V1,
+        args,
+        overrides,
+        {},
+        output_dir,
+    )
+
+    # min(--schedule-total-examples, --max-train-examples) becomes the budget;
+    # the ordered train split must never pass through _limit_dataset.
+    assert captured["total_examples"] == 64
+    assert limit_calls == []
+    assert out_plans == plans
+    assert boundaries == [2]
+
+    payload = json.loads(
+        (output_dir / "schedule_plan.json").read_text(encoding="utf-8")
+    )
+    assert payload["schedule"] == "schedule"
+    assert payload["seed"] == 42
+    assert payload["total_examples"] == 64
+    assert payload["boundary_steps"] == [2]
+    assert payload["segments"][0]["tier_rows"] == {"1": 64}
+
+
+def test_schedule_dry_run_caps_budget_by_max_train_examples(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.training import train
+    from chess_llm.training.data import mixer
+
+    captured: dict[str, object] = {}
+
+    def fake_summarize(schedule, data_root, task_upsample=None, total_examples=None):
+        captured["total_examples"] = total_examples
+        return {
+            "total_examples": total_examples,
+            "tier_pool_sizes": {"tier_1": 1000},
+            "boundary_steps": [2],
+            "segments": [
+                {
+                    "index": 0,
+                    "name": "only",
+                    "start_row": 0,
+                    "end_row": total_examples,
+                    "rows": total_examples,
+                    "tier_rows": {"tier_1": total_examples},
+                },
+            ],
+        }
+
+    monkeypatch.setattr(mixer, "summarize_schedule_data", fake_summarize)
+    monkeypatch.setattr(
+        train,
+        "parse_args",
+        lambda: _schedule_args(
+            tmp_path,
+            dry_run=True,
+            schedule_total_examples=100,
+            max_train_examples=50,
+        ),
+    )
+
+    assert train.main() == 0
+    assert captured["total_examples"] == 50
+
+
+def test_build_sft_config_sequential_dataset_sets_sampler_fields(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            assistant_only_loss=None,
+            train_sampling_strategy=None,
+            shuffle_dataset=None,
+            padding_free=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    _expire_training_args(monkeypatch)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    cfg = build_sft_config(PHASE_A, tmp_path, packing="off", sequential_dataset=True)
+
+    assert cfg.kwargs["train_sampling_strategy"] == "sequential"
+    assert cfg.kwargs["shuffle_dataset"] is False
+    assert cfg.kwargs["packing"] is False
+
+
+def test_build_sft_config_sequential_requires_sampling_strategy_field(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakeSFTConfig:
+        """Stub without train_sampling_strategy/shuffle_dataset fields."""
+
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            assistant_only_loss=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    _expire_training_args(monkeypatch)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    # _filter_supported_sft_kwargs would silently drop the kwarg and degrade
+    # to a RandomSampler, destroying the schedule — this must fail loudly.
+    try:
+        build_sft_config(PHASE_A, tmp_path, packing="off", sequential_dataset=True)
+    except RuntimeError as exc:
+        assert "train_sampling_strategy" in str(exc)
+    else:
+        raise AssertionError("sequential_dataset with old TRL should raise RuntimeError")
+
+
+def test_build_sft_config_sequential_rejects_packing(monkeypatch, tmp_path: Path):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            packing=None,
+            packing_strategy=None,
+            assistant_only_loss=None,
+            train_sampling_strategy=None,
+            shuffle_dataset=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    _expire_training_args(monkeypatch)
+
+    from chess_llm.training.phases import PHASE_A
+    from chess_llm.training.training_args import build_sft_config
+
+    try:
+        build_sft_config(
+            PHASE_A,
+            tmp_path,
+            attn_implementation="sdpa",
+            packing="on",
+            sequential_dataset=True,
+        )
+    except ValueError as exc:
+        assert "packing" in str(exc)
+    else:
+        raise AssertionError("sequential_dataset with packing on should raise ValueError")
+
+
+def _load_schedule_callback(monkeypatch):
+    fake_transformers = sys.modules.get("transformers") or types.SimpleNamespace(
+        TrainerCallback=type("TrainerCallback", (), {}),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    _expire_module(monkeypatch, "chess_llm.training.schedule_callback")
+    return importlib.import_module("chess_llm.training.schedule_callback")
+
+
+def _callback_plans():
+    from chess_llm.training.schedule import SegmentPlan
+
+    return [
+        SegmentPlan(
+            index=0,
+            name="mechanics",
+            start_row=0,
+            end_row=64,
+            tier_weights=((1, 0.5), (2, 0.5)),
+            tier_rows=((1, 32), (2, 32)),
+        ),
+        SegmentPlan(
+            index=1,
+            name="planning",
+            start_row=64,
+            end_row=128,
+            tier_weights=((1, 0.2), (7, 0.8)),
+            tier_rows=((1, 13), (7, 51)),
+        ),
+    ]
+
+
+def test_mixing_schedule_callback_injects_schedule_logs(monkeypatch):
+    module = _load_schedule_callback(monkeypatch)
+
+    callback = module.MixingScheduleCallback(_callback_plans(), [2, 4])
+
+    logs: dict[str, object] = {}
+    callback.on_log(
+        None,
+        types.SimpleNamespace(global_step=1),
+        types.SimpleNamespace(),
+        logs=logs,
+    )
+    assert logs["schedule/segment_index"] == 0
+    assert logs["schedule/tier_weight_1"] == 0.5
+    assert logs["schedule/tier_weight_2"] == 0.5
+    assert logs["schedule/tier_weight_7"] == 0.0
+    assert logs["schedule/replay_fraction_t12"] == 1.0
+    assert logs["schedule/segment_progress"] == 0.5
+
+    late_logs: dict[str, object] = {}
+    callback.on_log(
+        None,
+        types.SimpleNamespace(global_step=3),
+        types.SimpleNamespace(),
+        logs=late_logs,
+    )
+    assert late_logs["schedule/segment_index"] == 1
+    assert late_logs["schedule/tier_weight_7"] == 0.8
+    assert late_logs["schedule/replay_fraction_t12"] == 0.2
+    assert late_logs["schedule/segment_progress"] == 0.5
+
+
+def test_mixing_schedule_callback_forces_saves_at_interior_boundaries(monkeypatch):
+    module = _load_schedule_callback(monkeypatch)
+
+    callback = module.MixingScheduleCallback(_callback_plans(), [2, 4])
+
+    control = types.SimpleNamespace(should_save=False, should_evaluate=False)
+    callback.on_step_end(None, types.SimpleNamespace(global_step=1), control)
+    assert control.should_save is False
+    assert control.should_evaluate is False
+
+    callback.on_step_end(None, types.SimpleNamespace(global_step=2), control)
+    assert control.should_save is True
+    assert control.should_evaluate is True
+
+    # The final boundary coincides with the end of training, where the
+    # Trainer saves/evaluates through its own end-of-train path.
+    final_control = types.SimpleNamespace(should_save=False, should_evaluate=False)
+    callback.on_step_end(None, types.SimpleNamespace(global_step=4), final_control)
+    assert final_control.should_save is False
+    assert final_control.should_evaluate is False
+
+    # With trainer eval disabled, boundaries must not force an evaluation
+    # (the Trainer would crash evaluating without an eval dataset).
+    no_eval_callback = module.MixingScheduleCallback(
+        _callback_plans(), [2, 4], evaluate_at_boundaries=False,
+    )
+    no_eval_control = types.SimpleNamespace(should_save=False, should_evaluate=False)
+    no_eval_callback.on_step_end(None, types.SimpleNamespace(global_step=2), no_eval_control)
+    assert no_eval_control.should_save is True
+    assert no_eval_control.should_evaluate is False
+
+
+def test_mixing_schedule_callback_warns_on_max_steps_drift(monkeypatch, caplog):
+    module = _load_schedule_callback(monkeypatch)
+
+    callback = module.MixingScheduleCallback(_callback_plans(), [2, 4])
+
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        callback.on_train_begin(
+            None,
+            types.SimpleNamespace(max_steps=10),
+            types.SimpleNamespace(),
+        )
+    assert any("Schedule drift" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        callback.on_train_begin(
+            None,
+            types.SimpleNamespace(max_steps=4),
+            types.SimpleNamespace(),
+        )
+    assert not caplog.records
+
+
+def test_promote_callback_to_front_moves_before_integrations():
+    from chess_llm.training import train
+
+    sentinel = object()
+    handler = types.SimpleNamespace(callbacks=["progress", "wandb", sentinel])
+    trainer = types.SimpleNamespace(callback_handler=handler)
+
+    assert train._promote_callback_to_front(trainer, sentinel) is True
+    assert handler.callbacks[0] is sentinel
+
+    missing = types.SimpleNamespace(callback_handler=None)
+    assert train._promote_callback_to_front(missing, sentinel) is False
+
+
+def test_find_best_historical_baseline_merges_all_phases_for_schedule(tmp_path: Path):
+    import json
+
+    from chess_llm.training.train import _find_best_historical_baseline
+
+    phase_results = {
+        "a": {"rules": {"legal_moves": 0.80}},
+        "c": {"rules": {"legal_moves": 0.90}},
+    }
+    for phase_name, results in phase_results.items():
+        phase_dir = tmp_path / f"phase_{phase_name}"
+        phase_dir.mkdir(parents=True)
+        (phase_dir / "eval_predictions.results.json").write_text(
+            json.dumps(results), encoding="utf-8"
+        )
+
+    baseline_path = _find_best_historical_baseline(tmp_path, "schedule")
+
+    assert baseline_path is not None
+    merged = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert merged["rules"]["legal_moves"] == 0.90
+
+
+def test_long_bounded_runs_keep_default_eval_save_cadence():
+    from chess_llm.training import train
+
+    args = Namespace(
+        smoke_run=False,
+        max_train_examples=None,
+        max_eval_examples=None,
+        max_benchmark_examples_per_split=None,
+        max_steps=5000,
+        trainer_eval_steps=None,
+        trainer_save_steps=None,
+        skip_trainer_eval=False,
+    )
+
+    overrides = train._resolve_run_overrides(args)
+
+    # Long bounded runs must not be forced onto the <=50-step smoke cadence;
+    # leaving these None defers to the normal configured trainer defaults.
+    assert overrides.max_steps == 5000
+    assert overrides.eval_steps is None
+    assert overrides.save_steps is None
+    assert overrides.logging_steps is None

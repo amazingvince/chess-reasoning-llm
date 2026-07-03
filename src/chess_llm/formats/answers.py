@@ -19,6 +19,20 @@ _THINK_MOVE_STRICT_RE = re.compile(
 )
 _BARE_UCI_RE = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?", re.IGNORECASE)
 _UCI_RE = re.compile(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b", re.IGNORECASE)
+# Complete FEN strings: piece placement, side, castling, en passant, and
+# optional move counters.  FEN rank rows such as "b2b4" would otherwise parse
+# as UCI moves during prose fallback extraction.
+_FEN_STRING_RE = re.compile(
+    r"(?:[prnbqk1-8]+/){7}[prnbqk1-8]+"
+    r"\s+[wb]\s+(?:-|[a-hkq]+)\s+(?:-|[a-h][36])"
+    r"(?:\s+\d+\s+\d+)?",
+    re.IGNORECASE,
+)
+
+
+def strip_fen_strings(text: str) -> str:
+    """Remove complete FEN strings so board rows cannot parse as UCI moves."""
+    return _FEN_STRING_RE.sub(" ", text or "")
 
 
 def parse_answer(text: str) -> ParsedAnswer:
@@ -63,7 +77,7 @@ def parse_answer(text: str) -> ParsedAnswer:
             format_type="bare_uci",
         )
 
-    prose_moves = _unique_moves(_UCI_RE.findall(raw_text))
+    prose_moves = _unique_moves(_UCI_RE.findall(strip_fen_strings(raw_text)))
     if len(prose_moves) == 1:
         return ParsedAnswer(
             raw_text=raw_text,
@@ -109,7 +123,7 @@ def extract_move(text: str) -> str | None:
     if _BARE_UCI_RE.fullmatch(stripped):
         return stripped
 
-    match = _UCI_RE.search(stripped)
+    match = _UCI_RE.search(strip_fen_strings(stripped))
     if match:
         return match.group(1).lower()
     return None

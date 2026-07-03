@@ -96,3 +96,20 @@ def test_sanitized_cache_path_changes_when_same_size_file_content_changes(tmp_pa
     second_path = _sanitized_jsonl_path(src, tmp_path / "cache")
 
     assert second_path != first_path
+
+
+def test_sanitized_cache_path_includes_sanitizer_version(monkeypatch, tmp_path):
+    from chess_llm.training.data import loader
+
+    src = tmp_path / "tier1" / "rows.jsonl"
+    src.parent.mkdir()
+    src.write_text(json.dumps(_example()), encoding="utf-8")
+
+    assert loader._SANITIZER_VERSION >= 2
+    first_path = loader._sanitized_jsonl_path(src, tmp_path / "cache")
+    assert f".v{loader._SANITIZER_VERSION}." in first_path.name
+
+    monkeypatch.setattr(loader, "_SANITIZER_VERSION", loader._SANITIZER_VERSION + 1)
+    bumped_path = loader._sanitized_jsonl_path(src, tmp_path / "cache")
+
+    assert bumped_path != first_path

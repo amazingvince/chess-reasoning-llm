@@ -14,6 +14,7 @@
 1.12 FEN rank expansion (expand compressed rank row into file cells)
 1.13 FEN rank cell edit (rewrite one compressed rank row cell)
 1.14 FEN board edit (apply changed square edits to board FEN)
+1.19 Multi-move state tracking (apply 2-3 moves, report resulting FEN)
 """
 
 from __future__ import annotations
@@ -60,6 +61,15 @@ _DEFAULT_STATE_TRACKING_MIN_PLIES = 1
 _DEFAULT_STATE_TRACKING_MAX_PLIES = 1
 
 
+def _shuffled_fen_pool(config: dict, rng: Random) -> list:
+    """Return a locally shuffled copy of the shared fen_pool prefix."""
+    pool = list(config.get("fen_pool", []))
+    shuffle = getattr(rng, "shuffle", None)
+    if callable(shuffle):
+        shuffle(pool)
+    return pool
+
+
 def _append_full_fen_state(user_text: str, context: dict) -> str:
     """Append non-board FEN fields so full-FEN targets are inferable."""
     state_lines = [
@@ -73,10 +83,17 @@ def _append_full_fen_state(user_text: str, context: dict) -> str:
     return f"{user_text}\n" + "\n".join(state_lines)
 
 
-def _state_tracking_ply_bounds(config: dict) -> tuple[int, int]:
+def _state_tracking_ply_bounds(
+    config: dict,
+    *,
+    min_key: str = "state_tracking_min_plies",
+    max_key: str = "state_tracking_max_plies",
+    default_min: int = _DEFAULT_STATE_TRACKING_MIN_PLIES,
+    default_max: int = _DEFAULT_STATE_TRACKING_MAX_PLIES,
+) -> tuple[int, int]:
     """Return configured state-tracking move bounds with Phase A-safe defaults."""
-    min_plies = int(config.get("state_tracking_min_plies", _DEFAULT_STATE_TRACKING_MIN_PLIES))
-    max_plies = int(config.get("state_tracking_max_plies", _DEFAULT_STATE_TRACKING_MAX_PLIES))
+    min_plies = int(config.get(min_key, default_min))
+    max_plies = int(config.get(max_key, default_max))
     min_plies = max(1, min_plies)
     max_plies = max(min_plies, max_plies)
     return min_plies, max_plies
@@ -323,24 +340,6 @@ def _expand_fen_rank_row(row: str) -> list[str]:
     return cells
 
 
-def _compress_fen_rank_cells(cells: list[str]) -> str:
-    if len(cells) != 8:
-        raise ValueError(f"FEN rank cells must contain 8 cells, got {len(cells)}")
-    parts: list[str] = []
-    empties = 0
-    for cell in cells:
-        if cell == "1":
-            empties += 1
-            continue
-        if empties:
-            parts.append(str(empties))
-            empties = 0
-        parts.append(cell)
-    if empties:
-        parts.append(str(empties))
-    return "".join(parts)
-
-
 def _format_fen_rank_expansion_answer(rank: int, row: str) -> str:
     cells = _expand_fen_rank_row(row)
     assignments = [
@@ -348,13 +347,6 @@ def _format_fen_rank_expansion_answer(rank: int, row: str) -> str:
         for file_name, cell in zip(chess.FILE_NAMES, cells, strict=True)
     ]
     return f"rank {rank}: {'; '.join(assignments)}"
-
-
-def _apply_single_rank_cell_edit(row: str, file_name: str, after_fen: str) -> str:
-    cells = _expand_fen_rank_row(row)
-    file_index = chess.FILE_NAMES.index(file_name)
-    cells[file_index] = after_fen
-    return _compress_fen_rank_cells(cells)
 
 
 def _format_rank_cell_edit_answer(rank: str, before_row: str, after_row: str) -> str:
@@ -527,7 +519,7 @@ class FENToBoard(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -559,7 +551,7 @@ class BoardToFEN(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -572,7 +564,7 @@ class BoardToFEN(TaskGenerator):
             board = board_from_raw(raw)
             if board is None:
                 continue
-            fen = board.fen(en_passant="fen")
+            fen = board.fen()
             raw["fen"] = fen
             ascii_board = _board_to_ascii(board)
 
@@ -597,7 +589,7 @@ class PieceIdentification(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         square_query_count = 0
@@ -749,7 +741,7 @@ class PieceCounting(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -813,7 +805,12 @@ class PieceCounting(TaskGenerator):
                 piece_type_name = self.rng.choice(
                     ["pawn", "knight", "bishop", "rook", "queen", "piece"]
                 )
-            raw.update({"color": color, "piece": piece_type_name})
+            # Only expose color/piece when the template uses them so the
+            # example identity is stable for templates that use neither.
+            if "{color}" in tpl:
+                raw["color"] = color
+            if "{piece}" in tpl:
+                raw["piece"] = piece_type_name
             user_text = self.render_template(raw, tpl)
 
             # Branch the answer based on the selected template
@@ -890,7 +887,7 @@ class _MaterialDecompositionTask(TaskGenerator):
         raise NotImplementedError
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -996,7 +993,7 @@ class SquareLookup(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -1045,7 +1042,7 @@ class RankLookup(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -1090,7 +1087,7 @@ class SquareCoordinates(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -1142,7 +1139,7 @@ class FENRankExpansion(TaskGenerator):
         return 1
 
     def generate(self) -> Iterator[dict]:
-        pool = self.config.get("fen_pool", [])
+        pool = _shuffled_fen_pool(self.config, self.rng)
         target = self.target_volume()
         count = 0
         for entry in pool:
@@ -1228,11 +1225,9 @@ class FENRankCellEdit(TaskGenerator):
             file_name = chess.FILE_NAMES[chess.square_file(square)]
             rank = str(chess.square_rank(square) + 1)
             before_row = _fen_rank_row(before, int(rank))
-            after_row = _apply_single_rank_cell_edit(
-                before_row,
-                file_name,
-                str(changed["after_fen"]),
-            )
+            # Read the taught row from the actual pushed board so multi-edit
+            # ranks (castling, en passant, promotions) stay truthful.
+            after_row = _fen_rank_row(board, int(rank))
             answer = _format_rank_cell_edit_answer(rank, before_row, after_row)
             metadata = dict(raw_start.get("metadata", {}))
             metadata.update(
@@ -1547,11 +1542,25 @@ class FENRowApplication(TaskGenerator):
 class StateTracking(TaskGenerator):
     """Task 1.5: Apply one move by default and track resulting position."""
 
+    ply_min_config_key = "state_tracking_min_plies"
+    ply_max_config_key = "state_tracking_max_plies"
+    default_min_plies = _DEFAULT_STATE_TRACKING_MIN_PLIES
+    default_max_plies = _DEFAULT_STATE_TRACKING_MAX_PLIES
+
     def task_id(self) -> str:
         return "1.5_state_tracking"
 
     def tier(self) -> int:
         return 1
+
+    def _ply_bounds(self) -> tuple[int, int]:
+        return _state_tracking_ply_bounds(
+            self.config,
+            min_key=self.ply_min_config_key,
+            max_key=self.ply_max_config_key,
+            default_min=self.default_min_plies,
+            default_max=self.default_max_plies,
+        )
 
     def generate(self) -> Iterator[dict]:
         game_positions = list(self.config.get("game_positions", []))
@@ -1563,7 +1572,7 @@ class StateTracking(TaskGenerator):
             shuffle(fallback_positions)
         candidate_positions = game_positions + fallback_positions
         count = 0
-        min_plies, max_plies = _state_tracking_ply_bounds(self.config)
+        min_plies, max_plies = self._ply_bounds()
 
         for pos in candidate_positions:
             if count >= target:
@@ -1592,7 +1601,7 @@ class StateTracking(TaskGenerator):
                     _state_tracking_move_detail(before, move, board, len(moves_played))
                 )
 
-            if not moves_played:
+            if len(moves_played) < min_plies:
                 continue
 
             result_fen = board.fen()
@@ -1625,3 +1634,19 @@ class StateTracking(TaskGenerator):
                 raw, template_text=user_text, assistant_content=answer
             )
             count += 1
+
+
+class MultiMoveStateTracking(StateTracking):
+    """Task 1.19: Apply 2-3 moves and report only the resulting FEN.
+
+    A separate task id (not a 1.5 config knob) so the frozen 1-ply
+    state_tracking metric stays comparable across runs.
+    """
+
+    ply_min_config_key = "multi_state_tracking_min_plies"
+    ply_max_config_key = "multi_state_tracking_max_plies"
+    default_min_plies = 2
+    default_max_plies = 3
+
+    def task_id(self) -> str:
+        return "1.19_multi_move_state_tracking"

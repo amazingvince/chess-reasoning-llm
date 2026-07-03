@@ -1,6 +1,9 @@
 import json
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 from chess_llm.artifacts.jsonl import write_jsonl
 from chess_llm.artifacts.schemas import (
@@ -10,11 +13,24 @@ from chess_llm.artifacts.schemas import (
     PromptArtifact,
     RolloutArtifact,
 )
-from chess_llm.autodata.failure_buckets import ILLEGAL_MOVE, LEGAL_UNSCORED, MISSING_FEN, PARSE_FAILURE
+from chess_llm.autodata.failure_buckets import (
+    ILLEGAL_MOVE,
+    INVALID_FEN,
+    LEGAL_UNSCORED,
+    MISSING_FEN,
+    PARSE_FAILURE,
+)
 from chess_llm.autodata.sft_refresh import build_sft_refresh, main
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+CHESS960_FEN = "bbqnnrkr/pppppppp/8/8/8/8/PPPPPPPP/BBQNNRKR w KQkq - 0 1"
+
+
+def _blocklist_file(tmp_path: Path, fens: tuple[str, ...] = ()) -> Path:
+    path = tmp_path / "blocklist.txt"
+    path.write_text("".join(f"{fen}\n" for fen in fens), encoding="utf-8")
+    return path
 
 
 def _prompt(
@@ -111,7 +127,13 @@ def test_parse_failure_creates_format_repair_row_that_passes_tier7_validation(tm
         [_judgment("judgment-1", "rollout-1", failure_bucket=PARSE_FAILURE)],
     )
 
-    result = build_sft_refresh(prompts_path, rollouts_path, judgments_path, tmp_path / "refresh")
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
 
     rows = _read_rows(result.format_repair_path)
     assert result.format_repair_count == 1
@@ -144,7 +166,13 @@ def test_illegal_move_creates_move_correction_row_from_gold_answer(tmp_path):
         [_judgment("judgment-1", "rollout-1", legal=False, failure_bucket=ILLEGAL_MOVE)],
     )
 
-    result = build_sft_refresh(prompts_path, rollouts_path, judgments_path, tmp_path / "refresh")
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
 
     rows = _read_rows(result.move_correction_path)
     assert result.format_repair_count == 0
@@ -178,6 +206,7 @@ def test_high_regret_legal_move_creates_move_correction_from_teacher_move(tmp_pa
         judgments_path,
         tmp_path / "refresh",
         min_regret_cp=100.0,
+        blocklist_path=_blocklist_file(tmp_path),
     )
 
     rows = _read_rows(result.move_correction_path)
@@ -204,7 +233,13 @@ def test_high_regret_legal_move_without_teacher_is_skipped(tmp_path):
         ],
     )
 
-    result = build_sft_refresh(prompts_path, rollouts_path, judgments_path, tmp_path / "refresh")
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
 
     assert result.move_correction_count == 0
     assert result.skipped_count == 1
@@ -241,7 +276,13 @@ def test_skips_low_signal_rows_and_records_reasons(tmp_path):
     ]
     prompts_path, rollouts_path, judgments_path = _write_artifacts(tmp_path, prompts, rollouts, judgments)
 
-    result = build_sft_refresh(prompts_path, rollouts_path, judgments_path, tmp_path / "refresh")
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
 
     assert result.format_repair_count == 1
     assert result.move_correction_count == 0
@@ -263,6 +304,8 @@ def test_cli_writes_outputs_and_manifest(tmp_path):
     )
     output_dir = tmp_path / "refresh"
 
+    blocklist_path = _blocklist_file(tmp_path)
+
     exit_code = main(
         [
             "--prompts",
@@ -273,6 +316,8 @@ def test_cli_writes_outputs_and_manifest(tmp_path):
             str(judgments_path),
             "--output-dir",
             str(output_dir),
+            "--blocklist-path",
+            str(blocklist_path),
         ]
     )
 
@@ -282,3 +327,199 @@ def test_cli_writes_outputs_and_manifest(tmp_path):
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["format_repair_count"] == 1
     assert manifest["move_correction_count"] == 0
+    assert manifest["chess960"] is False
+    assert manifest["blocklist_path"] == str(blocklist_path)
+    assert manifest["blocklisted_count"] == 0
+
+
+def test_blocklisted_fen_rows_are_dropped_and_logged(tmp_path, caplog):
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path,
+        [_prompt("planning_00000")],
+        [_rollout("rollout-1", "planning_00000")],
+        [_judgment("judgment-1", "rollout-1", failure_bucket=PARSE_FAILURE)],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chess_llm.autodata.sft_refresh"):
+        result = build_sft_refresh(
+            prompts_path,
+            rollouts_path,
+            judgments_path,
+            tmp_path / "refresh",
+            blocklist_path=_blocklist_file(tmp_path, (STARTING_FEN,)),
+        )
+
+    assert result.format_repair_count == 0
+    assert result.move_correction_count == 0
+    assert result.skip_reasons["blocklisted_fen"] == 1
+    assert "Dropped 1 refresh row(s)" in caplog.text
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["blocklisted_count"] == 1
+    assert manifest["skip_reasons"]["blocklisted_fen"] == 1
+
+
+def test_missing_explicit_blocklist_raises(tmp_path):
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path,
+        [_prompt("planning_00000")],
+        [_rollout("rollout-1", "planning_00000")],
+        [_judgment("judgment-1", "rollout-1", failure_bucket=PARSE_FAILURE)],
+    )
+
+    with pytest.raises(FileNotFoundError):
+        build_sft_refresh(
+            prompts_path,
+            rollouts_path,
+            judgments_path,
+            tmp_path / "refresh",
+            blocklist_path=tmp_path / "does_not_exist.txt",
+        )
+
+
+def test_refresh_rows_include_previous_answer_in_user_prompt(tmp_path):
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path,
+        [_prompt("planning_00000"), _prompt("planning_00001", gold_answer="d2d4")],
+        [
+            _rollout("rollout-1", "planning_00000", raw_output="I cannot decide."),
+            _rollout(
+                "rollout-2",
+                "planning_00001",
+                raw_output="<move>d2d4</move>",
+                move_uci="d2d4",
+            ),
+        ],
+        [
+            _judgment("judgment-1", "rollout-1", failure_bucket=PARSE_FAILURE),
+            _judgment(
+                "judgment-2",
+                "rollout-2",
+                legal=True,
+                failure_bucket=None,
+                teacher_move_uci="e2e4",
+                regret_cp=125.0,
+            ),
+        ],
+    )
+
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
+
+    repair_rows = _read_rows(result.format_repair_path)
+    correction_rows = _read_rows(result.move_correction_path)
+    assert repair_rows[0]["messages"][1]["content"] == (
+        f"FEN: {STARTING_FEN}\nChoose the best move.\n\n"
+        "Previous answer:\nI cannot decide.\n\n"
+        "The previous answer was rejected. Reply with the corrected move."
+    )
+    assert correction_rows[0]["messages"][1]["content"] == (
+        f"FEN: {STARTING_FEN}\nChoose the best move.\n\n"
+        "Previous answer:\n<move>d2d4</move>\n\n"
+        "The previous answer was rejected. Reply with the corrected move."
+    )
+
+
+def test_chess960_flag_validates_and_labels_refresh_rows(tmp_path):
+    explicit_standard = _prompt("planning_00001")
+    explicit_standard.metadata["is_chess960"] = False
+    prompts = [
+        _prompt("chess960_00000", fen=CHESS960_FEN),
+        _prompt("planning_00000"),
+        explicit_standard,
+    ]
+    rollouts = [
+        _rollout("rollout-960", "chess960_00000"),
+        _rollout("rollout-std", "planning_00000"),
+        _rollout("rollout-explicit-std", "planning_00001"),
+    ]
+    judgments = [
+        _judgment("judgment-960", "rollout-960", failure_bucket=PARSE_FAILURE),
+        _judgment("judgment-std", "rollout-std", failure_bucket=PARSE_FAILURE),
+        _judgment("judgment-explicit-std", "rollout-explicit-std", failure_bucket=PARSE_FAILURE),
+    ]
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path, prompts, rollouts, judgments
+    )
+    blocklist_path = _blocklist_file(tmp_path)
+
+    without_flag = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh_std",
+        blocklist_path=blocklist_path,
+    )
+    with_flag = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh_960",
+        chess960=True,
+        blocklist_path=blocklist_path,
+    )
+
+    assert without_flag.skip_reasons["invalid_fen"] == 1
+
+    assert with_flag.format_repair_count == 3
+    rows = _read_rows(with_flag.format_repair_path)
+    assert [row["fen"] for row in rows] == [CHESS960_FEN, STARTING_FEN, STARTING_FEN]
+    # Run flag is the default; explicit prompt metadata still wins, matching
+    # the judging-time convention in chess_llm.evals.batch_judge.
+    assert [row["is_chess960"] for row in rows] == [True, True, False]
+    manifest = json.loads(with_flag.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["chess960"] is True
+
+
+def test_move_correction_skipped_when_target_equals_model_move(tmp_path):
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path,
+        [_prompt("planning_00000")],
+        [_rollout("rollout-1", "planning_00000", raw_output="<move>d2d4</move>", move_uci="d2d4")],
+        [
+            _judgment(
+                "judgment-1",
+                "rollout-1",
+                legal=True,
+                failure_bucket=None,
+                teacher_move_uci="d2d4",
+                regret_cp=150.0,
+            )
+        ],
+    )
+
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
+
+    assert result.move_correction_count == 0
+    assert result.skip_reasons["target_equals_model_move"] == 1
+
+
+def test_invalid_fen_judgment_bucket_is_skipped_as_data_error(tmp_path):
+    prompts_path, rollouts_path, judgments_path = _write_artifacts(
+        tmp_path,
+        [_prompt("planning_00000", fen="8/8/8/8/8/8/8/8 w - - 0 1")],
+        [_rollout("rollout-1", "planning_00000")],
+        [_judgment("judgment-1", "rollout-1", legal=None, failure_bucket=INVALID_FEN)],
+    )
+
+    result = build_sft_refresh(
+        prompts_path,
+        rollouts_path,
+        judgments_path,
+        tmp_path / "refresh",
+        blocklist_path=_blocklist_file(tmp_path),
+    )
+
+    assert result.format_repair_count == 0
+    assert result.move_correction_count == 0
+    assert result.skip_reasons["invalid_fen"] == 1

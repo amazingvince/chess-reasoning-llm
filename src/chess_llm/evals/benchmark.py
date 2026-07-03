@@ -15,15 +15,18 @@ import chess
 
 from chess_llm.core.legality import (
     classify_move_legality,
+    format_legal_filter_trace_answer,
     format_legality_answer,
     legality_binary_accuracy,
     legality_reason_accuracy,
     random_illegal_move_with_reason,
 )
+from chess_llm.core.rays import SLIDER_RAY_DIRECTIONS, format_ray_walk_answer
 from chess_llm.core.board import is_legal_move
 from chess_llm.formats.answers import (
     extract_move as _extract_move_from_answer_text,
     extract_uci_from_move_tag as _extract_uci_from_move_tag,
+    strip_fen_strings as _strip_fen_strings,
     validate_think_move_format,
 )
 from chess_llm.formats.board import render_ascii_board
@@ -91,17 +94,22 @@ DIAGNOSTIC_TASK_TYPES = frozenset({
     "piece_legal_filter",
     "king_safety_filter",
     "legal_moves_by_piece",
+    "ray_walk",
+    "legal_filter_trace",
+    "multi_state_tracking",
 })
 FULL_FEN_STATE_PROMPT_TASK_TYPES = frozenset({
     "board_to_fen",
     "fen_assembly",
     "fen_row_application",
     "state_tracking",
+    "multi_state_tracking",
 })
 CANONICAL_START_FEN_PROMPT_TASK_TYPES = frozenset({
     "fen_assembly",
     "fen_row_application",
     "state_tracking",
+    "multi_state_tracking",
 })
 
 SPLIT_TASK_TYPES: dict[str, list[str]] = {
@@ -124,6 +132,7 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "material_piece_counts",
         "material_value_totals",
         "material_balance_trace",
+        "multi_state_tracking",
     ],
     "rules": [
         "legal_moves",
@@ -137,6 +146,8 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "piece_legal_filter",
         "king_safety_filter",
         "legal_moves_by_piece",
+        "ray_walk",
+        "legal_filter_trace",
     ],
     "tactics": ["capture_id", "hanging_pieces", "threats", "tactical_patterns"],
     "evaluation": ["material_balance", "eval_bucket", "pawn_structure"],
@@ -166,6 +177,7 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "fen_assembly": "Starting FEN: {fen}\nMove: {move}\nUse square lookups and rank edits to assemble the resulting full FEN.",
     "fen_row_application": "Starting FEN: {fen}\nMove: {move}\nRewrite the affected compressed FEN rank rows and give Result FEN.",
     "state_tracking": "Starting FEN: {fen}\nAfter the moves {moves}, what is the resulting position?",
+    "multi_state_tracking": "Starting FEN: {fen}\nAfter the moves {moves}, what is the resulting position?",
     "legal_moves": "FEN: {fen}\nList all legal moves.",
     "side_piece_inventory": "FEN: {fen}\nList the side-to-move pieces and their squares.",
     "piece_legal_moves": "FEN: {fen}\nWhat legal moves does the piece on {source_square} have?",
@@ -173,6 +185,8 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "piece_legal_filter": "FEN: {fen}\nFor the piece on {source_square}, split pseudo-legal moves into legal and rejected moves with rejection reasons.",
     "king_safety_filter": "FEN: {fen}\nFor move {move}, decide whether king safety allows it.",
     "legal_moves_by_piece": "FEN: {fen}\nGroup all legal moves by side-to-move piece.",
+    "ray_walk": "FEN: {fen}\nWalk each ray for the slider on {source_square}: list every square until a blocker, capture, or the board edge, then list the resulting moves.",
+    "legal_filter_trace": "FEN: {fen}\nFor every side-to-move piece, list pseudo-legal moves, reject illegal ones with reasons, then give all legal moves.",
     "check_detection": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
     "captures": "FEN: {fen}\nList all capture moves available.",
     "special_rules": "Given FEN: {fen}\nList any special moves available (castling, en passant, promotion).",
@@ -216,6 +230,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "fen_assembly": "fen_exact_match",
     "fen_row_application": "fen_exact_match",
     "state_tracking": "fen_exact_match",
+    "multi_state_tracking": "fen_exact_match",
     "legal_moves": "uci_set_jaccard",
     "side_piece_inventory": "side_piece_inventory",
     "piece_legal_moves": "uci_set_jaccard",
@@ -223,6 +238,8 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "piece_legal_filter": "text_exact_match",
     "king_safety_filter": "text_exact_match",
     "legal_moves_by_piece": "text_exact_match",
+    "ray_walk": "text_exact_match",
+    "legal_filter_trace": "text_exact_match",
     "check_detection": "check_state",
     "captures": "uci_set_jaccard",
     "special_rules": "special_rules",
@@ -261,7 +278,7 @@ _META_KEYS = frozenset({
 
 _NO_MOVE_RE = re.compile(
     r"\b(?:no|none|zero)\b.*\b(?:legal\s+)?(?:moves?|captures?)\b"
-    r"|(?:legal\s+)?(?:moves?|captures?)\s+available\s*:\s*(?:none|no)\b",
+    r"|(?:legal\s+)?(?:moves?|captures?)(?:\s+available)?\s*:\s*(?:none|no)\b",
     re.IGNORECASE,
 )
 
@@ -289,6 +306,8 @@ _WDL_LABELS = {
     -2: "Loss for the side to move.",
 }
 _STATE_TRACKING_MAX_PLIES = 1
+_MULTI_STATE_TRACKING_MIN_PLIES = 2
+_MULTI_STATE_TRACKING_MAX_PLIES = 3
 
 
 def _append_full_fen_state(user_text: str, context: dict) -> str:
@@ -500,6 +519,12 @@ def _per_piece_group_jaccard(prediction: str, gold: str) -> float:
     return sum(scores) / len(scores)
 
 
+def _f1_from_precision_recall(precision: float, recall: float) -> float:
+    if precision + recall == 0.0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
+
+
 def legal_moves_by_piece_diagnostics(prediction: str, gold: str) -> dict[str, float]:
     """Diagnostic partial metrics for the grouped legal-move task."""
     lowered = (prediction or "").lower()
@@ -520,10 +545,71 @@ def legal_moves_by_piece_diagnostics(prediction: str, gold: str) -> dict[str, fl
         "all_moves_precision": move_scores["precision"],
         "all_moves_recall": move_scores["recall"],
         "all_moves_jaccard": move_scores["jaccard"],
+        "set_f1": _f1_from_precision_recall(
+            move_scores["precision"],
+            move_scores["recall"],
+        ),
         "per_piece_group_jaccard": _per_piece_group_jaccard(prediction, gold),
         "illegal_extra_count": move_scores["illegal_extra_count"],
         "missing_move_count": move_scores["missing_move_count"],
     }
+
+
+_PIECE_LEGAL_FILTER_SECTIONS = ("pseudo-legal", "legal", "rejected")
+
+
+def _piece_legal_filter_sections(text: str) -> dict[str, set[str]]:
+    sections: dict[str, set[str]] = {name: set() for name in _PIECE_LEGAL_FILTER_SECTIONS}
+    for line in (text or "").splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith("pseudo-legal"):
+            sections["pseudo-legal"] |= _uci_set(stripped)
+        elif stripped.startswith("legal"):
+            sections["legal"] |= _uci_set(stripped)
+        elif stripped.startswith("rejected"):
+            sections["rejected"] |= _uci_set(stripped)
+    return sections
+
+
+def piece_legal_filter_set_f1(prediction: str, gold: str) -> float:
+    """Mean per-section F1 over the 2.7 pseudo-legal/legal/rejected move sets.
+
+    Each labelled answer line ("Pseudo-legal from ...", "Legal:", and
+    "Rejected:") is parsed into a UCI move set; each section scores the F1
+    between the predicted and gold sets (both empty counts as 1.0, matching
+    "Rejected: none"), and the result is the mean across the three sections.
+    """
+    pred_sections = _piece_legal_filter_sections(prediction)
+    gold_sections = _piece_legal_filter_sections(gold)
+    scores = []
+    for name in _PIECE_LEGAL_FILTER_SECTIONS:
+        overlap = _move_set_overlap_scores(pred_sections[name], gold_sections[name])
+        scores.append(
+            _f1_from_precision_recall(overlap["precision"], overlap["recall"])
+        )
+    return sum(scores) / len(scores)
+
+
+_ALL_LEGAL_MOVES_MARKER_RE = re.compile(r"all legal moves:", re.IGNORECASE)
+
+
+def legal_filter_trace_final_jaccard(prediction: str, gold: str) -> float | None:
+    """UCI-set Jaccard over the text after the LAST "All legal moves:" marker.
+
+    Returns None when either side lacks the marker (degenerate predictions),
+    so the secondary metric is simply skipped instead of scoring garbage.
+    """
+    def tail(text: str) -> str | None:
+        matches = list(_ALL_LEGAL_MOVES_MARKER_RE.finditer(text or ""))
+        if not matches:
+            return None
+        return text[matches[-1].end():]
+
+    pred_tail = tail(prediction)
+    gold_tail = tail(gold)
+    if pred_tail is None or gold_tail is None:
+        return None
+    return _set_jaccard(_uci_set(pred_tail), _uci_set(gold_tail))
 
 
 def text_exact_match(prediction: str, gold: str) -> float:
@@ -649,8 +735,8 @@ def jaccard_similarity(prediction: str, gold: str) -> float:
 
 def uci_set_jaccard(prediction: str, gold: str) -> float:
     """Jaccard similarity over extracted UCI move sets."""
-    pred_set = set(_UCI_RE.findall(prediction.lower()))
-    gold_set = set(_UCI_RE.findall(gold.lower()))
+    pred_set = set(_UCI_RE.findall(_strip_fen_strings(prediction.lower())))
+    gold_set = set(_UCI_RE.findall(_strip_fen_strings(gold.lower())))
     if not gold_set and not gold.strip():
         return 1.0 if _is_no_move_answer(prediction) else 0.0
     if not gold_set and _is_no_move_answer(gold):
@@ -676,21 +762,31 @@ def check_state_accuracy(prediction: str, gold: str) -> float:
     return 1.0 if gold_key is not None and pred_key == gold_key else 0.0
 
 
+# "no check" must not match inside "no checkmate"; the word boundary after
+# "check(s)" rejects "checkmate".
+_NO_CHECK_RE = re.compile(r"\bno\s+checks?\b")
+_NEGATED_CHECKMATE_RE = re.compile(r"\b(?:no|not)\s+(?:a\s+)?checkmate\b")
+_CHECKMATE_WORD_RE = re.compile(r"\bcheckmate\b")
+_STALEMATE_WORD_RE = re.compile(r"\bstalemate\b")
+_CHECK_WORD_RE = re.compile(r"\bchecks?\b")
+
+
 def _check_state_key(text: str) -> str | None:
     lower = (text or "").strip().lower()
     if not lower:
         return None
     if (
         "normal" in lower
-        or lower in {"none", "no", "no check"}
-        or "no check" in lower
+        or lower in {"none", "no"}
+        or _NO_CHECK_RE.search(lower)
     ):
         return "normal"
-    if "checkmate" in lower:
+    positive = _NEGATED_CHECKMATE_RE.sub(" ", lower)
+    if _CHECKMATE_WORD_RE.search(positive):
         return "checkmate"
-    if "stalemate" in lower:
+    if _STALEMATE_WORD_RE.search(positive):
         return "stalemate"
-    if "check" in lower:
+    if _CHECK_WORD_RE.search(positive):
         return "check"
     return None
 
@@ -977,6 +1073,10 @@ def score_prediction(
         metric = "special_rules"
     elif example.task_type == "legal_moves_by_piece":
         metric = "legal_moves_by_piece"
+    elif example.task_type == "piece_legal_filter":
+        metric = "piece_legal_filter"
+    elif example.task_type == "legal_filter_trace":
+        metric = "legal_filter_trace"
 
     if metric == "move_extraction":
         scores["primary"] = move_extraction_match(prediction, gold)
@@ -998,6 +1098,12 @@ def score_prediction(
     elif metric == "legal_moves_by_piece":
         scores["primary"] = text_exact_match(prediction, gold)
         scores.update(legal_moves_by_piece_diagnostics(prediction, gold))
+    elif metric == "piece_legal_filter":
+        scores["primary"] = text_exact_match(prediction, gold)
+        scores["set_f1"] = piece_legal_filter_set_f1(prediction, gold)
+    elif metric == "legal_filter_trace":
+        scores["primary"] = text_exact_match(prediction, gold)
+        scores["final_jaccard"] = legal_filter_trace_final_jaccard(prediction, gold)
     elif metric == "board_exact_match":
         scores["primary"] = board_exact_match(prediction, gold)
     elif metric == "fen_exact_match":
@@ -1150,16 +1256,27 @@ def _board_from_fen(fen: str, *, chess960: bool = False) -> chess.Board:
     return chess.Board(fen, chess960=chess960)
 
 
+_EVAL_BUCKET_PHRASES = {
+    "equal": "The position is equal",
+    "slight edge": "{side} has a slight edge",
+    "clear advantage": "{side} has a clear advantage",
+    "winning": "{side} is winning",
+    "decisive": "{side} has a decisive advantage",
+}
+
+
 def _cp_to_bucket(cp: int) -> str:
     abs_cp = abs(cp)
-    for low, high, label in DEFAULT_EVAL_BUCKETS:
+    label = DEFAULT_EVAL_BUCKETS[-1][2]
+    for low, high, bucket_label in DEFAULT_EVAL_BUCKETS:
         if low <= abs_cp < high:
-            if cp > 0:
-                return f"White has a {label}"
-            if cp < 0:
-                return f"Black has a {label}"
-            return label
-    return "decisive"
+            label = bucket_label
+            break
+    phrase = _EVAL_BUCKET_PHRASES.get(label, "{side} has a " + label)
+    if label == "equal":
+        return _EVAL_BUCKET_PHRASES["equal"]
+    side = "White" if cp > 0 else "Black"
+    return phrase.format(side=side)
 
 
 def _legal_castling_sides(board: chess.Board) -> list[str]:
@@ -1427,7 +1544,28 @@ def _derive_state_tracking(
         moves_played.append(move.uci())
         board.push(move)
     if not moves_played:
-        return "", fen
+        return "", ""
+    return " ".join(moves_played), board.fen()
+
+
+def _derive_multi_state_tracking(
+    fen: str,
+    rng: Random,
+    chess960: bool = False,
+) -> tuple[str, str]:
+    board = _board_from_fen(fen, chess960=chess960)
+    moves_played: list[str] = []
+    for _ in range(
+        rng.randint(_MULTI_STATE_TRACKING_MIN_PLIES, _MULTI_STATE_TRACKING_MAX_PLIES)
+    ):
+        legal = list(board.legal_moves)
+        if not legal:
+            break
+        move = rng.choice(legal)
+        moves_played.append(move.uci())
+        board.push(move)
+    if len(moves_played) < _MULTI_STATE_TRACKING_MIN_PLIES:
+        return "", ""
     return " ".join(moves_played), board.fen()
 
 
@@ -1652,6 +1790,33 @@ def _derive_legal_moves_by_piece(
     return answer, grouped, _move_text(legal_moves)
 
 
+def _derive_ray_walk(
+    fen: str,
+    chess960: bool = False,
+) -> tuple[str, str]:
+    """Deterministically pick the FIRST side-to-move slider in a1..h8 order."""
+    board = _board_from_fen(fen, chess960=chess960)
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if (
+            piece is not None
+            and piece.color == board.turn
+            and piece.piece_type in SLIDER_RAY_DIRECTIONS
+        ):
+            return chess.square_name(square), format_ray_walk_answer(board, square)
+    return "", ""
+
+
+def _derive_legal_filter_trace(
+    fen: str,
+    chess960: bool = False,
+) -> str:
+    board = _board_from_fen(fen, chess960=chess960)
+    if not any(board.legal_moves):
+        return ""
+    return format_legal_filter_trace_answer(board) or ""
+
+
 def _piece_fen_char(piece: chess.Piece | None) -> str:
     if piece is None:
         return "1"
@@ -1758,12 +1923,6 @@ def _derive_fen_rank_expansion(
 ) -> tuple[str, str, str]:
     rank, row, _answer = _derive_rank_lookup(fen, rng, chess960=chess960)
     return rank, row, _format_fen_rank_expansion(int(rank), row)
-
-
-def _apply_single_rank_cell_edit(row: str, file_name: str, after_fen: str) -> str:
-    cells = _expand_fen_rank_row(row)
-    cells[chess.FILE_NAMES.index(file_name)] = after_fen
-    return _compress_fen_rank_cells(cells)
 
 
 def _changed_square_edits(
@@ -1907,11 +2066,7 @@ def _derive_fen_rank_cell_edit(
     file_name = chess.FILE_NAMES[chess.square_file(square)]
     rank = str(chess.square_rank(square) + 1)
     before_row = _fen_rank_row(before, int(rank))
-    after_row = _apply_single_rank_cell_edit(
-        before_row,
-        file_name,
-        changed["after_fen"],
-    )
+    after_row = _fen_rank_row(after, int(rank))
     return {
         "move": move.uci(),
         "square": changed["square"],
@@ -2370,15 +2525,24 @@ def _derive_gold_answer_inner(
         return answer
     if task_type == "state_tracking":
         moves_str, result_fen = _derive_state_tracking(fen, rng, chess960=is_960)
+        if not moves_str:
+            return ""
         raw["_state_tracking_moves"] = moves_str
         raw["_state_tracking_result"] = result_fen
+        return f"Result FEN: {result_fen}"
+    if task_type == "multi_state_tracking":
+        moves_str, result_fen = _derive_multi_state_tracking(fen, rng, chess960=is_960)
+        if not moves_str:
+            return ""
+        raw["_multi_state_tracking_moves"] = moves_str
+        raw["_multi_state_tracking_result"] = result_fen
         return f"Result FEN: {result_fen}"
     if task_type in ("legal_moves", "legal_moves_960"):
         board = _board_from_fen(fen, chess960=is_960)
         legal_moves = sorted(m.uci() for m in board.legal_moves)
         side = _side_name(board.turn)
         if not legal_moves:
-            return f"Side to move: {side}.\nLegal moves: No legal moves available."
+            return f"Side to move: {side}.\nLegal moves: none"
         return f"Side to move: {side}.\nLegal moves: {' '.join(legal_moves)}"
     if task_type == "side_piece_inventory":
         answer, inventory = _derive_side_piece_inventory(fen, chess960=is_960)
@@ -2414,6 +2578,12 @@ def _derive_gold_answer_inner(
         raw["_legal_moves_by_piece_grouped"] = grouped
         raw["_legal_moves_by_piece_moves"] = final_moves
         return answer
+    if task_type == "ray_walk":
+        square, answer = _derive_ray_walk(fen, chess960=is_960)
+        raw["_ray_walk_square"] = square
+        return answer
+    if task_type == "legal_filter_trace":
+        return _derive_legal_filter_trace(fen, chess960=is_960)
     if task_type in ("check_detection", "check_detection_960"):
         return _derive_check_detection(fen, chess960=is_960)
     if task_type in ("captures", "capture_id"):
@@ -2432,11 +2602,14 @@ def _derive_gold_answer_inner(
         raw["_threats_color"] = color_name
         return answer
     if task_type == "tactical_patterns":
+        from chess_llm.sft.generators.tier3_tactics import _tactical_theme_phrases
+
         themes = raw.get("themes", [])
         solution = raw.get("solution_first_move", "")
         if not solution:
             return ""
-        theme_str = ", ".join(themes) if themes else "tactical"
+        theme_phrases = _tactical_theme_phrases(themes)
+        theme_str = ", ".join(theme_phrases) if theme_phrases else "tactical"
         return f"The tactic is {theme_str}. Best move: {solution}"
     if task_type == "material_balance":
         return _answer_material_balance(fen, chess960=is_960)
@@ -2513,6 +2686,10 @@ def _render_prompt(task_type: str, raw: dict) -> str:
         ctx.setdefault("move", raw.get("_fen_row_application_move", ""))
     if task_type == "state_tracking":
         ctx.setdefault("moves", raw.get("_state_tracking_moves", ""))
+    if task_type == "multi_state_tracking":
+        ctx.setdefault("moves", raw.get("_multi_state_tracking_moves", ""))
+    if task_type == "ray_walk":
+        ctx.setdefault("source_square", raw.get("_ray_walk_square", "e1"))
     if task_type == "piece_legal_moves":
         ctx.setdefault("source_square", raw.get("_piece_legal_moves_square", "e1"))
     if task_type == "piece_pseudo_legal_moves":
@@ -2636,6 +2813,10 @@ def freeze_split(
             elif task_type == "legal_moves_by_piece":
                 metadata["legal_moves_by_piece"] = raw.get("_legal_moves_by_piece_grouped", {})
                 metadata["legal_moves"] = raw.get("_legal_moves_by_piece_moves", "")
+            elif task_type == "ray_walk":
+                metadata["source_square"] = raw.get("_ray_walk_square", "")
+            elif task_type == "multi_state_tracking":
+                metadata["moves"] = raw.get("_multi_state_tracking_moves", "")
         if task_type == "legality_check":
             metadata["move"] = raw.get("_legality_check_move", "")
             metadata["legality_reason_label"] = raw.get("_legality_check_reason_label", "")

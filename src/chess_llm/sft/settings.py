@@ -10,6 +10,7 @@ from typing import Mapping
 
 
 DEFAULT_OUTPUT_DIR = "chess_sft_data"
+_PACKAGE_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CACHE_ROOT = Path(
     os.environ.get("XDG_CACHE_HOME")
     or os.environ.get("LOCALAPPDATA")
@@ -49,6 +50,7 @@ DEFAULT_VOLUMES: dict[str, int] = {
     "1.16_material_piece_counts": 50_000,
     "1.17_material_value_totals": 50_000,
     "1.18_material_balance_trace": 50_000,
+    "1.19_multi_move_state_tracking": 40_000,
     "2.0_side_piece_inventory": 60_000,
     "2.1_legal_move_gen": 80_000,
     "2.2_piece_specific_moves": 80_000,
@@ -59,6 +61,8 @@ DEFAULT_VOLUMES: dict[str, int] = {
     "2.7_piece_legal_filter": 60_000,
     "2.8_king_safety_filter": 60_000,
     "2.9_legal_moves_by_piece": 60_000,
+    "2.10_ray_walk": 50_000,
+    "2.11_legal_filter_trace": 40_000,
     "3.1_available_captures": 60_000,
     "3.2_threats": 50_000,
     "3.3_attacked_defended": 60_000,
@@ -114,6 +118,8 @@ DEFAULT_MIN_DEPTH_TRAINING = 20
 DEFAULT_MIN_DEPTH_BESTMOVE = 30
 DEFAULT_MIN_DEPTH_EVAL_BENCHMARK = 40
 DEFAULT_MASTER_SEED = 42
+DEFAULT_SELF_PLAY_MAX_POSITIONS = 150_000
+DEFAULT_SELF_PLAY_RATIO = 0.25
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,9 @@ class SftDataSettings:
     annotations_dir: Path
     tier_output_dir: Path
     benchmark_dir: Path
+    self_play_dir: Path | None = None
+    self_play_max_positions: int = DEFAULT_SELF_PLAY_MAX_POSITIONS
+    self_play_ratio: float = DEFAULT_SELF_PLAY_RATIO
     hf_datasets: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HF_DATASETS))
     volumes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_VOLUMES))
     min_elo_games: int = DEFAULT_MIN_ELO_GAMES
@@ -161,7 +170,15 @@ class SftDataSettings:
         """Resolve settings from an environment mapping without mutating it."""
         values = os.environ if env is None else env
         root = Path(project_root)
-        output_dir = Path(values.get("CHESS_SFT_OUTPUT", DEFAULT_OUTPUT_DIR))
+        output_override = values.get("CHESS_SFT_OUTPUT")
+        if output_override:
+            output_dir = Path(output_override)
+        else:
+            # Anchor the relative default at the project root so runs from
+            # different working directories share one data root.
+            output_dir = Path(DEFAULT_OUTPUT_DIR)
+            if not output_dir.is_absolute():
+                output_dir = _PACKAGE_PROJECT_ROOT / output_dir
         return cls(
             project_root=root,
             hf_cache_dir=values.get("HF_HOME", DEFAULT_HF_CACHE_DIR),
@@ -177,6 +194,20 @@ class SftDataSettings:
             annotations_dir=output_dir / "annotations",
             tier_output_dir=output_dir / "output",
             benchmark_dir=output_dir / "benchmark",
+            self_play_dir=(
+                Path(values["CHESS_SFT_SELF_PLAY_DIR"])
+                if values.get("CHESS_SFT_SELF_PLAY_DIR")
+                else output_dir / "self_play"
+            ),
+            self_play_max_positions=int(
+                values.get(
+                    "CHESS_SFT_SELF_PLAY_MAX_POSITIONS",
+                    DEFAULT_SELF_PLAY_MAX_POSITIONS,
+                )
+            ),
+            self_play_ratio=float(
+                values.get("CHESS_SFT_SELF_PLAY_RATIO", DEFAULT_SELF_PLAY_RATIO)
+            ),
         )
 
 
@@ -198,6 +229,8 @@ __all__ = [
     "DEFAULT_MIN_DEPTH_TRAINING",
     "DEFAULT_MIN_ELO_GAMES",
     "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_SELF_PLAY_MAX_POSITIONS",
+    "DEFAULT_SELF_PLAY_RATIO",
     "DEFAULT_STOCKFISH_PATH",
     "DEFAULT_VOLUMES",
     "DEFAULT_VOLUME_LICHESS_GAME_DATA_FILES",

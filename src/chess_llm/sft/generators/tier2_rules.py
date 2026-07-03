@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from functools import lru_cache
 from random import Random
@@ -19,13 +20,22 @@ import chess
 
 from chess_llm.core.legality import (
     classify_move_legality,
+    format_legal_filter_trace_answer,
     format_legality_answer,
     random_illegal_move_with_reason,
+)
+from chess_llm.core.rays import (
+    SLIDER_RAY_DIRECTIONS,
+    format_ray_walk_answer,
+    ray_walk_moves,
+    walk_slider_rays,
 )
 from chess_llm.sft.context import board_from_raw
 from chess_llm.sft.generators.base import TaskGenerator
 from chess_llm.sft.templates import TEMPLATES, select_template
 
+
+logger = logging.getLogger(__name__)
 
 _PIECE_NAMES = {
     chess.PAWN: "pawn",
@@ -35,6 +45,14 @@ _PIECE_NAMES = {
     chess.QUEEN: "queen",
     chess.KING: "king",
 }
+
+_KING_SAFETY_REASON_LABELS = frozenset(
+    {
+        "does_not_resolve_check",
+        "pinned_piece_exposes_king",
+        "king_would_be_in_check",
+    }
+)
 
 
 def _side_name(color: bool) -> str:
@@ -189,10 +207,13 @@ def _select_piece_square(
     board: chess.Board,
     *,
     prefer_rejected: bool = False,
+    rng: Random | None = None,
 ) -> int | None:
     candidates = _candidate_piece_squares(board, prefer_rejected=prefer_rejected)
     if not candidates:
         return None
+    if rng is not None:
+        return rng.choice(candidates)
     return candidates[0]
 
 
@@ -353,8 +374,6 @@ class LegalMoveGen(TaskGenerator):
             if board is None:
                 continue
             legal_moves = sorted(m.uci() for m in board.legal_moves)
-            if not legal_moves:
-                continue
 
             answer, grouped, final_moves = _format_compact_legal_moves(board)
             metadata = dict(raw.get("metadata", {}))
@@ -492,7 +511,12 @@ class PieceLegalFilter(TaskGenerator):
     def generate(self) -> Iterator[dict]:
         pool = _legal_decomposition_pool(self.config)
         target = self.target_volume()
+        pool.extend(
+            {"fen": fen, "source": "synthetic_pin_check"}
+            for _label, fen in _synthetic_pin_check_fens(max(1, target))
+        )
         count = 0
+        rejection_total = 0
         for entry in pool:
             if count >= target:
                 return
@@ -502,13 +526,18 @@ class PieceLegalFilter(TaskGenerator):
             board = board_from_raw(raw)
             if board is None:
                 continue
-            square = _select_piece_square(board, prefer_rejected=True)
+            square = _select_piece_square(board, prefer_rejected=True, rng=self.rng)
             if square is None:
                 continue
             square_name = chess.square_name(square)
             pseudo = _pseudo_legal_moves_from_square(board, square)
             legal = _legal_moves_from_square(board, square)
             rejected = sorted(set(pseudo) - set(legal))
+            has_rejection = bool(rejected)
+            # Keep at least half of the emitted rows contrast-heavy (>=1
+            # rejected move) so the filter step is actually exercised.
+            if not has_rejection and rejection_total < (count + 1) * 0.5:
+                continue
             answer = _format_piece_legal_filter_answer(board, square)
             metadata = dict(raw.get("metadata", {}))
             metadata.update(
@@ -517,6 +546,10 @@ class PieceLegalFilter(TaskGenerator):
                     "pseudo_legal_moves": _move_text(pseudo),
                     "legal_moves": _move_text(legal),
                     "rejected_moves": _move_text(rejected),
+                    "rejection_category": (
+                        "has_rejection" if has_rejection else "no_rejection"
+                    ),
+                    "rejected_count": len(rejected),
                     "expected_answer": answer,
                 }
             )
@@ -524,6 +557,8 @@ class PieceLegalFilter(TaskGenerator):
             user_text = self.render_template(raw)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
+            if has_rejection:
+                rejection_total += 1
 
 
 class KingSafetyFilter(TaskGenerator):
@@ -611,6 +646,151 @@ class LegalMovesByPiece(TaskGenerator):
             count += 1
 
 
+_RAY_WALK_PIECE_FLOORS: tuple[tuple[int, float], ...] = (
+    (chess.ROOK, 0.30),
+    (chess.BISHOP, 0.25),
+    (chess.QUEEN, 0.25),
+)
+
+
+class RayWalk(TaskGenerator):
+    """Task 2.10: Walk each slider ray to derive its pseudo-legal moves."""
+
+    def task_id(self) -> str:
+        return "2.10_ray_walk"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = list(self.config.get("fen_pool", []))
+        self.rng.shuffle(pool)
+        target = self.target_volume()
+        count = 0
+        piece_counts: Counter[int] = Counter()
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            sliders = [
+                sq
+                for sq in chess.SQUARES
+                if (piece := board.piece_at(sq)) is not None
+                and piece.color == board.turn
+                and piece.piece_type in SLIDER_RAY_DIRECTIONS
+            ]
+            if not sliders:
+                continue
+            candidates = sliders
+            # Running per-piece-type floors keep rook/bishop/queen walks all
+            # represented (mirrors 2.3's king-safety counter pattern).
+            for piece_type, floor in _RAY_WALK_PIECE_FLOORS:
+                if piece_counts[piece_type] < (count + 1) * floor:
+                    typed = [
+                        sq
+                        for sq in sliders
+                        if board.piece_at(sq).piece_type == piece_type
+                    ]
+                    if typed:
+                        candidates = typed
+                        break
+            square = self.rng.choice(candidates)
+            piece = board.piece_at(square)
+            square_name = chess.square_name(square)
+            answer = format_ray_walk_answer(board, square)
+            moves = ray_walk_moves(board, square)
+            assert moves == _pseudo_legal_moves_from_square(board, square), (
+                f"Ray walk moves diverge from pseudo-legal moves for "
+                f"{square_name} in {board.fen()}"
+            )
+            blocked_ray_count = sum(
+                1 for ray in walk_slider_rays(board, square) if ray["blocked"]
+            )
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source_square": square_name,
+                    "piece": _PIECE_NAMES.get(piece.piece_type, "piece"),
+                    "ray_move_count": len(moves),
+                    "blocked_ray_count": blocked_ray_count,
+                    "expected_answer": answer,
+                }
+            )
+            raw.update({"square": square_name, "metadata": metadata})
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            piece_counts[piece.piece_type] += 1
+            count += 1
+
+
+class LegalFilterTrace(TaskGenerator):
+    """Task 2.11: Filter every piece's pseudo-legal moves into legal moves."""
+
+    def task_id(self) -> str:
+        return "2.11_legal_filter_trace"
+
+    def tier(self) -> int:
+        return 2
+
+    def generate(self) -> Iterator[dict]:
+        pool = list(self.config.get("fen_pool", []))
+        self.rng.shuffle(pool)
+        target = self.target_volume()
+        pool.extend(
+            {"fen": fen, "source": "synthetic_pin_check"}
+            for _label, fen in _synthetic_pin_check_fens(max(1, target))
+        )
+        count = 0
+        rejection_total = 0
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            legal_moves = sorted(move.uci() for move in board.legal_moves)
+            if not legal_moves:
+                continue
+            answer = format_legal_filter_trace_answer(board)
+            if answer is None:
+                continue
+            pseudo_moves = {move.uci() for move in board.pseudo_legal_moves}
+            rejected_count = len(pseudo_moves - set(legal_moves))
+            has_rejection = rejected_count > 0
+            # Keep at least 40% of the emitted rows contrast-heavy (>=1
+            # rejected move) so the filter step is actually exercised.
+            if not has_rejection and rejection_total < (count + 1) * 0.4:
+                continue
+            grouped = _legal_moves_by_piece(board)
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "legal_move_count": len(legal_moves),
+                    "legal_moves": _move_text(legal_moves),
+                    "legal_moves_by_piece": grouped,
+                    "rejected_total": rejected_count,
+                    "rejection_category": (
+                        "has_rejection" if has_rejection else "no_rejection"
+                    ),
+                    "expected_answer": answer,
+                }
+            )
+            raw["metadata"] = metadata
+            user_text = self.render_template(raw)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+            if has_rejection:
+                rejection_total += 1
+
+
 class MoveLegalityCheck(TaskGenerator):
     """Task 2.3: Is a specific move legal? 50/50 legal/illegal split."""
 
@@ -625,6 +805,8 @@ class MoveLegalityCheck(TaskGenerator):
         self.rng.shuffle(pool)
         target = self.target_volume()
         count = 0
+        negative_total = 0
+        king_safety_total = 0
 
         for entry in pool:
             if count >= target:
@@ -641,6 +823,7 @@ class MoveLegalityCheck(TaskGenerator):
                 continue
 
             # 50/50 legal vs illegal
+            negative_category = None
             if self.rng.random() < 0.5:
                 # Legal move
                 move = self.rng.choice(legal_moves)
@@ -653,13 +836,36 @@ class MoveLegalityCheck(TaskGenerator):
                 expected_is_legal = True
                 reason_label = classification.reason_label
             else:
-                # Generate an illegal move
-                illegal = random_illegal_move_with_reason(board, self.rng)
-                if illegal is None:
-                    continue
-                move_uci, reason_label = illegal
+                # Generate an illegal move.  Target >=25% king-safety
+                # negatives (pseudo-legal-but-illegal) where the position
+                # allows; fall back to the other reason buckets otherwise.
+                move_uci = None
+                reason_label = None
+                if king_safety_total < (negative_total + 1) * 0.25:
+                    pseudo_illegal = [
+                        m.uci()
+                        for m in board.pseudo_legal_moves
+                        if m not in board.legal_moves
+                    ]
+                    if pseudo_illegal:
+                        move_uci = self.rng.choice(pseudo_illegal)
+                        reason_label = classify_move_legality(
+                            board,
+                            move_uci,
+                        ).reason_label
+                if move_uci is None:
+                    illegal = random_illegal_move_with_reason(board, self.rng)
+                    if illegal is None:
+                        continue
+                    move_uci, reason_label = illegal
                 answer = format_legality_answer(False, reason_label)
                 expected_is_legal = False
+                negative_total += 1
+                if reason_label in _KING_SAFETY_REASON_LABELS:
+                    king_safety_total += 1
+                    negative_category = "king_safety"
+                else:
+                    negative_category = "other_illegal"
 
             metadata = dict(raw.get("metadata", {}))
             metadata.update(
@@ -670,6 +876,8 @@ class MoveLegalityCheck(TaskGenerator):
                     "expected_answer": answer,
                 }
             )
+            if negative_category is not None:
+                metadata["negative_category"] = negative_category
             raw.update({"move": move_uci, "metadata": metadata})
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
@@ -977,6 +1185,7 @@ def _select_bucketed_rows(
     target: int,
     rng: Random,
 ) -> list[tuple[str, dict]]:
+    """Fill bucket quotas from unique rows only; never emit a row twice."""
     selected: list[tuple[str, dict]] = []
     shuffled: dict[str, list[dict]] = {}
     for bucket, rows in buckets.items():
@@ -986,20 +1195,28 @@ def _select_bucketed_rows(
     bucket_offsets: Counter[str] = Counter()
     for bucket, quota in quotas.items():
         rows = shuffled.get(bucket, [])
-        if not rows:
-            continue
-        for _ in range(quota):
-            selected.append((bucket, dict(rows[bucket_offsets[bucket] % len(rows)])))
+        take = min(quota, len(rows))
+        for _ in range(take):
+            selected.append((bucket, dict(rows[bucket_offsets[bucket]])))
             bucket_offsets[bucket] += 1
 
-    available = [bucket for bucket, rows in shuffled.items() if rows]
-    available_idx = 0
-    while len(selected) < target and available:
-        bucket = available[available_idx % len(available)]
-        rows = shuffled[bucket]
-        selected.append((bucket, dict(rows[bucket_offsets[bucket] % len(rows)])))
-        bucket_offsets[bucket] += 1
-        available_idx += 1
+    if len(selected) < target:
+        # Backfill from other buckets' unused rows when a bucket ran dry.
+        leftovers = [
+            (bucket, row)
+            for bucket, rows in shuffled.items()
+            for row in rows[bucket_offsets[bucket]:]
+        ]
+        rng.shuffle(leftovers)
+        needed = target - len(selected)
+        selected.extend((bucket, dict(row)) for bucket, row in leftovers[:needed])
+        if len(selected) < target:
+            logger.warning(
+                "Bucketed row selection shortfall: only %d unique rows "
+                "available for a target of %d",
+                len(selected),
+                target,
+            )
 
     rng.shuffle(selected)
     return selected[:target]
@@ -1100,6 +1317,106 @@ def _synthetic_check_state_fens(max_per_label: int) -> tuple[tuple[str, str], ..
                         for label_name in ("check", "checkmate", "stalemate")
                     ):
                         return tuple(rows)
+
+    return tuple(rows)
+
+
+@lru_cache(maxsize=8)
+def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
+    """Minimal valid positions with pseudo-legal-but-illegal moves.
+
+    Enumerates three categories -- pins (``pinned_piece_exposes_king``),
+    in-check positions with non-resolving pseudo-legal moves
+    (``does_not_resolve_check``), and king-walks-into-attack
+    (``king_would_be_in_check``) -- varying colors and mirroring files.
+    Every returned board has ``set(pseudo_legal) - set(legal)`` non-empty.
+    """
+    max_count = max(1, max_count)
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, board: chess.Board) -> None:
+        if len(rows) >= max_count or not board.is_valid():
+            return
+        pseudo = {move.uci() for move in board.pseudo_legal_moves}
+        legal = {move.uci() for move in board.legal_moves}
+        if not (pseudo - legal):
+            return
+        fen = board.fen()
+        if fen in seen:
+            return
+        seen.add(fen)
+        rows.append((label, fen))
+
+    def build(turn: bool, placements: list[tuple[int, chess.Piece]]) -> chess.Board:
+        board = chess.Board.empty()
+        for square, piece in placements:
+            board.set_piece_at(square, piece)
+        board.turn = turn
+        board.castling_rights = 0
+        board.ep_square = None
+        return board
+
+    for color in (chess.WHITE, chess.BLACK):
+        enemy = not color
+        home_rank = 0 if color == chess.WHITE else 7
+        far_rank = 7 - home_rank
+        step = 1 if color == chess.WHITE else -1
+        for file_index in range(8):
+            if len(rows) >= max_count:
+                return tuple(rows)
+            enemy_king_file = (file_index + 4) % 8
+
+            # Pins: own piece 1-2 squares along the ray, enemy slider beyond.
+            for offset in (1, 2):
+                add(
+                    "pinned_piece_exposes_king",
+                    build(
+                        color,
+                        [
+                            (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
+                            (
+                                chess.square(file_index, home_rank + step * offset),
+                                chess.Piece(chess.ROOK, color),
+                            ),
+                            (chess.square(file_index, far_rank), chess.Piece(chess.ROOK, enemy)),
+                            (chess.square(enemy_king_file, far_rank), chess.Piece(chess.KING, enemy)),
+                        ],
+                    ),
+                )
+
+            # In check with pseudo-legal moves that do not resolve it.
+            add(
+                "does_not_resolve_check",
+                build(
+                    color,
+                    [
+                        (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
+                        (
+                            chess.square((file_index + 2) % 8, home_rank),
+                            chess.Piece(chess.ROOK, color),
+                        ),
+                        (chess.square(file_index, far_rank), chess.Piece(chess.ROOK, enemy)),
+                        (chess.square(enemy_king_file, far_rank), chess.Piece(chess.KING, enemy)),
+                    ],
+                ),
+            )
+
+            # King pseudo-legally walks onto an attacked adjacent file.
+            for rook_file in (file_index - 1, file_index + 1):
+                if not 0 <= rook_file <= 7:
+                    continue
+                add(
+                    "king_would_be_in_check",
+                    build(
+                        color,
+                        [
+                            (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
+                            (chess.square(rook_file, far_rank), chess.Piece(chess.ROOK, enemy)),
+                            (chess.square(enemy_king_file, far_rank), chess.Piece(chess.KING, enemy)),
+                        ],
+                    ),
+                )
 
     return tuple(rows)
 

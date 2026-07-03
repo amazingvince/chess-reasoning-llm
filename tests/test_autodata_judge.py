@@ -1,6 +1,7 @@
 from chess_llm.artifacts.schemas import ChatMessage, PromptArtifact
 from chess_llm.autodata.failure_buckets import (
     ILLEGAL_MOVE,
+    INVALID_FEN,
     LEGAL_UNSCORED,
     MISSING_FEN,
     PARSE_FAILURE,
@@ -74,3 +75,24 @@ def test_judge_rollout_marks_missing_fen():
     assert judgment.legal is None
     assert judgment.failure_bucket == MISSING_FEN
     assert "missing fen" in judgment.feedback.lower()
+
+
+def test_judge_rollout_marks_invalid_fen_as_data_error_not_illegal_move():
+    prompt = _prompt(fen="8/8/8/8/8/8/8/8 w - - 0 1")  # parseable but kingless
+    rollout = build_rollout(prompt, "model-a", "<move>e2e4</move>", "rollout-1")
+
+    judgment = judge_rollout(prompt, rollout)
+
+    assert judgment.legal is None
+    assert judgment.failure_bucket == INVALID_FEN
+    assert "invalid" in judgment.feedback.lower()
+
+
+def test_judge_rollout_invalid_fen_takes_precedence_over_parse_failure():
+    prompt = _prompt(fen="not a fen at all")
+    rollout = build_rollout(prompt, "model-a", "I cannot find a move.", "rollout-1")
+
+    judgment = judge_rollout(prompt, rollout)
+
+    assert judgment.legal is None
+    assert judgment.failure_bucket == INVALID_FEN
