@@ -22,6 +22,11 @@ from chess_llm.formats.answers import (
 )
 from chess_llm.formats.answers import validate_think_move_format
 from chess_llm.sft.context import raw_is_chess960
+from chess_llm.sft.step_verification import (
+    format_step_verification_answer,
+    label_from_metadata,
+    parse_step_verification_answer,
+)
 
 
 _PIECE_NAMES = {
@@ -854,6 +859,30 @@ def _candidate_rating_metadata_moves(metadata: dict) -> list[str]:
     return moves
 
 
+def _validate_step_verification_answer(
+    messages: list[dict],
+    metadata: dict,
+) -> list[str]:
+    errors: list[str] = []
+    contents = _assistant_contents(messages)
+    if not contents:
+        return ["Step verification: missing assistant answer"]
+
+    expected_label = label_from_metadata(metadata)
+    if expected_label is None:
+        return ["Step verification: missing or invalid verifier metadata"]
+    expected_answer = format_step_verification_answer(expected_label)
+
+    for content in contents:
+        parsed = parse_step_verification_answer(content)
+        if parsed is None:
+            errors.append("Step verification answer does not match fixed grammar")
+            continue
+        if content.strip() != expected_answer.strip():
+            errors.append("Step verification answer does not match metadata label")
+    return errors
+
+
 def _check_state_label(board: chess.Board) -> tuple[str, str]:
     if board.is_checkmate():
         return "checkmate", "Checkmate."
@@ -948,6 +977,8 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
                 chess960=is_960,
             )
         )
+    elif task == "7.9_step_verification":
+        errors.extend(_validate_step_verification_answer(messages, metadata))
     elif task.startswith("7."):
         expected_move = _expected_target_move(metadata)
         for msg in messages:

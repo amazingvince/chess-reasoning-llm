@@ -34,6 +34,12 @@ from chess_llm.formats.board import render_ascii_board
 from chess_llm.evals.trace_metrics import analyze_trace_metrics, numeric_trace_metrics
 from chess_llm.sft.context import build_template_context, raw_is_chess960
 from chess_llm.sft.settings import DEFAULT_EVAL_BUCKETS
+from chess_llm.sft.step_verification import (
+    format_step_verification_answer,
+    label_from_metadata,
+    parse_step_verification_answer,
+    step_verification_score,
+)
 from chess_llm.sft.templates import append_answer_contract
 
 logger = logging.getLogger(__name__)
@@ -99,6 +105,7 @@ DIAGNOSTIC_TASK_TYPES = frozenset({
     "ray_walk",
     "legal_filter_trace",
     "multi_state_tracking",
+    "step_verification",
 })
 FULL_FEN_STATE_PROMPT_TASK_TYPES = frozenset({
     "board_to_fen",
@@ -155,7 +162,12 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
     "evaluation": ["material_balance", "eval_bucket", "pawn_structure"],
     "openings": ["opening_name", "opening_continuation"],
     "endgames": ["endgame_classification", "endgame_wdl", "endgame_best_move"],
-    "planning": ["best_move", "puzzle_solve"],
+    "planning": [
+        "best_move",
+        "puzzle_solve",
+        "candidate_ratings",
+        "step_verification",
+    ],
     "chess960": ["legal_moves_960", "check_detection_960", "castling_rules_960"],
     "mate": ["binary_choice"],
 }
@@ -208,6 +220,10 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "best_move": "FEN: {fen}\nWhat is the best move?",
     "puzzle_solve": "FEN: {fen}\nSolve this puzzle. Find the winning move.",
     "candidate_ratings": "FEN: {fen}\nRate exactly these 5 candidate moves: {candidate_moves}",
+    "step_verification": (
+        "FEN: {fen}\nTrace to verify:\n{verification_trace}\n"
+        "Find the broken line, or say the trace is sound."
+    ),
     "legal_moves_960": "FEN: {fen}\nList all legal moves.",
     "check_detection_960": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
     "castling_rules_960": "FEN: {fen}\nWhat castling options are available?",
@@ -262,6 +278,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "best_move": "move_extraction",
     "puzzle_solve": "move_extraction",
     "candidate_ratings": "candidate_ratings",
+    "step_verification": "step_verification",
     "legal_moves_960": "uci_set_jaccard",
     "check_detection_960": "check_state",
     "castling_rules_960": "exact_match",
@@ -279,6 +296,8 @@ _META_KEYS = frozenset({
     "after_row", "before_fen", "after_fen", "board_fen_before",
     "board_fen_after", "edit_text",
     "candidate_ratings", "candidate_moves", "multipv_depth",
+    "verification_trace", "verification_verdict", "faulty_line",
+    "error_type", "correction", "source_task", "corruption_kind",
 })
 
 _NO_MOVE_RE = re.compile(
@@ -1231,6 +1250,8 @@ def score_prediction(
         metric = "legal_filter_trace"
     elif example.task_type == "candidate_ratings":
         metric = "candidate_ratings"
+    elif example.task_type == "step_verification":
+        metric = "step_verification"
 
     if metric == "move_extraction":
         scores["primary"] = move_extraction_match(prediction, gold)
@@ -1297,6 +1318,8 @@ def score_prediction(
         scores["primary"] = continuation_rank(prediction, gold)
     elif metric == "candidate_ratings":
         scores.update(candidate_ratings_score(prediction, gold))
+    elif metric == "step_verification":
+        scores.update(step_verification_score(prediction, gold))
     else:
         scores["primary"] = exact_match(prediction, gold)
 
@@ -2642,6 +2665,17 @@ def _legal_candidate_ratings_gold(raw: dict, *, chess960: bool = False) -> str:
     return format_candidate_ratings_answer(ratings)
 
 
+def _step_verification_gold(raw: dict) -> str:
+    expected_answer = raw.get("expected_answer")
+    if isinstance(expected_answer, str) and parse_step_verification_answer(expected_answer):
+        return expected_answer
+    metadata = raw.get("metadata")
+    label = label_from_metadata(metadata if isinstance(metadata, dict) else raw)
+    if label is None:
+        return ""
+    return format_step_verification_answer(label)
+
+
 def _candidate_ratings_from_raw(raw: Mapping[str, object]) -> list[dict[str, object]]:
     source = raw.get("candidate_ratings")
     if not isinstance(source, list):
@@ -2892,6 +2926,8 @@ def _derive_gold_answer_inner(
         return _legal_gold_move(fen, raw.get("solution_first_move"), chess960=is_960)
     if task_type == "candidate_ratings":
         return _legal_candidate_ratings_gold(raw, chess960=is_960)
+    if task_type == "step_verification":
+        return _step_verification_gold(raw)
     if task_type == "castling_rules_960":
         return _derive_castling_rules(fen, chess960=True)
     if task_type == "binary_choice":
@@ -2966,6 +3002,8 @@ def _render_prompt(task_type: str, raw: dict) -> str:
             ratings = _candidate_ratings_from_raw(raw)
             candidate_moves = " ".join(str(item["uci"]) for item in ratings[:5])
         ctx.setdefault("candidate_moves", candidate_moves)
+    if task_type == "step_verification":
+        ctx.setdefault("verification_trace", raw.get("verification_trace", ""))
 
     try:
         prompt = template.format(**ctx)
@@ -2994,7 +3032,9 @@ def freeze_split(
 
     for index, raw in enumerate(raw_examples):
         if split_name == "planning":
-            if _candidate_ratings_from_raw(raw):
+            if raw.get("verification_trace"):
+                task_type = "step_verification"
+            elif _candidate_ratings_from_raw(raw):
                 task_type = "candidate_ratings"
             else:
                 task_type = "puzzle_solve" if raw.get("puzzle_id") else "best_move"

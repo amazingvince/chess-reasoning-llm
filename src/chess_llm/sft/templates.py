@@ -208,6 +208,16 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'Answer format: return exactly five lines "Candidate <uci>: <cp|M#>; '
         'Bucket: <label>" followed by exactly one line "Best: <uci>".'
     ),
+    "7.9_step_verification": (
+        'Answer format: return exactly four lines: "Verdict: <sound|broken>", '
+        '"Faulty line: <line-number|none>", "Error type: <label>", and '
+        '"Correction: <short correction|none>".'
+    ),
+    "step_verification": (
+        'Answer format: return exactly four lines: "Verdict: <sound|broken>", '
+        '"Faulty line: <line-number|none>", "Error type: <label>", and '
+        '"Correction: <short correction|none>".'
+    ),
 }
 
 
@@ -696,6 +706,11 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nRate exactly these 5 candidate moves: {candidate_moves}",
         "Position: {fen}\nFor the side to move, rate these candidate moves: {candidate_moves}",
         "Board:\n{board}\nSide to move: {side_to_move}\nRate exactly these 5 candidate moves: {candidate_moves}",
+    ],
+    "7.9_step_verification": [
+        "FEN: {fen}\nTrace to verify:\n{verification_trace}\nFind the broken line, or say the trace is sound.",
+        "Position: {fen}\nAudit this numbered trace:\n{verification_trace}\nReturn the verifier verdict.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nTrace to verify:\n{verification_trace}\nIdentify exactly one broken step, or mark it sound.",
     ],
 }
 

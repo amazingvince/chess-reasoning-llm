@@ -65,6 +65,7 @@ from chess_llm.sft.generators.tier7_planning import (
     MoveConsequence,
     PuzzleSolving,
 )
+from chess_llm.sft.generators.tier7_verification import StepVerification
 
 TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
     1: [
@@ -106,7 +107,13 @@ TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
     4: [MaterialBalance, PositionEvaluation, PawnStructure],
     5: [OpeningIdentification, OpeningContinuation, OpeningPrinciples],
     6: [EndgameClassification, EndgameWDL, EndgameBestMove, EndgamePrinciples],
-    7: [BestMoveSelection, PuzzleSolving, MoveConsequence, CandidateRatings],
+    7: [
+        BestMoveSelection,
+        PuzzleSolving,
+        MoveConsequence,
+        CandidateRatings,
+        StepVerification,
+    ],
 }
 
 __all__ = [
@@ -158,6 +165,7 @@ __all__ = [
     "SidePieceInventory",
     "SpecialRules",
     "StateTracking",
+    "StepVerification",
     "TIER_GENERATORS",
     "TacticalPatterns",
     "TaskGenerator",

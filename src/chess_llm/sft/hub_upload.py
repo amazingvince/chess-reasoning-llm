@@ -76,6 +76,8 @@ TASK_DESCRIPTIONS = {
     "7.1_best_move_selection": "Select the best move from engine-evaluated positions",
     "7.2_puzzle_solving": "Solve a tactical puzzle",
     "7.3_move_consequence": "Predict the consequence of a candidate move",
+    "7.8_candidate_ratings": "Rate five Stockfish MultiPV candidate moves with fixed grammar",
+    "7.9_step_verification": "Audit a numbered chess trace and identify one broken step",
 }
 
 SPLIT_DESCRIPTIONS = {

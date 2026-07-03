@@ -461,6 +461,65 @@ def test_package_validate_example_rejects_candidate_ratings_wrong_best_and_illeg
     assert any("best" in error.lower() for error in errors)
 
 
+def test_package_validate_example_accepts_step_verification_fixed_grammar():
+    row = build_sft_row(
+        task="7.9_step_verification",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt=(
+            "FEN: ...\nTrace to verify:\n"
+            "1. Candidate e2e4: +42cp; Bucket: equal\n"
+            "2. Best: d2d4"
+        ),
+        assistant_content="\n".join(
+            [
+                "Verdict: broken",
+                "Faulty line: 2",
+                "Error type: wrong_best",
+                "Correction: Best should be e2e4.",
+            ]
+        ),
+        metadata={
+            "verification_verdict": "broken",
+            "faulty_line": 2,
+            "error_type": "wrong_best",
+            "correction": "Best should be e2e4.",
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
+def test_package_validate_example_rejects_step_verification_mismatched_metadata():
+    row = build_sft_row(
+        task="7.9_step_verification",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nTrace to verify:\n1. Candidate e2e4: +42cp; Bucket: equal",
+        assistant_content="\n".join(
+            [
+                "Verdict: sound",
+                "Faulty line: none",
+                "Error type: none",
+                "Correction: none",
+            ]
+        ),
+        metadata={
+            "verification_verdict": "broken",
+            "faulty_line": 1,
+            "error_type": "wrong_bucket",
+            "correction": "Candidate e2e4 bucket should be equal.",
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("step verification" in error.lower() for error in errors)
+
+
 def test_package_validate_example_rejects_state_tracking_answer_mismatch():
     board = chess.Board(STARTING_FEN)
     board.push(chess.Move.from_uci("e2e4"))

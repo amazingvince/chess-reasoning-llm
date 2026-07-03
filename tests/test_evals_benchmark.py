@@ -1160,6 +1160,66 @@ def test_package_candidate_ratings_scores_partial_bucket_and_best_errors():
     assert scores["cp_bucket_mae"] == 0.2
 
 
+def test_package_step_verification_scores_verdict_line_and_error_type():
+    gold = "\n".join(
+        [
+            "Verdict: broken",
+            "Faulty line: 6",
+            "Error type: wrong_best",
+            "Correction: Best should be e2e4.",
+        ]
+    )
+    prediction = "\n".join(
+        [
+            "Verdict: broken",
+            "Faulty line: 4",
+            "Error type: wrong_bucket",
+            "Correction: Best should be e2e4.",
+        ]
+    )
+    example = _example(
+        task_type="step_verification",
+        gold_answer=gold,
+        metric_type="step_verification",
+    )
+
+    scores = packaged.score_prediction(example, prediction)
+
+    assert scores["primary"] == 0.5
+    assert scores["verdict_accuracy"] == 1.0
+    assert scores["faulty_line_accuracy"] == 0.0
+    assert scores["error_type_accuracy"] == 0.0
+    assert scores["correction_match"] == 1.0
+
+
+def test_package_step_verification_freeze_uses_fixed_grammar_gold():
+    raw = {
+        "fen": STARTING_FEN,
+        "verification_trace": "1. Candidate e2e4: +42cp; Bucket: equal\n2. Best: d2d4",
+        "verification_verdict": "broken",
+        "faulty_line": 2,
+        "error_type": "wrong_best",
+        "correction": "Best should be e2e4.",
+    }
+
+    gold = packaged.derive_gold_answer("step_verification", dict(raw), Random(42))
+    examples = packaged.freeze_split("planning", [dict(raw)], seed=42)
+
+    assert gold == "\n".join(
+        [
+            "Verdict: broken",
+            "Faulty line: 2",
+            "Error type: wrong_best",
+            "Correction: Best should be e2e4.",
+        ]
+    )
+    assert examples[0].task_type == "step_verification"
+    assert examples[0].metric_type == "step_verification"
+    assert examples[0].metadata["diagnostic"] is True
+    assert "1. Candidate e2e4" in examples[0].prompt
+    assert examples[0].gold_answer == gold
+
+
 def test_package_scoring_treats_chess960_id_as_chess960():
     example = packaged.BenchmarkExample(
         example_id="chess960_00000",

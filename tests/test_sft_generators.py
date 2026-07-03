@@ -1481,6 +1481,95 @@ def test_package_candidate_ratings_registered_for_tier7_generation():
     assert "Candidate <uci>" in ANSWER_CONTRACTS["7.8_candidate_ratings"]
 
 
+def test_package_step_verification_generator_corrupts_candidate_rating_trace():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier7_verification import StepVerification
+
+    candidate_row = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 15},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+    }
+
+    rows = list(
+        StepVerification(
+            config={"candidate_rating_evals": [candidate_row], "volume_override": 1},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    answer = row["messages"][2]["content"]
+    assert row["task"] == "7.9_step_verification"
+    prompt = row["messages"][1]["content"]
+    assert "numbered trace" in prompt or "Trace to verify:" in prompt
+    assert "6. Best: d2d4" in prompt
+    assert answer.splitlines() == [
+        "Verdict: broken",
+        "Faulty line: 6",
+        "Error type: wrong_best",
+        "Correction: Best should be e2e4.",
+    ]
+    assert row["metadata"]["source_task"] == "7.8_candidate_ratings"
+    assert row["metadata"]["verification_verdict"] == "broken"
+    assert row["metadata"]["faulty_line"] == 6
+    assert row["metadata"]["error_type"] == "wrong_best"
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_step_verification_generator_includes_sound_cases():
+    from chess_llm.sft.generators.tier7_verification import StepVerification
+
+    candidate_row = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 15},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+    }
+
+    rows = list(
+        StepVerification(
+            config={"candidate_rating_evals": [candidate_row], "volume_override": 2},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 2
+    assert rows[1]["metadata"]["verification_verdict"] == "sound"
+    assert rows[1]["metadata"]["faulty_line"] == "none"
+    assert rows[1]["messages"][2]["content"].splitlines() == [
+        "Verdict: sound",
+        "Faulty line: none",
+        "Error type: none",
+        "Correction: none",
+    ]
+
+
+def test_package_step_verification_registered_for_tier7_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators import StepVerification
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert StepVerification in pipeline.TIER_GENERATORS[7]
+    assert DEFAULT_VOLUMES["7.9_step_verification"] > 0
+    assert TEMPLATES["7.9_step_verification"]
+    assert "Verdict:" in ANSWER_CONTRACTS["7.9_step_verification"]
+
+
 def test_package_legal_move_generator_samples_fen_pool_in_shuffled_order():
     from chess_llm.sft.generators.tier2_rules import LegalMoveGen
 
