@@ -50,6 +50,12 @@ _TRACE_METRIC_KEYS = frozenset({
     "trace_step_count",
     "trace_conclusion_move_match",
 })
+_STEP_VERIFICATION_METADATA_KEYS = (
+    "source_task",
+    "error_type",
+    "corruption_kind",
+    "difficulty",
+)
 
 
 def write_prediction_analysis_report(
@@ -194,6 +200,8 @@ def _enrich_prediction_row(
     enriched.setdefault("fen", example.fen)
     enriched.setdefault("prompt", example.prompt)
     enriched.setdefault("gold_answer", example.gold_answer)
+    if example.metadata:
+        enriched.setdefault("metadata", dict(example.metadata))
     if "score" not in enriched or _prediction_score_needs_refresh(enriched, example):
         enriched["score"] = score_prediction(
             example,
@@ -228,6 +236,7 @@ def _new_prediction_analysis_bucket() -> dict[str, Any]:
         "format_bleed_count": 0,
         "format_families": Counter(),
         "prefixes": Counter(),
+        "metadata_breakdowns": defaultdict(Counter),
         "failure_examples": [],
     }
 
@@ -265,12 +274,21 @@ def _update_prediction_analysis_bucket(
     bucket["format_families"][family] += 1
     if prefix:
         bucket["prefixes"][prefix] += 1
+    if row.get("task_type") == "step_verification":
+        metadata = row.get("metadata")
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        for key in _STEP_VERIFICATION_METADATA_KEYS:
+            value = metadata.get(key, row.get(key))
+            if isinstance(value, (str, int)) and str(value):
+                bucket["metadata_breakdowns"][key][str(value)] += 1
 
 
 def _finalize_prediction_analysis_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     scored_count = int(bucket["scored_count"])
     metric_sums: Mapping[str, float] = bucket["score_metric_sums"]
     metric_counts: Mapping[str, int] = bucket["score_metric_counts"]
+    metadata_breakdowns: Mapping[str, Counter] = bucket["metadata_breakdowns"]
     return {
         "row_count": int(bucket["row_count"]),
         "example_count": len(bucket["example_ids"]),
@@ -287,6 +305,10 @@ def _finalize_prediction_analysis_bucket(bucket: dict[str, Any]) -> dict[str, An
         "format_bleed_count": int(bucket["format_bleed_count"]),
         "format_families": dict(sorted(bucket["format_families"].items())),
         "prefixes": dict(bucket["prefixes"].most_common(_PREDICTION_PREFIX_LIMIT)),
+        "metadata_breakdowns": {
+            key: dict(sorted(counter.items()))
+            for key, counter in sorted(metadata_breakdowns.items())
+        },
         "failure_examples": list(bucket["failure_examples"]),
     }
 

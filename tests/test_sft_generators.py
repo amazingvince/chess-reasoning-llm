@@ -1542,20 +1542,97 @@ def test_package_step_verification_generator_includes_sound_cases():
 
     rows = list(
         StepVerification(
-            config={"candidate_rating_evals": [candidate_row], "volume_override": 2},
+            config={"candidate_rating_evals": [candidate_row], "volume_override": 5},
             rng=Random(0),
         ).generate()
     )
 
-    assert len(rows) == 2
-    assert rows[1]["metadata"]["verification_verdict"] == "sound"
-    assert rows[1]["metadata"]["faulty_line"] == "none"
-    assert rows[1]["messages"][2]["content"].splitlines() == [
+    assert len(rows) == 5
+    assert rows[-1]["metadata"]["verification_verdict"] == "sound"
+    assert rows[-1]["metadata"]["faulty_line"] == "none"
+    assert rows[-1]["messages"][2]["content"].splitlines() == [
         "Verdict: sound",
         "Faulty line: none",
         "Error type: none",
         "Correction: none",
     ]
+
+
+def test_package_step_verification_generator_varies_candidate_corruptions():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier7_verification import StepVerification
+
+    candidate_row = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 180},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+    }
+
+    rows = list(
+        StepVerification(
+            config={"candidate_rating_evals": [candidate_row], "volume_override": 5},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert [row["metadata"]["error_type"] for row in rows] == [
+        "wrong_best",
+        "wrong_bucket",
+        "wrong_eval",
+        "malformed_line",
+        "none",
+    ]
+    assert [row["metadata"]["difficulty"] for row in rows] == [
+        "hard",
+        "hard",
+        "hard",
+        "easy",
+        "sound",
+    ]
+    assert "Bucket: decisive" in rows[1]["messages"][1]["content"]
+    assert "Candidate e2e4: -42cp" in rows[2]["messages"][1]["content"]
+    assert "Candidate e2e4 +42cp; Bucket: equal" in rows[3]["messages"][1]["content"]
+    assert all(validate_example(row)[0] for row in rows)
+
+
+def test_package_step_verification_generator_uses_deterministic_trace_sources():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier7_verification import StepVerification
+
+    fen = "7k/8/8/8/8/8/8/R3K3 w - - 0 1"
+    rows = list(
+        StepVerification(
+            config={"fen_pool": [{"fen": fen}], "volume_override": 6},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert [row["metadata"]["source_task"] for row in rows] == [
+        "1.18_material_balance_trace",
+        "1.18_material_balance_trace",
+        "2.10_ray_walk",
+        "2.10_ray_walk",
+        "2.11_legal_filter_trace",
+        "2.11_legal_filter_trace",
+    ]
+    assert [row["metadata"]["verification_verdict"] for row in rows] == [
+        "broken",
+        "sound",
+        "broken",
+        "sound",
+        "broken",
+        "sound",
+    ]
+    assert rows[0]["metadata"]["error_type"] == "wrong_eval"
+    assert rows[2]["metadata"]["error_type"] == "wrong_move_set"
+    assert rows[4]["metadata"]["error_type"] == "wrong_move_set"
+    assert all(validate_example(row)[0] for row in rows)
 
 
 def test_package_step_verification_registered_for_tier7_generation():

@@ -12,6 +12,7 @@ STEP_VERIFICATION_ERROR_TYPES = frozenset(
     {
         "none",
         "illegal_move",
+        "malformed_line",
         "wrong_fen",
         "wrong_eval",
         "wrong_bucket",
@@ -34,10 +35,16 @@ _CANDIDATE_LINE_RE = re.compile(
     r"^Candidate\s+([a-h][1-8][a-h][1-8][qrbn]?):",
     re.IGNORECASE,
 )
+_CANDIDATE_RATING_LINE_RE = re.compile(
+    r"^Candidate\s+(?P<uci>[a-h][1-8][a-h][1-8][qrbn]?):\s*"
+    r"(?P<score>[+-]?\d+cp|M-?\d+);\s*Bucket:\s*(?P<bucket>.+?)\s*$",
+    re.IGNORECASE,
+)
 _BEST_LINE_RE = re.compile(
     r"^Best:\s*([a-h][1-8][a-h][1-8][qrbn]?)\s*$",
     re.IGNORECASE,
 )
+_CP_SCORE_RE = re.compile(r"(?P<sign>[+-])(?P<value>\d+)cp")
 
 
 @dataclass(frozen=True)
@@ -194,6 +201,110 @@ def corrupt_candidate_ratings_best_line(
     return "\n".join(corrupted), label
 
 
+def corrupt_candidate_ratings_bucket_line(
+    answer: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    """Change one candidate's bucket while preserving the rest of the line."""
+    lines = _non_empty_lines(answer)
+    for index, line in enumerate(lines):
+        match = _CANDIDATE_RATING_LINE_RE.match(line)
+        if match is None:
+            continue
+        uci = match.group("uci").lower()
+        score = match.group("score")
+        bucket = " ".join(match.group("bucket").lower().split())
+        wrong_bucket = "decisive" if bucket != "decisive" else "equal"
+        corrupted = list(lines)
+        corrupted[index] = f"Candidate {uci}: {score}; Bucket: {wrong_bucket}"
+        label = StepVerificationLabel(
+            verdict="broken",
+            faulty_line=index + 1,
+            error_type="wrong_bucket",
+            correction=f"Candidate {uci} bucket should be {bucket}.",
+        )
+        return "\n".join(corrupted), label
+    return None
+
+
+def corrupt_candidate_ratings_eval_sign(
+    answer: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    """Flip the sign on one centipawn score in a candidate-rating trace."""
+    lines = _non_empty_lines(answer)
+    for index, line in enumerate(lines):
+        match = _CANDIDATE_RATING_LINE_RE.match(line)
+        if match is None:
+            continue
+        score = match.group("score")
+        cp_match = _CP_SCORE_RE.fullmatch(score)
+        if cp_match is None or int(cp_match.group("value")) == 0:
+            continue
+        uci = match.group("uci").lower()
+        bucket = match.group("bucket")
+        flipped_sign = "-" if cp_match.group("sign") == "+" else "+"
+        flipped_score = f"{flipped_sign}{cp_match.group('value')}cp"
+        corrupted = list(lines)
+        corrupted[index] = f"Candidate {uci}: {flipped_score}; Bucket: {bucket}"
+        label = StepVerificationLabel(
+            verdict="broken",
+            faulty_line=index + 1,
+            error_type="wrong_eval",
+            correction=f"Candidate {uci} score should be {score}.",
+        )
+        return "\n".join(corrupted), label
+    return None
+
+
+def corrupt_candidate_ratings_malformed_line(
+    answer: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    """Break one candidate line's fixed grammar without changing its content."""
+    lines = _non_empty_lines(answer)
+    for index, line in enumerate(lines):
+        match = _CANDIDATE_RATING_LINE_RE.match(line)
+        if match is None:
+            continue
+        uci = match.group("uci").lower()
+        score = match.group("score")
+        bucket = match.group("bucket")
+        corrupted = list(lines)
+        corrupted[index] = f"Candidate {uci} {score}; Bucket: {bucket}"
+        label = StepVerificationLabel(
+            verdict="broken",
+            faulty_line=index + 1,
+            error_type="malformed_line",
+            correction=f"Line should be `{line}`.",
+        )
+        return "\n".join(corrupted), label
+    return None
+
+
+def corrupt_material_balance_line(
+    answer: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    """Replace the material balance line with an impossible fixed claim."""
+    return _replace_line_with_prefix(
+        answer,
+        prefix="Balance:",
+        replacement="Balance: White is ahead by 99.",
+        error_type="wrong_eval",
+    )
+
+
+def corrupt_final_move_set_line(
+    answer: str,
+    *,
+    prefix: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    """Replace a final move-set line with ``none`` while preserving its label."""
+    return _replace_line_with_prefix(
+        answer,
+        prefix=prefix,
+        replacement=f"{prefix} none",
+        error_type="wrong_move_set",
+    )
+
+
 def label_from_metadata(metadata: Mapping[str, Any]) -> StepVerificationLabel | None:
     """Build the expected verifier label from SFT metadata."""
     verdict = metadata.get("verification_verdict")
@@ -225,6 +336,31 @@ def _non_empty_lines(text: str) -> list[str]:
     return [line.strip() for line in str(text or "").splitlines() if line.strip()]
 
 
+def _replace_line_with_prefix(
+    answer: str,
+    *,
+    prefix: str,
+    replacement: str,
+    error_type: str,
+) -> tuple[str, StepVerificationLabel] | None:
+    lines = _non_empty_lines(answer)
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            continue
+        if line == replacement:
+            return None
+        corrupted = list(lines)
+        corrupted[index] = replacement
+        label = StepVerificationLabel(
+            verdict="broken",
+            faulty_line=index + 1,
+            error_type=error_type,
+            correction=f"Line should be `{line}`.",
+        )
+        return "\n".join(corrupted), label
+    return None
+
+
 def _normalize_text(text: str) -> str:
     return " ".join(str(text or "").strip().lower().split())
 
@@ -232,7 +368,12 @@ def _normalize_text(text: str) -> str:
 __all__ = [
     "STEP_VERIFICATION_ERROR_TYPES",
     "StepVerificationLabel",
+    "corrupt_candidate_ratings_bucket_line",
     "corrupt_candidate_ratings_best_line",
+    "corrupt_candidate_ratings_eval_sign",
+    "corrupt_candidate_ratings_malformed_line",
+    "corrupt_final_move_set_line",
+    "corrupt_material_balance_line",
     "format_step_verification_answer",
     "label_from_metadata",
     "number_trace_lines",

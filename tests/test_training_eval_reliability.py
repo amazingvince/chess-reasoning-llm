@@ -896,6 +896,63 @@ def test_prediction_analysis_report_refreshes_legal_moves_by_piece_score_metrics
     assert round(task["failure_examples"][0]["score"]["all_moves_jaccard"], 3) == 0.333
 
 
+def test_prediction_analysis_report_breaks_down_step_verification_metadata(tmp_path):
+    from chess_llm.training import evaluate
+    from chess_llm.evals.benchmark import BenchmarkExample
+
+    output_path = tmp_path / "predictions.jsonl"
+    output_path.write_text(
+        json.dumps(
+            {
+                "example_id": "verify_1",
+                "sample_index": 0,
+                "prediction": "\n".join(
+                    [
+                        "Verdict: broken",
+                        "Faulty line: 1",
+                        "Error type: wrong_bucket",
+                        "Correction: Candidate e2e4 bucket should be equal.",
+                    ]
+                ),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    example = BenchmarkExample(
+        example_id="verify_1",
+        split="planning",
+        task_type="step_verification",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="\n".join(
+            [
+                "Verdict: broken",
+                "Faulty line: 1",
+                "Error type: wrong_bucket",
+                "Correction: Candidate e2e4 bucket should be equal.",
+            ]
+        ),
+        metric_type="step_verification",
+        metadata={
+            "source_task": "7.8_candidate_ratings",
+            "error_type": "wrong_bucket",
+            "corruption_kind": "candidate_rating_wrong_bucket",
+        },
+    )
+
+    report_path = evaluate.write_prediction_analysis_report(
+        output_path,
+        examples_by_id={"verify_1": example},
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    breakdowns = report["tasks"]["step_verification"]["metadata_breakdowns"]
+
+    assert breakdowns["source_task"] == {"7.8_candidate_ratings": 1}
+    assert breakdowns["error_type"] == {"wrong_bucket": 1}
+    assert breakdowns["corruption_kind"] == {"candidate_rating_wrong_bucket": 1}
+
+
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):
     from chess_llm.training import evaluate
 
