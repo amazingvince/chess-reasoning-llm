@@ -1134,6 +1134,32 @@ def test_load_sources_shuffles_depth_ordered_evals(monkeypatch, tmp_path: Path):
     assert best_move_order != depth_ordered
 
 
+def test_load_sources_reads_candidate_rating_annotation_file(monkeypatch, tmp_path: Path):
+    from chess_llm.sft import pipeline
+
+    candidate_row = {
+        "fen": STARTING_FEN,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 15},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+        "multipv_depth": 8,
+    }
+    candidate_path = tmp_path / "candidate_ratings.jsonl"
+    candidate_path.write_text(json.dumps(candidate_row) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(pipeline, "CANDIDATE_RATINGS_PATH", candidate_path)
+
+    config = pipeline.load_sources(volume_override=1)
+
+    assert config["candidate_rating_evals"] == [candidate_row]
+
+
 def test_task_rng_is_stable_and_order_independent(monkeypatch, tmp_path: Path):
     from random import Random
 

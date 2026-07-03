@@ -14,6 +14,11 @@ def test_pyproject_declares_runtime_dependency_and_package_clis():
     assert '"python-chess>=1.10.0"' in text
     assert '"huggingface_hub>=0.24.0"' in text
     assert 'chess-llm-batch-judge = "chess_llm.evals.batch_judge:main"' in text
+    assert (
+        'chess-llm-build-candidate-ratings = '
+        '"chess_llm.sft.candidate_ratings:main"'
+        in text
+    )
     assert 'chess-llm-download-tablebases = "chess_llm.sft.download_tablebases:main"' in text
     assert 'chess-llm-evaluate = "chess_llm.training.evaluate:main"' in text
     assert 'chess-llm-export-vllm = "chess_llm.training.vllm_export:main"' in text

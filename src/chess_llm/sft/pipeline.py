@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 
 from chess_llm.evals.benchmark import freeze_and_save
 from chess_llm.sft.completeness import audit_output_completeness
+from chess_llm.sft.candidate_ratings import load_candidate_rating_evals
 from chess_llm.sft.context import raw_fen_identity_key
 from chess_llm.sft.decontamination import (
     audit_output_files,
@@ -76,6 +77,7 @@ EVAL_SPLITS_DIR = SETTINGS.eval_splits_dir
 ANNOTATIONS_DIR = SETTINGS.annotations_dir
 TIER_OUTPUT_DIR = SETTINGS.tier_output_dir
 BENCHMARK_DIR = SETTINGS.benchmark_dir
+CANDIDATE_RATINGS_PATH = ANNOTATIONS_DIR / "candidate_ratings.jsonl"
 POLYGLOT_DIR = SETTINGS.polyglot_dir
 SYZYGY_PATH = SETTINGS.syzygy_path
 MIN_DEPTH_TRAINING = SETTINGS.min_depth_training
@@ -207,6 +209,14 @@ def load_sources(volume_override: int | None = None) -> dict:
                 best_move_evals.append(ev)
     except Exception as exc:  # pragma: no cover - depends on external datasets
         logger.warning("Lichess evals loading failed: %s", exc)
+
+    candidate_rating_evals = load_candidate_rating_evals(CANDIDATE_RATINGS_PATH)
+    if candidate_rating_evals:
+        logger.info(
+            "Loaded %d candidate-rating MultiPV rows from %s",
+            len(candidate_rating_evals),
+            CANDIDATE_RATINGS_PATH,
+        )
 
     # The eval cache streams rows in depth order; shuffle so consumers do not
     # see a depth-sorted slice (fen_pool_entries gets the same treatment below).
@@ -397,7 +407,7 @@ def load_sources(volume_override: int | None = None) -> dict:
     config["position_evals"] = position_evals
     config["best_move_evals"] = best_move_evals
     config["consequence_evals"] = position_evals
-    config["candidate_rating_evals"] = [
+    config["candidate_rating_evals"] = candidate_rating_evals + [
         ev
         for ev in position_evals
         if isinstance(ev.get("candidate_ratings"), list)

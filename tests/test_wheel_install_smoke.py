@@ -72,6 +72,7 @@ entry_points = {
     if entry.group == "console_scripts"
 }
 expected = {
+    "chess-llm-build-candidate-ratings": "chess_llm.sft.candidate_ratings:main",
     "chess-llm-make-data": "chess_llm.sft.pipeline:cli",
     "chess-llm-run-eval-split": "chess_llm.sft.run_eval_split:main",
     "chess-llm-upload-data": "chess_llm.sft.hub_upload:main",
