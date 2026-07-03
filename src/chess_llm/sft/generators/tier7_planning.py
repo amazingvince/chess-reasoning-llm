@@ -3,6 +3,7 @@
 7.1 Best move selection (<think>/<move> format, depth >= 30)
 7.2 Puzzle solving (Lichess puzzles rated 1000-2500)
 7.3 Move consequence (PV line analysis)
+7.8 Candidate ratings (fixed grammar, true MultiPV only)
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Iterator
 import chess
 
 from chess_llm.sft.context import board_from_raw
+from chess_llm.evals.benchmark import format_candidate_ratings_answer
 from chess_llm.sft.generators.base import TaskGenerator
 from chess_llm.sft.generators.reasoning_traces import (
     generate_endgame_trace,
@@ -254,3 +256,91 @@ class MoveConsequence(TaskGenerator):
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
             count += 1
+
+
+class CandidateRatings(TaskGenerator):
+    """Task 7.8: rate exactly five legal MultiPV candidate moves."""
+
+    def task_id(self) -> str:
+        return "7.8_candidate_ratings"
+
+    def tier(self) -> int:
+        return 7
+
+    def generate(self) -> Iterator[dict]:
+        evals = self.config.get("candidate_rating_evals", [])
+        target = self.target_volume()
+        count = 0
+
+        for ev in evals:
+            if count >= target:
+                return
+            raw = self.source_row(ev)
+            if self.is_blocked(raw):
+                continue
+
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            ratings = _candidate_ratings_from_row(raw)
+            if len(ratings) < 5:
+                continue
+            ratings = ratings[:5]
+            legal_moves = {move.uci() for move in board.legal_moves}
+            if any(str(rating["uci"]) not in legal_moves for rating in ratings):
+                continue
+            if any(
+                rating.get("cp") is None and rating.get("mate") is None
+                for rating in ratings
+            ):
+                continue
+
+            candidate_moves = " ".join(str(rating["uci"]) for rating in ratings)
+            raw["candidate_moves"] = candidate_moves
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update({
+                "source": "stockfish_multipv",
+                "target_move": ratings[0]["uci"],
+                "candidate_moves": candidate_moves,
+                "candidate_ratings": ratings,
+                "multipv_depth": raw.get("multipv_depth", raw.get("depth", 0)),
+            })
+            raw["metadata"] = metadata
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=format_candidate_ratings_answer(ratings),
+            )
+            count += 1
+
+
+def _candidate_ratings_from_row(raw: dict) -> list[dict[str, object]]:
+    source = raw.get("candidate_ratings")
+    if not isinstance(source, list):
+        source = raw.get("move_evaluations")
+    if not isinstance(source, list):
+        return []
+    ratings: list[dict[str, object]] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        uci = item.get("uci") or item.get("move") or item.get("best_move")
+        if not isinstance(uci, str) or not uci:
+            continue
+        cp = item.get("cp", item.get("centipawn"))
+        mate = item.get("mate", item.get("mate_in"))
+        rating: dict[str, object] = {"uci": uci.lower()}
+        if cp is not None:
+            try:
+                rating["cp"] = int(cp)
+            except (TypeError, ValueError):
+                pass
+        if mate is not None:
+            try:
+                rating["mate"] = int(mate)
+            except (TypeError, ValueError):
+                pass
+        ratings.append(rating)
+    return ratings

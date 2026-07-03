@@ -1418,6 +1418,69 @@ def test_package_best_move_selection_excludes_mate_pairwise_rows():
     assert all(row["metadata"]["source"] == "lichess_evals" for row in rows)
 
 
+def test_package_candidate_ratings_generator_uses_true_multipv_rows_only():
+    from chess_llm.sft import validate_example
+    from chess_llm.sft.generators.tier7_planning import CandidateRatings
+
+    true_multipv = {
+        "fen": STARTING_FEN,
+        "multipv_depth": 18,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 15},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+    }
+    pseudo_candidates = {
+        "fen": STARTING_FEN,
+        "best_move": "e2e4",
+        "candidate_moves": ["e2e4", "d2d4", "g1f3", "c2c4", "b1c3"],
+    }
+
+    rows = list(
+        CandidateRatings(
+            config={
+                "candidate_rating_evals": [pseudo_candidates, true_multipv],
+                "volume_override": 2,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    answer = row["messages"][2]["content"]
+    assert row["task"] == "7.8_candidate_ratings"
+    assert answer.splitlines() == [
+        "Candidate e2e4: +42cp; Bucket: equal",
+        "Candidate d2d4: +15cp; Bucket: equal",
+        "Candidate g1f3: +5cp; Bucket: equal",
+        "Candidate c2c4: -20cp; Bucket: equal",
+        "Candidate b1c3: -80cp; Bucket: slight edge",
+        "Best: e2e4",
+    ]
+    assert "e2e4 d2d4 g1f3 c2c4 b1c3" in row["messages"][1]["content"]
+    assert row["metadata"]["source"] == "stockfish_multipv"
+    assert row["metadata"]["target_move"] == "e2e4"
+    assert row["metadata"]["candidate_moves"] == "e2e4 d2d4 g1f3 c2c4 b1c3"
+    passed, errors = validate_example(row)
+    assert passed is True, errors
+
+
+def test_package_candidate_ratings_registered_for_tier7_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators import CandidateRatings
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert CandidateRatings in pipeline.TIER_GENERATORS[7]
+    assert DEFAULT_VOLUMES["7.8_candidate_ratings"] > 0
+    assert TEMPLATES["7.8_candidate_ratings"]
+    assert "Candidate <uci>" in ANSWER_CONTRACTS["7.8_candidate_ratings"]
+
+
 def test_package_legal_move_generator_samples_fen_pool_in_shuffled_order():
     from chess_llm.sft.generators.tier2_rules import LegalMoveGen
 

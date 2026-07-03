@@ -24,6 +24,7 @@ SOURCE_KEYS: tuple[str, ...] = (
     "position_evals",
     "best_move_evals",
     "consequence_evals",
+    "candidate_rating_evals",
     "book_moves",
     "endgame_positions",
     "mate_rows",
@@ -61,6 +62,7 @@ TIER_REQUIRED_SOURCES: dict[int, dict[str, tuple[str, ...]]] = {
 
 TIER_OPTIONAL_SOURCES: dict[int, dict[str, tuple[str, ...]]] = {
     7: {
+        "candidate_rating_evals": ("tier7_r4_optional",),
         "mate_rows": ("tier7_optional",),
     },
 }

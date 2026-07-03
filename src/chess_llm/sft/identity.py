@@ -43,6 +43,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "5.1_opening_identification": ("variant",),
     "5.2_opening_continuation": ("variant",),
     "5.3_opening_principles": ("variant",),
+    "7.8_candidate_ratings": ("candidate_moves",),
 }
 
 

@@ -66,6 +66,8 @@ from chess_llm.evals.benchmark import (
     normalize_prediction,
 )
 from chess_llm.evals.prediction_analysis import write_prediction_analysis_report
+from chess_llm.evals.trace_metrics import analyze_trace_metrics
+from chess_llm.external.multipv import SqliteMultipvCache, score_move_wpd
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -847,6 +849,12 @@ def _prediction_diagnostics(
             example,
             prediction,
         )
+    if example.task_type in ("best_move", "puzzle_solve"):
+        diagnostics["trace"] = analyze_trace_metrics(
+            example.fen,
+            prediction,
+            chess960=_example_is_chess960(example),
+        )
     return diagnostics
 
 
@@ -990,6 +998,7 @@ def _score_split_with_protocol_predictions(
     normalized_predictions: dict[str, str],
     raw_predictions: dict[str, str],
     acpl_scores: dict[str, float] | None = None,
+    wpd_scores: dict[str, object] | None = None,
 ) -> dict[str, float]:
     """Score with raw outputs preserved for move-answer protocol metrics.
 
@@ -1005,7 +1014,7 @@ def _score_split_with_protocol_predictions(
             raw = raw_predictions.get(example.example_id)
             if raw is not None:
                 scoring_predictions[example.example_id] = raw
-    return score_split(examples, scoring_predictions, acpl_scores)
+    return score_split(examples, scoring_predictions, acpl_scores, wpd_scores)
 
 
 def _open_stockfish(stockfish_path: str) -> chess.engine.SimpleEngine | None:
@@ -1171,6 +1180,63 @@ def compute_acpl(
         illegal_move,
     )
     return acpl_scores
+
+
+def compute_wpd(
+    engine: chess.engine.SimpleEngine,
+    examples: list[BenchmarkExample],
+    flat_preds: dict[str, str],
+    *,
+    depth: int = 20,
+    cache_path: Path | None = None,
+    multipv: int = 5,
+    pv_len: int = 8,
+) -> dict[str, dict[str, object]]:
+    """Compute WPD diagnostics using cached MultiPV top-N first."""
+    wpd_scores: dict[str, dict[str, object]] = {}
+    cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
+    evaluated = 0
+    missing_move = 0
+
+    for ex in examples:
+        if ex.task_type not in _MOVE_TASK_TYPES:
+            continue
+        pred = flat_preds.get(ex.example_id, "")
+        uci = extract_move(pred)
+        if uci is None:
+            missing_move += 1
+            wpd_scores[ex.example_id] = {
+                "predicted_move": None,
+                "best_move": None,
+                "best_expectation": None,
+                "predicted_expectation": 0.0,
+                "wpd": None,
+                "reward": 0.0,
+                "reward_bucket": "missing_move",
+                "multipv_hit": False,
+                "postmove_hit": False,
+                "cache_hit": False,
+            }
+            continue
+        diagnostics = score_move_wpd(
+            engine,
+            ex.fen,
+            uci,
+            depth=depth,
+            k=multipv,
+            pv_len=pv_len,
+            cache=cache,
+            chess960=_example_is_chess960(ex),
+        )
+        wpd_scores[ex.example_id] = diagnostics.to_metric_dict()
+        evaluated += 1
+
+    logger.info(
+        "WPD: evaluated %d positions with cached MultiPV (%d missing move)",
+        evaluated,
+        missing_move,
+    )
+    return wpd_scores
 
 
 def _select_acpl_splits(
@@ -1654,14 +1720,23 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     for split_name, examples in split_examples.items():
         # Compute ACPL if engine available
         acpl_scores: dict[str, float] | None = None
+        wpd_scores: dict[str, dict[str, object]] | None = None
         if engine and split_name in acpl_splits:
             acpl_scores = compute_acpl(engine, examples, flat_preds, args.acpl_depth)
+            wpd_scores = compute_wpd(
+                engine,
+                examples,
+                flat_preds,
+                depth=args.acpl_depth,
+                cache_path=args.output.with_suffix(".multipv.sqlite"),
+            )
 
         metrics = _score_split_with_protocol_predictions(
             examples,
             flat_preds,
             flat_raw_preds,
             acpl_scores,
+            wpd_scores,
         )
 
         # pass@k for puzzle solving includes greedy first, then sampled candidates.

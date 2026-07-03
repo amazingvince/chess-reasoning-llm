@@ -1059,6 +1059,107 @@ def test_package_scoring_metrics_cover_move_protocol_and_acpl():
     assert aggregate["overall"] == 1.0
 
 
+def test_package_score_split_reports_wpd_diagnostics():
+    example = _example()
+    prediction = "<think>control center</think><move>e2e4</move>"
+
+    aggregate = packaged.score_split(
+        [example],
+        {"planning_00000": prediction},
+        wpd_scores={
+            "planning_00000": {
+                "wpd": 0.125,
+                "best_expectation": 0.62,
+                "predicted_expectation": 0.495,
+                "reward": 0.875,
+                "multipv_hit": True,
+                "postmove_hit": False,
+                "cache_hit": True,
+            }
+        },
+    )
+
+    assert aggregate["best_move_wpd"] == 0.125
+    assert aggregate["best_move_best_expectation"] == 0.62
+    assert aggregate["best_move_predicted_expectation"] == 0.495
+    assert aggregate["best_move_reward"] == 0.875
+    assert aggregate["best_move_multipv_hit_rate"] == 1.0
+    assert aggregate["best_move_postmove_hit_rate"] == 0.0
+    assert aggregate["best_move_cache_hit_rate"] == 1.0
+    assert aggregate["wpd"] == 0.125
+
+
+def test_package_candidate_ratings_gold_scoring_and_freeze():
+    raw = {
+        "fen": STARTING_FEN,
+        "candidate_ratings": [
+            {"uci": "e2e4", "cp": 42},
+            {"uci": "d2d4", "cp": 15},
+            {"uci": "g1f3", "cp": 5},
+            {"uci": "c2c4", "cp": -20},
+            {"uci": "b1c3", "cp": -80},
+        ],
+    }
+    gold = packaged.derive_gold_answer("candidate_ratings", dict(raw), Random(42))
+    examples = packaged.freeze_split("planning", [dict(raw)], seed=42)
+
+    assert gold.splitlines() == [
+        "Candidate e2e4: +42cp; Bucket: equal",
+        "Candidate d2d4: +15cp; Bucket: equal",
+        "Candidate g1f3: +5cp; Bucket: equal",
+        "Candidate c2c4: -20cp; Bucket: equal",
+        "Candidate b1c3: -80cp; Bucket: slight edge",
+        "Best: e2e4",
+    ]
+    assert examples[0].task_type == "candidate_ratings"
+    assert examples[0].metric_type == "candidate_ratings"
+    assert "e2e4 d2d4 g1f3 c2c4 b1c3" in examples[0].prompt
+    assert examples[0].gold_answer == gold
+
+    scores = packaged.score_prediction(examples[0], gold)
+    assert scores["primary"] == 1.0
+    assert scores["candidate_set_jaccard"] == 1.0
+    assert scores["best_move_match"] == 1.0
+    assert scores["cp_bucket_accuracy"] == 1.0
+    assert scores["cp_bucket_mae"] == 0.0
+
+
+def test_package_candidate_ratings_scores_partial_bucket_and_best_errors():
+    gold = "\n".join(
+        [
+            "Candidate e2e4: +42cp; Bucket: equal",
+            "Candidate d2d4: +15cp; Bucket: equal",
+            "Candidate g1f3: +5cp; Bucket: equal",
+            "Candidate c2c4: -20cp; Bucket: equal",
+            "Candidate b1c3: -80cp; Bucket: slight edge",
+            "Best: e2e4",
+        ]
+    )
+    prediction = "\n".join(
+        [
+            "Candidate e2e4: +42cp; Bucket: equal",
+            "Candidate d2d4: +15cp; Bucket: equal",
+            "Candidate g1f3: +5cp; Bucket: slight edge",
+            "Candidate c2c4: -20cp; Bucket: equal",
+            "Candidate b1a3: -120cp; Bucket: slight edge",
+            "Best: d2d4",
+        ]
+    )
+    example = _example(
+        task_type="candidate_ratings",
+        gold_answer=gold,
+        metric_type="candidate_ratings",
+    )
+
+    scores = packaged.score_prediction(example, prediction)
+
+    assert scores["primary"] < 1.0
+    assert round(scores["candidate_set_jaccard"], 3) == 0.667
+    assert scores["best_move_match"] == 0.0
+    assert scores["cp_bucket_accuracy"] == 0.8
+    assert scores["cp_bucket_mae"] == 0.2
+
+
 def test_package_scoring_treats_chess960_id_as_chess960():
     example = packaged.BenchmarkExample(
         example_id="chess960_00000",

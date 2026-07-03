@@ -134,6 +134,17 @@ def validate_state_tracking(
 
 
 _PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
+_CANDIDATE_RATING_RE = re.compile(
+    r"^\s*Candidate\s+"
+    r"(?P<uci>[a-h][1-8][a-h][1-8][qrbn]?)"
+    r":\s*(?P<score>[+-]?\d+cp|M-?\d+)"
+    r";\s*Bucket:\s*(?P<bucket>[a-z_ ]+)\s*$",
+    re.IGNORECASE,
+)
+_CANDIDATE_BEST_RE = re.compile(
+    r"^\s*Best:\s*(?P<uci>[a-h][1-8][a-h][1-8][qrbn]?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def validate_template_complete(text: str) -> bool:
@@ -768,6 +779,81 @@ def _require_exact_assistant_answer(
     return errors
 
 
+def _validate_candidate_ratings_answer(
+    messages: list[dict],
+    fen: str,
+    metadata: dict,
+    *,
+    chess960: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    contents = _assistant_contents(messages)
+    if not contents:
+        return ["Candidate ratings: missing assistant answer"]
+
+    expected_moves = _candidate_rating_metadata_moves(metadata)
+    expected_best = _expected_target_move(metadata)
+    legal_moves: set[str] | None = None
+    if validate_fen(fen, chess960=chess960):
+        try:
+            board = chess.Board(fen, chess960=chess960)
+            legal_moves = {move.uci() for move in board.legal_moves}
+        except (ValueError, TypeError):
+            legal_moves = None
+
+    for content in contents:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if len(lines) != 6:
+            errors.append("Candidate ratings answer must contain exactly 6 non-empty lines")
+            continue
+        candidate_moves: list[str] = []
+        for line in lines[:5]:
+            match = _CANDIDATE_RATING_RE.match(line)
+            if match is None:
+                errors.append("Candidate ratings line does not match fixed grammar")
+                continue
+            uci = match.group("uci").lower()
+            candidate_moves.append(uci)
+            if legal_moves is not None and uci not in legal_moves:
+                errors.append(f"Candidate ratings move {uci!r} is not legal in FEN")
+        best_match = _CANDIDATE_BEST_RE.match(lines[5])
+        if best_match is None:
+            errors.append("Candidate ratings final line must be Best: <uci>")
+            best_move = None
+        else:
+            best_move = best_match.group("uci").lower()
+            if legal_moves is not None and best_move not in legal_moves:
+                errors.append(f"Candidate ratings best move {best_move!r} is not legal in FEN")
+
+        if len(set(candidate_moves)) != len(candidate_moves):
+            errors.append("Candidate ratings moves must be unique")
+        if expected_moves and candidate_moves != expected_moves:
+            errors.append("Candidate ratings moves do not match metadata candidate_ratings")
+        if expected_best and best_move != expected_best:
+            errors.append(
+                f"Candidate ratings best move {best_move!r} does not match "
+                f"target move {expected_best!r}"
+            )
+        if best_move is not None and best_move not in candidate_moves:
+            errors.append("Candidate ratings best move must be one of the candidates")
+    return errors
+
+
+def _candidate_rating_metadata_moves(metadata: dict) -> list[str]:
+    ratings = metadata.get("candidate_ratings")
+    if not isinstance(ratings, list):
+        return []
+    moves: list[str] = []
+    for item in ratings[:5]:
+        if not isinstance(item, Mapping):
+            return []
+        uci = item.get("uci") or item.get("move")
+        if not isinstance(uci, str) or not uci.strip():
+            return []
+        moves.append(uci.strip().lower())
+    return moves
+
+
 def _check_state_label(board: chess.Board) -> tuple[str, str]:
     if board.is_checkmate():
         return "checkmate", "Checkmate."
@@ -853,7 +939,16 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
             if not validate_template_complete(msg["content"]):
                 errors.append(f"Unfilled placeholder in {msg['role']} message")
 
-    if task.startswith("7."):
+    if task == "7.8_candidate_ratings":
+        errors.extend(
+            _validate_candidate_ratings_answer(
+                messages,
+                fen,
+                metadata,
+                chess960=is_960,
+            )
+        )
+    elif task.startswith("7."):
         expected_move = _expected_target_move(metadata)
         for msg in messages:
             if msg["role"] == "assistant" and msg["content"]:

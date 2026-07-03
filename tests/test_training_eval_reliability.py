@@ -702,6 +702,57 @@ def test_save_predictions_includes_legality_reason_diagnostics(tmp_path):
     }
 
 
+def test_save_predictions_and_analysis_include_trace_metrics(tmp_path):
+    from chess_llm.training import evaluate
+
+    output_path = tmp_path / "predictions.jsonl"
+    prediction = (
+        "<think>"
+        "Candidates: e2e4 d2d4. "
+        "Line: e2e4 e7e5 g1f3. "
+        "Backtrack: d2d4 is slower. "
+        "Best: e2e4."
+        "</think>\n"
+        "<move>e2e4</move>"
+    )
+    example = BenchmarkExample(
+        example_id="planning_00000",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={},
+    )
+
+    evaluate.save_predictions(
+        {"planning_00000": [prediction]},
+        output_path,
+        examples_by_id={"planning_00000": example},
+    )
+    row = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert row["score"]["trace_referenced_move_accuracy"] == 1.0
+    assert row["score"]["trace_step_accuracy"] == 1.0
+    assert row["diagnostics"]["trace"]["trace_candidate_count"] == 2
+    assert row["diagnostics"]["trace"]["trace_line_depth"] == 3
+
+    report_path = evaluate.write_prediction_analysis_report(
+        output_path,
+        examples_by_id={"planning_00000": example},
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert (
+        report["tasks"]["best_move"]["score_metrics"][
+            "trace_referenced_move_accuracy"
+        ]
+        == 1.0
+    )
+    assert report["tasks"]["best_move"]["score_metrics"]["trace_line_depth"] == 3.0
+
+
 def test_prediction_analysis_report_flags_move_edit_format_bleed(tmp_path):
     from chess_llm.training import evaluate
 

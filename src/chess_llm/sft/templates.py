@@ -200,6 +200,14 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'one line per side-to-move piece with "pseudo-legal ... | rejected ... '
         '| legal ..." fields, and "All legal moves:".'
     ),
+    "7.8_candidate_ratings": (
+        'Answer format: return exactly five lines "Candidate <uci>: <cp|M#>; '
+        'Bucket: <label>" followed by exactly one line "Best: <uci>".'
+    ),
+    "candidate_ratings": (
+        'Answer format: return exactly five lines "Candidate <uci>: <cp|M#>; '
+        'Bucket: <label>" followed by exactly one line "Best: <uci>".'
+    ),
 }
 
 
@@ -683,6 +691,11 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nWhat are the consequences of {move}? Analyze the resulting position.",
         "Board:\n{board}\nFEN: {fen}\nIf {move} is played, what happens next?",
         "Board:\n{board}\nSide to move: {side_to_move}\nAnalyze the consequences of {move}.",
+    ],
+    "7.8_candidate_ratings": [
+        "FEN: {fen}\nRate exactly these 5 candidate moves: {candidate_moves}",
+        "Position: {fen}\nFor the side to move, rate these candidate moves: {candidate_moves}",
+        "Board:\n{board}\nSide to move: {side_to_move}\nRate exactly these 5 candidate moves: {candidate_moves}",
     ],
 }
 

@@ -397,6 +397,12 @@ def load_sources(volume_override: int | None = None) -> dict:
     config["position_evals"] = position_evals
     config["best_move_evals"] = best_move_evals
     config["consequence_evals"] = position_evals
+    config["candidate_rating_evals"] = [
+        ev
+        for ev in position_evals
+        if isinstance(ev.get("candidate_ratings"), list)
+        or isinstance(ev.get("move_evaluations"), list)
+    ]
     config["book_moves"] = sorted_book_moves
     config["endgame_positions"] = endgame_positions
     config["mate_rows"] = mate_rows
@@ -802,6 +808,7 @@ def _generation_source_fingerprint(config: dict) -> str:
         "openings",
         "position_evals",
         "best_move_evals",
+        "candidate_rating_evals",
         "endgame_positions",
         "mate_rows",
     ):

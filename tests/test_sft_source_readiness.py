@@ -49,10 +49,18 @@ def test_optional_tier_sources_do_not_make_report_fail():
     )
 
     assert report.ok is True
-    assert [issue.source_key for issue in report.optional_gaps] == ["mate_rows"]
-    assert report.to_dict()["optional_gaps"][0]["required_by"] == [
-        "tier7_optional"
+    assert [issue.source_key for issue in report.optional_gaps] == [
+        "candidate_rating_evals",
+        "mate_rows",
     ]
+    optional_by_source = {
+        item["source_key"]: item["required_by"]
+        for item in report.to_dict()["optional_gaps"]
+    }
+    assert optional_by_source == {
+        "candidate_rating_evals": ["tier7_r4_optional"],
+        "mate_rows": ["tier7_optional"],
+    }
 
 
 def test_self_play_count_is_informational_only():

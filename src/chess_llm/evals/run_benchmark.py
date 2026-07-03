@@ -15,6 +15,7 @@ import chess.engine
 from chess_llm.evals.benchmark import (
     BenchmarkExample,
     centipawn_loss,
+    example_is_chess960,
     extract_move,
     format_compliance,
     legal_move_rate,
@@ -23,6 +24,7 @@ from chess_llm.evals.benchmark import (
     score_split,
 )
 from chess_llm.evals.prediction_analysis import write_prediction_analysis_report
+from chess_llm.external.multipv import SqliteMultipvCache, score_move_wpd
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,50 @@ def compute_acpl(
 
     logger.info("ACPL: evaluated %d positions with Stockfish", evaluated)
     return acpl_scores
+
+
+def compute_wpd(
+    engine,
+    examples: list[BenchmarkExample],
+    flat_preds: dict[str, str],
+    *,
+    depth: int = 20,
+    cache_path: Path | None = None,
+    multipv: int = 5,
+    pv_len: int = 8,
+) -> dict[str, dict[str, object]]:
+    """Compute WPD diagnostics using cached MultiPV top-N first."""
+    cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
+    wpd_scores: dict[str, dict[str, object]] = {}
+    for example in examples:
+        if example.task_type not in _MOVE_TASK_TYPES:
+            continue
+        prediction = flat_preds.get(example.example_id, "")
+        uci = extract_move(prediction)
+        if uci is None:
+            wpd_scores[example.example_id] = {
+                "wpd": None,
+                "best_expectation": None,
+                "predicted_expectation": 0.0,
+                "reward": 0.0,
+                "reward_bucket": "missing_move",
+                "multipv_hit": False,
+                "postmove_hit": False,
+                "cache_hit": False,
+            }
+            continue
+        diagnostics = score_move_wpd(
+            engine,
+            example.fen,
+            uci,
+            depth=depth,
+            k=multipv,
+            pv_len=pv_len,
+            cache=cache,
+            chess960=example_is_chess960(example),
+        )
+        wpd_scores[example.example_id] = diagnostics.to_metric_dict()
+    return wpd_scores
 
 
 def print_report(
@@ -307,8 +353,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
             acpl_scores = None
+            wpd_scores = None
             if engine is not None:
                 acpl_scores = compute_acpl(engine, examples, flat_predictions, args.acpl_depth)
+                wpd_scores = compute_wpd(
+                    engine,
+                    examples,
+                    flat_predictions,
+                    depth=args.acpl_depth,
+                    cache_path=predictions_path.with_suffix(".multipv.sqlite"),
+                )
 
             scoring_predictions = dict(flat_predictions)
             for example in examples:
@@ -316,7 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raw = flat_raw_predictions.get(example.example_id)
                     if raw is not None:
                         scoring_predictions[example.example_id] = raw
-            metrics = score_split(examples, scoring_predictions, acpl_scores)
+            metrics = score_split(examples, scoring_predictions, acpl_scores, wpd_scores)
 
             puzzle_examples = [example for example in examples if example.task_type == "puzzle_solve"]
             if puzzle_examples:

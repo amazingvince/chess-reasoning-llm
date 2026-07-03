@@ -39,6 +39,17 @@ _MOVE_EDIT_TRACE_TASK_TYPES = frozenset({
     "state_tracking",
 })
 _THINK_MOVE_PROTOCOL_TASK_TYPES = frozenset({"best_move", "puzzle_solve"})
+_TRACE_METRIC_KEYS = frozenset({
+    "trace_referenced_move_accuracy",
+    "trace_referenced_move_count",
+    "trace_illegal_referenced_move_count",
+    "trace_candidate_count",
+    "trace_line_depth",
+    "trace_backtrack_count",
+    "trace_step_accuracy",
+    "trace_step_count",
+    "trace_conclusion_move_match",
+})
 
 
 def write_prediction_analysis_report(
@@ -198,6 +209,8 @@ def _prediction_score_needs_refresh(
     score = row.get("score")
     if not isinstance(score, Mapping):
         return True
+    if example.task_type in _THINK_MOVE_PROTOCOL_TASK_TYPES:
+        return not _TRACE_METRIC_KEYS.issubset(score.keys())
     if example.task_type != "legal_moves_by_piece":
         return False
     return not _LEGAL_MOVES_BY_PIECE_DIAGNOSTIC_KEYS.issubset(score.keys())

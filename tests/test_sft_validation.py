@@ -391,6 +391,76 @@ def test_package_validate_example_rejects_tier7_wrong_legal_target_move():
     assert any("target move" in error.lower() for error in errors)
 
 
+def test_package_validate_example_accepts_candidate_ratings_fixed_grammar():
+    answer = "\n".join(
+        [
+            "Candidate e2e4: +42cp; Bucket: equal",
+            "Candidate d2d4: +15cp; Bucket: equal",
+            "Candidate g1f3: +5cp; Bucket: equal",
+            "Candidate c2c4: -20cp; Bucket: equal",
+            "Candidate b1c3: -80cp; Bucket: slight edge",
+            "Best: e2e4",
+        ]
+    )
+    row = build_sft_row(
+        task="7.8_candidate_ratings",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...\nRate candidates e2e4 d2d4 g1f3 c2c4 b1c3.",
+        assistant_content=answer,
+        metadata={
+            "target_move": "e2e4",
+            "candidate_ratings": [
+                {"uci": "e2e4", "cp": 42},
+                {"uci": "d2d4", "cp": 15},
+                {"uci": "g1f3", "cp": 5},
+                {"uci": "c2c4", "cp": -20},
+                {"uci": "b1c3", "cp": -80},
+            ],
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
+def test_package_validate_example_rejects_candidate_ratings_wrong_best_and_illegal_move():
+    row = build_sft_row(
+        task="7.8_candidate_ratings",
+        tier=7,
+        fen=STARTING_FEN,
+        user_prompt="FEN: ...",
+        assistant_content="\n".join(
+            [
+                "Candidate e2e5: +42cp; Bucket: equal",
+                "Candidate d2d4: +15cp; Bucket: equal",
+                "Candidate g1f3: +5cp; Bucket: equal",
+                "Candidate c2c4: -20cp; Bucket: equal",
+                "Candidate b1c3: -80cp; Bucket: slight edge",
+                "Best: d2d4",
+            ]
+        ),
+        metadata={
+            "target_move": "e2e4",
+            "candidate_ratings": [
+                {"uci": "e2e4", "cp": 42},
+                {"uci": "d2d4", "cp": 15},
+                {"uci": "g1f3", "cp": 5},
+                {"uci": "c2c4", "cp": -20},
+                {"uci": "b1c3", "cp": -80},
+            ],
+        },
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is False
+    assert any("candidate ratings" in error.lower() for error in errors)
+    assert any("not legal" in error.lower() for error in errors)
+    assert any("best" in error.lower() for error in errors)
+
+
 def test_package_validate_example_rejects_state_tracking_answer_mismatch():
     board = chess.Board(STARTING_FEN)
     board.push(chess.Move.from_uci("e2e4"))

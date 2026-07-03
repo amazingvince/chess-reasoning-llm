@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from chess_llm.formats.answers import (
     validate_think_move_format,
 )
 from chess_llm.formats.board import render_ascii_board
+from chess_llm.evals.trace_metrics import analyze_trace_metrics, numeric_trace_metrics
 from chess_llm.sft.context import build_template_context, raw_is_chess960
 from chess_llm.sft.settings import DEFAULT_EVAL_BUCKETS
 from chess_llm.sft.templates import append_answer_contract
@@ -205,6 +207,7 @@ CANONICAL_PROMPTS: dict[str, str] = {
     "endgame_best_move": "FEN: {fen}\nWhat is the best move in this endgame?",
     "best_move": "FEN: {fen}\nWhat is the best move?",
     "puzzle_solve": "FEN: {fen}\nSolve this puzzle. Find the winning move.",
+    "candidate_ratings": "FEN: {fen}\nRate exactly these 5 candidate moves: {candidate_moves}",
     "legal_moves_960": "FEN: {fen}\nList all legal moves.",
     "check_detection_960": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
     "castling_rules_960": "FEN: {fen}\nWhat castling options are available?",
@@ -258,6 +261,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "endgame_best_move": "exact_match",
     "best_move": "move_extraction",
     "puzzle_solve": "move_extraction",
+    "candidate_ratings": "candidate_ratings",
     "legal_moves_960": "uci_set_jaccard",
     "check_detection_960": "check_state",
     "castling_rules_960": "exact_match",
@@ -274,6 +278,7 @@ _META_KEYS = frozenset({
     "square", "rank", "file", "fen_rank_row", "before_row",
     "after_row", "before_fen", "after_fen", "board_fen_before",
     "board_fen_after", "edit_text",
+    "candidate_ratings", "candidate_moves", "multipv_depth",
 })
 
 _NO_MOVE_RE = re.compile(
@@ -1053,6 +1058,153 @@ def continuation_rank(prediction: str, gold: str) -> float:
     return 0.0
 
 
+_CANDIDATE_RATING_RE = re.compile(
+    r"^\s*Candidate\s+"
+    r"(?P<uci>[a-h][1-8][a-h][1-8][qrbn]?)"
+    r":\s*(?P<score>[+-]?\d+cp|M-?\d+)"
+    r";\s*Bucket:\s*(?P<bucket>[a-z_ ]+)\s*$",
+    re.IGNORECASE,
+)
+_CANDIDATE_BEST_RE = re.compile(
+    r"^\s*Best:\s*(?P<uci>[a-h][1-8][a-h][1-8][qrbn]?)\s*$",
+    re.IGNORECASE,
+)
+_CANDIDATE_BUCKET_LABELS = tuple(label for _low, _high, label in DEFAULT_EVAL_BUCKETS) + (
+    "forced mate",
+)
+
+
+def candidate_bucket_label(cp: int | None = None, mate: int | None = None) -> str:
+    """Return the side-to-move candidate-rating bucket label."""
+    if mate is not None:
+        return "forced mate"
+    if cp is None:
+        return "equal"
+    abs_cp = abs(int(cp))
+    for low, high, label in DEFAULT_EVAL_BUCKETS:
+        if low <= abs_cp < high:
+            return label
+    return DEFAULT_EVAL_BUCKETS[-1][2]
+
+
+def format_candidate_ratings_answer(ratings: list[dict]) -> str:
+    """Format exactly five MultiPV candidate ratings with fixed grammar."""
+    lines: list[str] = []
+    for rating in ratings[:5]:
+        uci = str(rating.get("uci", "")).lower()
+        cp = rating.get("cp")
+        mate = rating.get("mate")
+        if mate is not None:
+            score_text = f"M{int(mate)}"
+        else:
+            score_text = f"{int(cp):+d}cp"
+        lines.append(
+            f"Candidate {uci}: {score_text}; "
+            f"Bucket: {candidate_bucket_label(cp=cp, mate=mate)}"
+        )
+    if ratings:
+        lines.append(f"Best: {str(ratings[0].get('uci', '')).lower()}")
+    return "\n".join(lines)
+
+
+def candidate_ratings_score(prediction: str, gold: str) -> dict[str, float | None]:
+    """Score fixed-grammar candidate-rating outputs."""
+    pred = _parse_candidate_ratings_answer(prediction)
+    expected = _parse_candidate_ratings_answer(gold)
+    if expected is None:
+        return {
+            "primary": 0.0,
+            "candidate_set_jaccard": 0.0,
+            "best_move_match": 0.0,
+            "cp_bucket_accuracy": None,
+            "cp_bucket_mae": None,
+        }
+    if pred is None:
+        return {
+            "primary": 0.0,
+            "candidate_set_jaccard": 0.0,
+            "best_move_match": 0.0,
+            "cp_bucket_accuracy": 0.0,
+            "cp_bucket_mae": float(len(_CANDIDATE_BUCKET_LABELS) - 1),
+        }
+
+    pred_set = {item["uci"] for item in pred["candidates"]}
+    gold_set = {item["uci"] for item in expected["candidates"]}
+    candidate_set_jaccard = _set_jaccard(pred_set, gold_set)
+    best_move_match = 1.0 if pred["best"] == expected["best"] else 0.0
+
+    bucket_pairs = zip(
+        pred["candidates"],
+        expected["candidates"],
+        strict=False,
+    )
+    bucket_errors = [
+        abs(
+            _candidate_bucket_index(pred_item["bucket"])
+            - _candidate_bucket_index(gold_item["bucket"])
+        )
+        for pred_item, gold_item in bucket_pairs
+    ]
+    expected_count = len(expected["candidates"])
+    if len(bucket_errors) < expected_count:
+        bucket_errors.extend(
+            [len(_CANDIDATE_BUCKET_LABELS) - 1] * (expected_count - len(bucket_errors))
+        )
+    correct_buckets = sum(1 for error in bucket_errors[:expected_count] if error == 0)
+    bucket_accuracy = correct_buckets / expected_count if expected_count else None
+    bucket_mae = (
+        sum(bucket_errors[:expected_count]) / expected_count
+        if expected_count
+        else None
+    )
+    primary_parts = [
+        candidate_set_jaccard,
+        best_move_match,
+        bucket_accuracy or 0.0,
+    ]
+    return {
+        "primary": sum(primary_parts) / len(primary_parts),
+        "candidate_set_jaccard": candidate_set_jaccard,
+        "best_move_match": best_move_match,
+        "cp_bucket_accuracy": bucket_accuracy,
+        "cp_bucket_mae": bucket_mae,
+    }
+
+
+def _parse_candidate_ratings_answer(text: str) -> dict[str, object] | None:
+    candidates: list[dict[str, str]] = []
+    best: str | None = None
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        candidate_match = _CANDIDATE_RATING_RE.match(stripped)
+        if candidate_match is not None:
+            candidates.append(
+                {
+                    "uci": candidate_match.group("uci").lower(),
+                    "bucket": " ".join(candidate_match.group("bucket").lower().split()),
+                }
+            )
+            continue
+        best_match = _CANDIDATE_BEST_RE.match(stripped)
+        if best_match is not None:
+            best = best_match.group("uci").lower()
+            continue
+        return None
+    if len(candidates) != 5 or best is None:
+        return None
+    return {"candidates": candidates, "best": best}
+
+
+def _candidate_bucket_index(label: str) -> int:
+    normalized = " ".join(str(label or "").lower().split())
+    try:
+        return _CANDIDATE_BUCKET_LABELS.index(normalized)
+    except ValueError:
+        return len(_CANDIDATE_BUCKET_LABELS) - 1
+
+
 def score_prediction(
     example: BenchmarkExample,
     prediction: str,
@@ -1077,6 +1229,8 @@ def score_prediction(
         metric = "piece_legal_filter"
     elif example.task_type == "legal_filter_trace":
         metric = "legal_filter_trace"
+    elif example.task_type == "candidate_ratings":
+        metric = "candidate_ratings"
 
     if metric == "move_extraction":
         scores["primary"] = move_extraction_match(prediction, gold)
@@ -1141,6 +1295,8 @@ def score_prediction(
         scores["primary"] = threat_f1(prediction, gold)
     elif metric == "continuation_rank":
         scores["primary"] = continuation_rank(prediction, gold)
+    elif metric == "candidate_ratings":
+        scores.update(candidate_ratings_score(prediction, gold))
     else:
         scores["primary"] = exact_match(prediction, gold)
 
@@ -1151,6 +1307,15 @@ def score_prediction(
             example.fen,
             chess960=example_is_chess960(example),
         )
+        scores.update(
+            numeric_trace_metrics(
+                analyze_trace_metrics(
+                    example.fen,
+                    raw_prediction,
+                    chess960=example_is_chess960(example),
+                )
+            )
+        )
     return scores
 
 
@@ -1158,11 +1323,13 @@ def score_split(
     examples: list[BenchmarkExample],
     predictions: dict[str, str],
     acpl_scores: dict[str, float] | None = None,
+    wpd_scores: dict[str, object] | None = None,
 ) -> dict[str, float]:
     """Aggregate benchmark metrics for one split."""
     task_scores: dict[str, list[float]] = defaultdict(list)
     task_secondary: dict[str, list[float]] = defaultdict(list)
     task_acpl: dict[str, list[float]] = defaultdict(list)
+    task_wpd: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
 
     for example in examples:
         pred = predictions.get(example.example_id, "")
@@ -1177,6 +1344,8 @@ def score_split(
 
         if acpl_scores and example.example_id in acpl_scores:
             task_acpl[example.task_type].append(acpl_scores[example.example_id])
+        if wpd_scores and example.example_id in wpd_scores:
+            _append_wpd_metrics(task_wpd[example.task_type], wpd_scores[example.example_id])
 
     result: dict[str, float] = {}
     for task_type, values in task_scores.items():
@@ -1188,15 +1357,53 @@ def score_split(
     for task_type, values in task_acpl.items():
         if values:
             result[f"{task_type}_acpl"] = sum(values) / len(values)
+    for task_type, metrics in task_wpd.items():
+        for key, values in metrics.items():
+            if not values:
+                continue
+            result[f"{task_type}_{key}"] = sum(values) / len(values)
 
     all_acpl = [value for values in task_acpl.values() for value in values]
     if all_acpl:
         result["acpl"] = sum(all_acpl) / len(all_acpl)
+    all_wpd = [
+        value
+        for metrics in task_wpd.values()
+        for value in metrics.get("wpd", [])
+    ]
+    if all_wpd:
+        result["wpd"] = sum(all_wpd) / len(all_wpd)
 
     all_primary = [value for values in task_scores.values() for value in values]
     if all_primary:
         result["overall"] = sum(all_primary) / len(all_primary)
     return result
+
+
+def _append_wpd_metrics(
+    target: dict[str, list[float]],
+    payload: object,
+) -> None:
+    if hasattr(payload, "to_metric_dict"):
+        payload = payload.to_metric_dict()
+    if isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        target["wpd"].append(float(payload))
+        return
+    if not isinstance(payload, Mapping):
+        return
+    for key in ("wpd", "best_expectation", "predicted_expectation", "reward"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key].append(float(value))
+    rate_keys = {
+        "multipv_hit": "multipv_hit_rate",
+        "postmove_hit": "postmove_hit_rate",
+        "cache_hit": "cache_hit_rate",
+    }
+    for key, output_key in rate_keys.items():
+        value = payload.get(key)
+        if isinstance(value, bool):
+            target[output_key].append(1.0 if value else 0.0)
 
 
 def validate_oracle(examples: list[BenchmarkExample]) -> list[str]:
@@ -2419,6 +2626,52 @@ def _legal_binary_choice_gold(raw: dict, *, chess960: bool = False) -> str:
     return better_move
 
 
+def _legal_candidate_ratings_gold(raw: dict, *, chess960: bool = False) -> str:
+    fen = raw.get("fen", "")
+    ratings = _candidate_ratings_from_raw(raw)
+    if len(ratings) < 5:
+        return ""
+    ratings = ratings[:5]
+    for rating in ratings:
+        uci = str(rating.get("uci", "")).lower()
+        if not uci or not is_legal_move(fen, uci, chess960=chess960):
+            return ""
+        if rating.get("cp") is None and rating.get("mate") is None:
+            return ""
+    raw["_candidate_moves"] = " ".join(str(item["uci"]) for item in ratings)
+    return format_candidate_ratings_answer(ratings)
+
+
+def _candidate_ratings_from_raw(raw: Mapping[str, object]) -> list[dict[str, object]]:
+    source = raw.get("candidate_ratings")
+    if not isinstance(source, list):
+        source = raw.get("move_evaluations")
+    if not isinstance(source, list):
+        return []
+    ratings: list[dict[str, object]] = []
+    for item in source:
+        if not isinstance(item, Mapping):
+            continue
+        uci = item.get("uci") or item.get("move") or item.get("best_move")
+        if not isinstance(uci, str) or not uci:
+            continue
+        cp = item.get("cp", item.get("centipawn"))
+        mate = item.get("mate", item.get("mate_in"))
+        normalized: dict[str, object] = {"uci": uci.lower()}
+        if cp is not None:
+            try:
+                normalized["cp"] = int(cp)
+            except (TypeError, ValueError):
+                pass
+        if mate is not None:
+            try:
+                normalized["mate"] = int(mate)
+            except (TypeError, ValueError):
+                pass
+        ratings.append(normalized)
+    return ratings
+
+
 def _is_valid_empty_gold(task_type: str, raw: dict) -> bool:
     """Return True when an empty gold answer is a real oracle answer."""
     if task_type not in ("legal_moves", "legal_moves_960"):
@@ -2637,6 +2890,8 @@ def _derive_gold_answer_inner(
         return _legal_gold_move(fen, raw.get("best_move"), chess960=is_960)
     if task_type == "puzzle_solve":
         return _legal_gold_move(fen, raw.get("solution_first_move"), chess960=is_960)
+    if task_type == "candidate_ratings":
+        return _legal_candidate_ratings_gold(raw, chess960=is_960)
     if task_type == "castling_rules_960":
         return _derive_castling_rules(fen, chess960=True)
     if task_type == "binary_choice":
@@ -2705,6 +2960,12 @@ def _render_prompt(task_type: str, raw: dict) -> str:
     if task_type == "binary_choice":
         ctx.setdefault("move_a", raw.get("move_a", ""))
         ctx.setdefault("move_b", raw.get("move_b", ""))
+    if task_type == "candidate_ratings":
+        candidate_moves = raw.get("_candidate_moves") or raw.get("candidate_moves")
+        if not candidate_moves:
+            ratings = _candidate_ratings_from_raw(raw)
+            candidate_moves = " ".join(str(item["uci"]) for item in ratings[:5])
+        ctx.setdefault("candidate_moves", candidate_moves)
 
     try:
         prompt = template.format(**ctx)
@@ -2733,7 +2994,10 @@ def freeze_split(
 
     for index, raw in enumerate(raw_examples):
         if split_name == "planning":
-            task_type = "puzzle_solve" if raw.get("puzzle_id") else "best_move"
+            if _candidate_ratings_from_raw(raw):
+                task_type = "candidate_ratings"
+            else:
+                task_type = "puzzle_solve" if raw.get("puzzle_id") else "best_move"
             candidates = [task_type]
         else:
             primary = task_types[index % len(task_types)]
