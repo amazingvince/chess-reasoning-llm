@@ -115,6 +115,36 @@ def test_load_candidate_rating_evals_reads_jsonl_and_ignores_bad_rows(tmp_path: 
     ]
 
 
+def test_jsonl_loaders_keep_bom_prefixed_first_row(tmp_path: Path):
+    from chess_llm.sft.candidate_ratings import (
+        load_candidate_rating_evals,
+        load_input_rows,
+    )
+
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(
+        json.dumps({"fen": STARTING_FEN}) + "\n",
+        encoding="utf-8-sig",
+    )
+
+    ratings_path = tmp_path / "candidate_ratings.jsonl"
+    ratings_path.write_text(
+        json.dumps(
+            {
+                "fen": STARTING_FEN,
+                "candidate_ratings": [{"uci": "e2e4", "cp": 1}],
+            }
+        )
+        + "\n",
+        encoding="utf-8-sig",
+    )
+
+    assert load_input_rows(input_path) == [{"fen": STARTING_FEN}]
+    assert load_candidate_rating_evals(ratings_path) == [
+        {"fen": STARTING_FEN, "candidate_ratings": [{"uci": "e2e4", "cp": 1}]}
+    ]
+
+
 def test_candidate_ratings_cli_parser_exposes_stockfish_efficient_defaults():
     from chess_llm.sft.candidate_ratings import build_arg_parser
 

@@ -157,7 +157,7 @@ def load_candidate_rating_evals(path: str | Path) -> list[dict[str, Any]]:
     if not candidate_path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    with candidate_path.open(encoding="utf-8") as handle:
+    with candidate_path.open(encoding="utf-8-sig") as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -179,7 +179,7 @@ def load_input_rows(path: str | Path) -> list[dict[str, Any]]:
     """Load input JSONL rows that contain at least a FEN."""
     input_path = Path(path)
     rows: list[dict[str, Any]] = []
-    with input_path.open(encoding="utf-8") as handle:
+    with input_path.open(encoding="utf-8-sig") as handle:
         for line in handle:
             line = line.strip()
             if not line:
