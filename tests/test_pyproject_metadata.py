@@ -36,6 +36,7 @@ def test_pyproject_declares_runtime_dependency_and_package_clis():
     assert 'chess-llm-run-eval-split = "chess_llm.sft.run_eval_split:main"' in text
     assert 'chess-llm-make-data = "chess_llm.sft.pipeline:cli"' in text
     assert 'chess-llm-preflight = "chess_llm.sft.preflight:main"' in text
+    assert 'chess-llm-r0-report = "chess_llm.training.r0_gate:main"' in text
     assert 'chess-llm-upload-data = "chess_llm.sft.hub_upload:main"' in text
     assert (
         'chess-llm-run-eval-harness = "chess_llm.evals.run_eval_harness:main"'
