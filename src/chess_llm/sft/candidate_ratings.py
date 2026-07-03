@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SETTINGS = SftDataSettings.from_env(_REPO_ROOT)
 DEFAULT_OUTPUT_PATH = _SETTINGS.annotations_dir / "candidate_ratings.jsonl"
 DEFAULT_CACHE_PATH = _SETTINGS.annotations_dir / "multipv.sqlite"
+DEFAULT_WORKERS = max(1, min(os.cpu_count() or 1, 8))
+EngineOpener = Callable[[StockfishEngineConfig], Any]
 
 
 @dataclass(frozen=True)
@@ -58,57 +62,98 @@ def build_candidate_rating_rows(
         if max_rows > 0 and input_count >= max_rows:
             break
         input_count += 1
-        fen = str(row.get("fen", "") or "")
-        if not fen:
-            skipped_count += 1
-            continue
-        chess960 = bool(force_chess960 or raw_is_chess960(row))
-        try:
-            board = chess.Board(fen, chess960=chess960)
-        except (TypeError, ValueError):
-            skipped_count += 1
-            continue
-        if not board.is_valid():
-            skipped_count += 1
-            continue
-
-        try:
-            analysis = analyze_multipv(
-                engine,
-                fen,
-                depth=depth,
-                k=multipv,
-                pv_len=pv_len,
-                cache=cache,
-                chess960=chess960,
-                engine_config=engine_config,
-            )
-        except Exception as exc:
-            logger.warning("Skipping %s after MultiPV failure: %s", fen, exc)
-            skipped_count += 1
-            continue
-        if len(analysis.moves) < 5:
-            skipped_count += 1
-            continue
-
-        candidate_ratings = [
-            _candidate_rating_payload(move)
-            for move in analysis.moves[:5]
-        ]
-        result_row = dict(row)
-        result_row.update(
-            {
-                "fen": fen,
-                "source": "stockfish_multipv",
-                "best_move": candidate_ratings[0]["uci"],
-                "candidate_ratings": candidate_ratings,
-                "multipv_depth": depth,
-                "multipv_k": multipv,
-                "pv_len": pv_len,
-                "is_chess960": chess960,
-            }
+        result_row = _build_candidate_rating_row(
+            row,
+            engine=engine,
+            cache=cache,
+            depth=depth,
+            multipv=multipv,
+            pv_len=pv_len,
+            force_chess960=force_chess960,
+            engine_config=engine_config,
         )
+        if result_row is None:
+            skipped_count += 1
+            continue
         output_rows.append(result_row)
+
+    return CandidateRatingBuildResult(
+        rows=output_rows,
+        input_count=input_count,
+        row_count=len(output_rows),
+        skipped_count=skipped_count,
+    )
+
+
+def build_candidate_rating_rows_with_workers(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    stockfish_path: str | Path,
+    cache_path: str | Path,
+    depth: int,
+    multipv: int = 5,
+    pv_len: int = 8,
+    max_rows: int = 0,
+    force_chess960: bool = False,
+    workers: int = DEFAULT_WORKERS,
+    threads_per_worker: int = 1,
+    hash_mb: int = 256,
+    engine_config: Mapping[str, Any] | None = None,
+    engine_opener: EngineOpener = open_stockfish,
+) -> CandidateRatingBuildResult:
+    """Analyze rows with one Stockfish process per worker and stable output order."""
+    indexed_rows: list[tuple[int, Mapping[str, Any]]] = []
+    input_count = 0
+    for row in rows:
+        if max_rows > 0 and input_count >= max_rows:
+            break
+        indexed_rows.append((input_count, row))
+        input_count += 1
+
+    if not indexed_rows:
+        return CandidateRatingBuildResult(
+            rows=[],
+            input_count=0,
+            row_count=0,
+            skipped_count=0,
+        )
+
+    worker_count = max(1, min(int(workers), len(indexed_rows)))
+    chunks: list[list[tuple[int, Mapping[str, Any]]]] = [
+        [] for _ in range(worker_count)
+    ]
+    for offset, item in enumerate(indexed_rows):
+        chunks[offset % worker_count].append(item)
+
+    output_items: list[tuple[int, dict[str, Any]]] = []
+    skipped_count = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _candidate_rating_worker,
+                chunk,
+                stockfish_path=stockfish_path,
+                cache_path=cache_path,
+                depth=depth,
+                multipv=multipv,
+                pv_len=pv_len,
+                force_chess960=force_chess960,
+                threads_per_worker=threads_per_worker,
+                hash_mb=hash_mb,
+                engine_config=engine_config,
+                engine_opener=engine_opener,
+            )
+            for chunk in chunks
+            if chunk
+        ]
+        for future in as_completed(futures):
+            worker_rows, worker_skipped = future.result()
+            output_items.extend(worker_rows)
+            skipped_count += worker_skipped
+
+    output_rows = [
+        row for _index, row in sorted(output_items, key=lambda item: item[0])
+    ]
 
     return CandidateRatingBuildResult(
         rows=output_rows,
@@ -122,7 +167,7 @@ def write_candidate_rating_jsonl(
     rows: Iterable[Mapping[str, Any]],
     *,
     output_path: str | Path,
-    engine: Any,
+    engine: Any | None,
     cache_path: str | Path,
     depth: int,
     multipv: int = 5,
@@ -130,19 +175,43 @@ def write_candidate_rating_jsonl(
     max_rows: int = 0,
     force_chess960: bool = False,
     engine_config: Mapping[str, Any] | None = None,
+    stockfish_path: str | Path | None = None,
+    workers: int = 1,
+    threads_per_worker: int = 1,
+    hash_mb: int = 256,
+    engine_opener: EngineOpener = open_stockfish,
 ) -> CandidateRatingBuildResult:
     """Build candidate-rating rows and write them as JSONL."""
-    result = build_candidate_rating_rows(
-        rows,
-        engine=engine,
-        cache_path=cache_path,
-        depth=depth,
-        multipv=multipv,
-        pv_len=pv_len,
-        max_rows=max_rows,
-        force_chess960=force_chess960,
-        engine_config=engine_config,
-    )
+    if engine is None:
+        if stockfish_path is None:
+            raise ValueError("stockfish_path is required when engine is None")
+        result = build_candidate_rating_rows_with_workers(
+            rows,
+            stockfish_path=stockfish_path,
+            cache_path=cache_path,
+            depth=depth,
+            multipv=multipv,
+            pv_len=pv_len,
+            max_rows=max_rows,
+            force_chess960=force_chess960,
+            workers=workers,
+            threads_per_worker=threads_per_worker,
+            hash_mb=hash_mb,
+            engine_config=engine_config,
+            engine_opener=engine_opener,
+        )
+    else:
+        result = build_candidate_rating_rows(
+            rows,
+            engine=engine,
+            cache_path=cache_path,
+            depth=depth,
+            multipv=multipv,
+            pv_len=pv_len,
+            max_rows=max_rows,
+            force_chess960=force_chess960,
+            engine_config=engine_config,
+        )
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
@@ -205,6 +274,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multipv", type=int, default=5)
     parser.add_argument("--pv-len", type=int, default=8)
     parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--hash-mb", type=int, default=256)
     parser.add_argument("--chess960", action="store_true", help="Force Chess960 parsing")
@@ -222,6 +292,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.max_rows < 0:
         print("--max-rows must be greater than or equal to 0.")
         return 2
+    if args.workers <= 0:
+        print("--workers must be positive.")
+        return 2
+    if args.threads <= 0:
+        print("--threads must be positive.")
+        return 2
     if not args.input_jsonl.exists():
         print(f"Input JSONL does not exist: {args.input_jsonl}")
         return 1
@@ -232,32 +308,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     rows = load_input_rows(args.input_jsonl)
-    engine = open_stockfish(
-        StockfishEngineConfig(
-            stockfish_path,
-            threads=args.threads,
-            hash_mb=args.hash_mb,
-        )
+    result = write_candidate_rating_jsonl(
+        rows,
+        output_path=args.output_jsonl,
+        engine=None,
+        stockfish_path=stockfish_path,
+        cache_path=args.cache,
+        depth=args.depth,
+        multipv=args.multipv,
+        pv_len=args.pv_len,
+        max_rows=args.max_rows,
+        force_chess960=args.chess960,
+        workers=args.workers,
+        threads_per_worker=args.threads,
+        hash_mb=args.hash_mb,
+        engine_config={
+            "threads": args.threads,
+            "hash_mb": args.hash_mb,
+            "stockfish_path": str(stockfish_path),
+        },
     )
-    try:
-        result = write_candidate_rating_jsonl(
-            rows,
-            output_path=args.output_jsonl,
-            engine=engine,
-            cache_path=args.cache,
-            depth=args.depth,
-            multipv=args.multipv,
-            pv_len=args.pv_len,
-            max_rows=args.max_rows,
-            force_chess960=args.chess960,
-            engine_config={
-                "threads": args.threads,
-                "hash_mb": args.hash_mb,
-                "stockfish_path": str(stockfish_path),
-            },
-        )
-    finally:
-        engine.quit()
     print(
         "Candidate ratings: "
         f"wrote {result.row_count} rows to {args.output_jsonl} "
@@ -280,6 +350,114 @@ def _candidate_rating_payload(move: Any) -> dict[str, Any]:
     return payload
 
 
+def _build_candidate_rating_row(
+    row: Mapping[str, Any],
+    *,
+    engine: Any,
+    cache: SqliteMultipvCache,
+    depth: int,
+    multipv: int,
+    pv_len: int,
+    force_chess960: bool,
+    engine_config: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    fen = str(row.get("fen", "") or "")
+    if not fen:
+        return None
+    chess960 = bool(force_chess960 or raw_is_chess960(row))
+    try:
+        board = chess.Board(fen, chess960=chess960)
+    except (TypeError, ValueError):
+        return None
+    if not board.is_valid():
+        return None
+
+    try:
+        analysis = analyze_multipv(
+            engine,
+            fen,
+            depth=depth,
+            k=multipv,
+            pv_len=pv_len,
+            cache=cache,
+            chess960=chess960,
+            engine_config=engine_config,
+        )
+    except Exception as exc:
+        logger.warning("Skipping %s after MultiPV failure: %s", fen, exc)
+        return None
+    if len(analysis.moves) < 5:
+        return None
+
+    candidate_ratings = [
+        _candidate_rating_payload(move)
+        for move in analysis.moves[:5]
+    ]
+    result_row = dict(row)
+    result_row.update(
+        {
+            "fen": fen,
+            "source": "stockfish_multipv",
+            "best_move": candidate_ratings[0]["uci"],
+            "candidate_ratings": candidate_ratings,
+            "multipv_depth": depth,
+            "multipv_k": multipv,
+            "pv_len": pv_len,
+            "is_chess960": chess960,
+        }
+    )
+    return result_row
+
+
+def _candidate_rating_worker(
+    indexed_rows: list[tuple[int, Mapping[str, Any]]],
+    *,
+    stockfish_path: str | Path,
+    cache_path: str | Path,
+    depth: int,
+    multipv: int,
+    pv_len: int,
+    force_chess960: bool,
+    threads_per_worker: int,
+    hash_mb: int,
+    engine_config: Mapping[str, Any] | None,
+    engine_opener: EngineOpener,
+) -> tuple[list[tuple[int, dict[str, Any]]], int]:
+    resolved_engine_config = dict(engine_config or {})
+    resolved_engine_config.setdefault("threads", int(threads_per_worker))
+    resolved_engine_config.setdefault("hash_mb", int(hash_mb))
+    resolved_engine_config.setdefault("stockfish_path", str(stockfish_path))
+    engine = engine_opener(
+        StockfishEngineConfig(
+            stockfish_path,
+            threads=int(threads_per_worker),
+            hash_mb=int(hash_mb),
+        )
+    )
+    try:
+        cache = SqliteMultipvCache(cache_path)
+        output_rows: list[tuple[int, dict[str, Any]]] = []
+        skipped_count = 0
+        for index, row in indexed_rows:
+            result_row = _build_candidate_rating_row(
+                row,
+                engine=engine,
+                cache=cache,
+                depth=depth,
+                multipv=multipv,
+                pv_len=pv_len,
+                force_chess960=force_chess960,
+                engine_config=resolved_engine_config,
+            )
+            if result_row is None:
+                skipped_count += 1
+            else:
+                output_rows.append((index, result_row))
+        return output_rows, skipped_count
+    finally:
+        engine.quit()
+
+
 def _resolve_stockfish_path(value: str | Path) -> Path | None:
     path = Path(value)
     if path.exists():
@@ -296,8 +474,10 @@ __all__ = [
     "CandidateRatingBuildResult",
     "DEFAULT_CACHE_PATH",
     "DEFAULT_OUTPUT_PATH",
+    "DEFAULT_WORKERS",
     "build_arg_parser",
     "build_candidate_rating_rows",
+    "build_candidate_rating_rows_with_workers",
     "load_candidate_rating_evals",
     "load_input_rows",
     "main",

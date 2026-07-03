@@ -1089,6 +1089,34 @@ def test_package_score_split_reports_wpd_diagnostics():
     assert aggregate["wpd"] == 0.125
 
 
+def test_package_score_split_reports_wpd_reward_std_per_prompt():
+    first = _example(example_id="planning_00000")
+    second = _example(example_id="planning_00001")
+    prediction = "<think>control center</think><move>e2e4</move>"
+
+    aggregate = packaged.score_split(
+        [first, second],
+        {
+            first.example_id: prediction,
+            second.example_id: prediction,
+        },
+        wpd_scores={
+            first.example_id: [
+                {"reward": 1.0, "wpd": 0.0},
+                {"reward": 0.4, "wpd": 0.6},
+            ],
+            second.example_id: [
+                {"reward": 0.25, "wpd": 0.75},
+                {"reward": 0.25, "wpd": 0.75},
+            ],
+        },
+    )
+
+    assert aggregate["best_move_reward"] == 0.475
+    assert round(aggregate["best_move_reward_std_per_prompt"], 6) == 0.15
+    assert round(aggregate["reward_std_per_prompt"], 6) == 0.15
+
+
 def test_package_candidate_ratings_gold_scoring_and_freeze():
     raw = {
         "fen": STARTING_FEN,

@@ -97,6 +97,54 @@ def test_write_candidate_rating_jsonl_skips_invalid_and_short_multipv(tmp_path: 
     assert output_path.read_text(encoding="utf-8") == ""
 
 
+def test_write_candidate_rating_jsonl_opens_parallel_one_thread_workers(tmp_path: Path):
+    from chess_llm.sft.candidate_ratings import write_candidate_rating_jsonl
+
+    class WorkerEngine(FakeMultipvEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+
+        def quit(self) -> None:
+            self.closed = True
+
+    opened_configs = []
+    opened_engines: list[WorkerEngine] = []
+
+    def open_worker(config):
+        opened_configs.append(config)
+        engine = WorkerEngine()
+        opened_engines.append(engine)
+        return engine
+
+    output_path = tmp_path / "candidate_ratings.jsonl"
+    result = write_candidate_rating_jsonl(
+        [
+            {"fen": STARTING_FEN, "tag": "row0"},
+            {"fen": STARTING_FEN, "tag": "row1"},
+            {"fen": STARTING_FEN, "tag": "row2"},
+        ],
+        output_path=output_path,
+        engine=None,
+        stockfish_path="stockfish",
+        cache_path=tmp_path / "multipv.sqlite",
+        depth=8,
+        multipv=5,
+        pv_len=1,
+        workers=3,
+        threads_per_worker=1,
+        hash_mb=64,
+        engine_opener=open_worker,
+    )
+
+    assert result.row_count == 3
+    assert [row["tag"] for row in result.rows] == ["row0", "row1", "row2"]
+    assert len(opened_configs) == 3
+    assert all(config.threads == 1 for config in opened_configs)
+    assert all(config.hash_mb == 64 for config in opened_configs)
+    assert all(engine.closed for engine in opened_engines)
+
+
 def test_load_candidate_rating_evals_reads_jsonl_and_ignores_bad_rows(tmp_path: Path):
     from chess_llm.sft.candidate_ratings import load_candidate_rating_evals
 
@@ -160,5 +208,6 @@ def test_candidate_ratings_cli_parser_exposes_stockfish_efficient_defaults():
     )
 
     assert args.multipv == 5
+    assert args.workers >= 1
     assert args.threads == 1
     assert args.pv_len == 8

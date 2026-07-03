@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -1396,6 +1397,13 @@ def score_split(
     ]
     if all_wpd:
         result["wpd"] = sum(all_wpd) / len(all_wpd)
+    all_reward_std = [
+        value
+        for metrics in task_wpd.values()
+        for value in metrics.get("reward_std_per_prompt", [])
+    ]
+    if all_reward_std:
+        result["reward_std_per_prompt"] = sum(all_reward_std) / len(all_reward_std)
 
     all_primary = [value for values in task_scores.values() for value in values]
     if all_primary:
@@ -1409,6 +1417,19 @@ def _append_wpd_metrics(
 ) -> None:
     if hasattr(payload, "to_metric_dict"):
         payload = payload.to_metric_dict()
+    if isinstance(payload, Sequence) and not isinstance(
+        payload,
+        (str, bytes, bytearray),
+    ):
+        rewards: list[float] = []
+        for item in payload:
+            reward = _wpd_reward_value(item)
+            if reward is not None:
+                rewards.append(reward)
+            _append_wpd_metrics(target, item)
+        if rewards:
+            target["reward_std_per_prompt"].append(_population_std(rewards))
+        return
     if isinstance(payload, (int, float)) and not isinstance(payload, bool):
         target["wpd"].append(float(payload))
         return
@@ -1427,6 +1448,24 @@ def _append_wpd_metrics(
         value = payload.get(key)
         if isinstance(value, bool):
             target[output_key].append(1.0 if value else 0.0)
+
+
+def _wpd_reward_value(payload: object) -> float | None:
+    if hasattr(payload, "to_metric_dict"):
+        payload = payload.to_metric_dict()
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get("reward")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _population_std(values: Sequence[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
 
 
 def validate_oracle(examples: list[BenchmarkExample]) -> list[str]:

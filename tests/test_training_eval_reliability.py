@@ -953,6 +953,60 @@ def test_prediction_analysis_report_breaks_down_step_verification_metadata(tmp_p
     assert breakdowns["corruption_kind"] == {"candidate_rating_wrong_bucket": 1}
 
 
+def test_compute_wpd_scores_multiple_samples_per_prompt(monkeypatch, tmp_path):
+    from chess_llm.training import evaluate
+
+    calls: list[str] = []
+
+    class FakeDiagnostics:
+        def __init__(self, move: str) -> None:
+            self.move = move
+
+        def to_metric_dict(self) -> dict[str, object]:
+            return {
+                "predicted_move": self.move,
+                "best_move": "e2e4",
+                "best_expectation": 0.6,
+                "predicted_expectation": 0.6 if self.move == "e2e4" else 0.3,
+                "wpd": 0.0 if self.move == "e2e4" else 0.3,
+                "reward": 1.0 if self.move == "e2e4" else 0.7,
+                "reward_bucket": "best" if self.move == "e2e4" else "playable",
+                "multipv_hit": True,
+                "postmove_hit": False,
+                "cache_hit": False,
+            }
+
+    def fake_score_move_wpd(_engine, _fen, uci, **_kwargs):
+        calls.append(uci)
+        return FakeDiagnostics(uci)
+
+    monkeypatch.setattr(evaluate, "score_move_wpd", fake_score_move_wpd)
+    example = _benchmark_example()
+
+    scores = evaluate.compute_wpd(
+        object(),
+        [example],
+        {
+            example.example_id: [
+                "<think>x</think><move>e2e4</move>",
+                "<think>x</think><move>d2d4</move>",
+                "no move",
+            ]
+        },
+        depth=3,
+        cache_path=tmp_path / "multipv.sqlite",
+    )
+
+    assert calls == ["e2e4", "d2d4"]
+    assert isinstance(scores[example.example_id], list)
+    assert [item["predicted_move"] for item in scores[example.example_id]] == [
+        "e2e4",
+        "d2d4",
+        None,
+    ]
+    assert scores[example.example_id][2]["reward_bucket"] == "missing_move"
+
+
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):
     from chess_llm.training import evaluate
 

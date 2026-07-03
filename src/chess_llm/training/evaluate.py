@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 from collections import defaultdict
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1185,15 +1186,15 @@ def compute_acpl(
 def compute_wpd(
     engine: chess.engine.SimpleEngine,
     examples: list[BenchmarkExample],
-    flat_preds: dict[str, str],
+    flat_preds: Mapping[str, object],
     *,
     depth: int = 20,
     cache_path: Path | None = None,
     multipv: int = 5,
     pv_len: int = 8,
-) -> dict[str, dict[str, object]]:
+) -> dict[str, dict[str, object] | list[dict[str, object]]]:
     """Compute WPD diagnostics using cached MultiPV top-N first."""
-    wpd_scores: dict[str, dict[str, object]] = {}
+    wpd_scores: dict[str, dict[str, object] | list[dict[str, object]]] = {}
     cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
     evaluated = 0
     missing_move = 0
@@ -1201,35 +1202,44 @@ def compute_wpd(
     for ex in examples:
         if ex.task_type not in _MOVE_TASK_TYPES:
             continue
-        pred = flat_preds.get(ex.example_id, "")
-        uci = extract_move(pred)
-        if uci is None:
-            missing_move += 1
-            wpd_scores[ex.example_id] = {
-                "predicted_move": None,
-                "best_move": None,
-                "best_expectation": None,
-                "predicted_expectation": 0.0,
-                "wpd": None,
-                "reward": 0.0,
-                "reward_bucket": "missing_move",
-                "multipv_hit": False,
-                "postmove_hit": False,
-                "cache_hit": False,
-            }
+        pred_value = flat_preds.get(ex.example_id, "")
+        if isinstance(pred_value, SequenceABC) and not isinstance(
+            pred_value,
+            (str, bytes, bytearray),
+        ):
+            sample_scores: list[dict[str, object]] = []
+            for pred in pred_value:
+                payload, scored = _compute_one_wpd(
+                    engine,
+                    ex,
+                    str(pred),
+                    depth=depth,
+                    multipv=multipv,
+                    pv_len=pv_len,
+                    cache=cache,
+                )
+                sample_scores.append(payload)
+                if scored:
+                    evaluated += 1
+                else:
+                    missing_move += 1
+            wpd_scores[ex.example_id] = sample_scores
             continue
-        diagnostics = score_move_wpd(
+
+        payload, scored = _compute_one_wpd(
             engine,
-            ex.fen,
-            uci,
+            ex,
+            str(pred_value),
             depth=depth,
-            k=multipv,
+            multipv=multipv,
             pv_len=pv_len,
             cache=cache,
-            chess960=_example_is_chess960(ex),
         )
-        wpd_scores[ex.example_id] = diagnostics.to_metric_dict()
-        evaluated += 1
+        wpd_scores[ex.example_id] = payload
+        if scored:
+            evaluated += 1
+        else:
+            missing_move += 1
 
     logger.info(
         "WPD: evaluated %d positions with cached MultiPV (%d missing move)",
@@ -1237,6 +1247,43 @@ def compute_wpd(
         missing_move,
     )
     return wpd_scores
+
+
+def _compute_one_wpd(
+    engine: chess.engine.SimpleEngine,
+    example: BenchmarkExample,
+    prediction: str,
+    *,
+    depth: int,
+    multipv: int,
+    pv_len: int,
+    cache: SqliteMultipvCache | None,
+) -> tuple[dict[str, object], bool]:
+    uci = extract_move(prediction)
+    if uci is None:
+        return {
+            "predicted_move": None,
+            "best_move": None,
+            "best_expectation": None,
+            "predicted_expectation": 0.0,
+            "wpd": None,
+            "reward": 0.0,
+            "reward_bucket": "missing_move",
+            "multipv_hit": False,
+            "postmove_hit": False,
+            "cache_hit": False,
+        }, False
+    diagnostics = score_move_wpd(
+        engine,
+        example.fen,
+        uci,
+        depth=depth,
+        k=multipv,
+        pv_len=pv_len,
+        cache=cache,
+        chess960=_example_is_chess960(example),
+    )
+    return diagnostics.to_metric_dict(), True
 
 
 def _select_acpl_splits(
@@ -1723,10 +1770,22 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         wpd_scores: dict[str, dict[str, object]] | None = None
         if engine and split_name in acpl_splits:
             acpl_scores = compute_acpl(engine, examples, flat_preds, args.acpl_depth)
+            wpd_predictions: dict[str, object] = dict(flat_preds)
+            if sampled_predictions:
+                wpd_predictions = {}
+                for ex in examples:
+                    per_prompt_preds: list[str] = []
+                    if ex.example_id in flat_preds:
+                        per_prompt_preds.append(flat_preds[ex.example_id])
+                    per_prompt_preds.extend(sampled_predictions.get(ex.example_id, []))
+                    if len(per_prompt_preds) == 1:
+                        wpd_predictions[ex.example_id] = per_prompt_preds[0]
+                    elif per_prompt_preds:
+                        wpd_predictions[ex.example_id] = per_prompt_preds
             wpd_scores = compute_wpd(
                 engine,
                 examples,
-                flat_preds,
+                wpd_predictions,
                 depth=args.acpl_depth,
                 cache_path=args.output.with_suffix(".multipv.sqlite"),
             )
