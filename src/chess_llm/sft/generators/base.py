@@ -17,6 +17,7 @@ from chess_llm.sft import (
     raw_fen_identity_key,
     raw_is_chess960,
 )
+from chess_llm.sft.decontamination import check_row_no_contamination
 from chess_llm.sft.identity import build_example_identity
 from chess_llm.sft.settings import DEFAULT_CHESS960_RATIOS, DEFAULT_VOLUMES
 from chess_llm.sft.templates import append_answer_contract, select_template
@@ -88,6 +89,13 @@ class TaskGenerator(ABC):
             fen_value in self.blocklist
             or raw_fen_identity_key(raw) in self.blocklist
             or canonical_fen_key(fen_value, chess960=raw_is_chess960(raw)) in self.blocklist
+        )
+
+    def example_is_blocked(self, example: Mapping) -> bool:
+        """Return True if any FEN-bearing field in an example is blocklisted."""
+        return bool(self.blocklist) and not check_row_no_contamination(
+            dict(example),
+            self.blocklist,
         )
 
     def source_row(self, entry: str | Mapping) -> dict:

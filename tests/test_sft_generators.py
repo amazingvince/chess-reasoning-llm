@@ -665,6 +665,54 @@ def test_package_fen_row_application_generator_teaches_full_rank_rewrites():
     assert passed is True, errors
 
 
+def test_package_move_result_generators_skip_blocklisted_result_fens():
+    import chess
+
+    from chess_llm.core.board import variant_fen_key
+    from chess_llm.sft.decontamination import row_contaminated_fens
+    from chess_llm.sft.generators.tier1_perception import (
+        FENAssembly,
+        FENRowApplication,
+        MultiMoveStateTracking,
+        StateTracking,
+    )
+
+    contaminated_start = "8/8/8/8/8/8/4P3/4K2k w - - 0 1"
+    clean_start = "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1"
+    board = chess.Board(contaminated_start)
+    blocked_results = set()
+    for move in board.legal_moves:
+        next_board = board.copy(stack=False)
+        next_board.push(move)
+        blocked_results.add(variant_fen_key(next_board.fen()))
+    blocklist = frozenset(blocked_results)
+
+    cases = [
+        (StateTracking, {}),
+        (MultiMoveStateTracking, {
+            "multi_state_tracking_min_plies": 1,
+            "multi_state_tracking_max_plies": 1,
+        }),
+        (FENAssembly, {}),
+        (FENRowApplication, {}),
+    ]
+
+    for gen_cls, extra_config in cases:
+        config = {
+            "game_positions": [
+                {"fen": contaminated_start},
+            ],
+            "fen_pool": [{"fen": clean_start}],
+            "volume_override": 1,
+            **extra_config,
+        }
+        gen = gen_cls(config=config, blocklist=blocklist, rng=Random(1))
+        row = next(gen.generate())
+
+        assert row["fen"] == clean_start
+        assert row_contaminated_fens(row, blocklist) == []
+
+
 def test_package_fen_row_application_task_is_registered_for_tier1_generation():
     from chess_llm.sft import pipeline
     from chess_llm.sft.generators import FENRowApplication
@@ -2358,6 +2406,40 @@ def test_package_legal_filter_trace_generator_respects_caps_and_rejection_floor(
     for row in rows:
         passed, errors = validate_example(row)
         assert passed is True, errors
+
+
+def test_package_legal_filter_trace_synthetic_fallback_scales_to_training_volume():
+    import chess
+
+    from chess_llm.core.legality import format_legal_filter_trace_answer
+    from chess_llm.sft.generators.tier2_rules import (
+        LegalFilterTrace,
+        _synthetic_pin_check_fens,
+    )
+
+    fallback_rows = _synthetic_pin_check_fens(500)
+
+    assert len(fallback_rows) == 500
+    assert len({fen for _label, fen in fallback_rows}) == 500
+    assert {label for label, _fen in fallback_rows} == {
+        "pinned_piece_exposes_king",
+        "does_not_resolve_check",
+        "king_would_be_in_check",
+    }
+    assert all(
+        format_legal_filter_trace_answer(chess.Board(fen)) is not None
+        for _label, fen in fallback_rows
+    )
+    assert all(
+        any(chess.Board(fen).legal_moves)
+        for _label, fen in fallback_rows
+    )
+
+    gen = LegalFilterTrace(config={"fen_pool": [], "volume_override": 200}, rng=Random(0))
+    rows = list(gen.generate())
+
+    assert len(rows) == 200
+    assert len({row["metadata"]["example_identity"] for row in rows}) == 200
 
 
 def test_package_multi_move_state_tracking_uses_two_to_three_plies():

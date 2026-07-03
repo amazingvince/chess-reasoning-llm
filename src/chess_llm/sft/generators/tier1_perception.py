@@ -1462,7 +1462,14 @@ class FENAssembly(TaskGenerator):
                 user_text,
                 self.build_template_context(raw),
             )
-            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            example = self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=answer,
+            )
+            if self.example_is_blocked(example):
+                continue
+            yield example
             count += 1
 
 
@@ -1535,7 +1542,14 @@ class FENRowApplication(TaskGenerator):
                 user_text,
                 self.build_template_context(raw),
             )
-            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            example = self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=answer,
+            )
+            if self.example_is_blocked(example):
+                continue
+            yield example
             count += 1
 
 
@@ -1630,9 +1644,12 @@ class StateTracking(TaskGenerator):
                 user_text,
                 self.build_template_context(raw),
             )
-            yield self.format_example(
+            example = self.format_example(
                 raw, template_text=user_text, assistant_content=answer
             )
+            if self.example_is_blocked(example):
+                continue
+            yield example
             count += 1
 
 

@@ -1321,6 +1321,236 @@ def _synthetic_check_state_fens(max_per_label: int) -> tuple[tuple[str, str], ..
     return tuple(rows)
 
 
+_ORTHOGONAL_DIRECTIONS: tuple[tuple[int, int], ...] = (
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+)
+_DIAGONAL_DIRECTIONS: tuple[tuple[int, int], ...] = (
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+)
+_ALL_DIRECTIONS: tuple[tuple[int, int], ...] = (
+    *_ORTHOGONAL_DIRECTIONS,
+    *_DIAGONAL_DIRECTIONS,
+)
+_SYNTHETIC_MOVING_PIECES: tuple[int, ...] = (
+    chess.ROOK,
+    chess.BISHOP,
+    chess.KNIGHT,
+    chess.QUEEN,
+    chess.PAWN,
+)
+
+
+def _synthetic_board(turn: bool, placements: list[tuple[int, chess.Piece]]) -> chess.Board:
+    board = chess.Board.empty()
+    for square, piece in placements:
+        board.set_piece_at(square, piece)
+    board.turn = turn
+    board.castling_rights = 0
+    board.ep_square = None
+    return board
+
+
+def _ray_squares_from(square: int, direction: tuple[int, int]) -> list[int]:
+    file_index = chess.square_file(square) + direction[0]
+    rank_index = chess.square_rank(square) + direction[1]
+    squares: list[int] = []
+    while 0 <= file_index <= 7 and 0 <= rank_index <= 7:
+        squares.append(chess.square(file_index, rank_index))
+        file_index += direction[0]
+        rank_index += direction[1]
+    return squares
+
+
+def _enemy_king_candidates(occupied: set[int], friendly_king: int) -> Iterator[int]:
+    for square in chess.SQUARES:
+        if square in occupied:
+            continue
+        if chess.square_distance(square, friendly_king) <= 1:
+            continue
+        yield square
+
+
+def _piece_type_allowed_on_square(piece_type: int, square: int) -> bool:
+    return piece_type != chess.PAWN or chess.square_rank(square) not in (0, 7)
+
+
+def _slider_types_for_direction(direction: tuple[int, int]) -> tuple[int, ...]:
+    if direction in _ORTHOGONAL_DIRECTIONS:
+        return (chess.ROOK, chess.QUEEN)
+    return (chess.BISHOP, chess.QUEEN)
+
+
+def _extended_pinned_piece_boards() -> Iterator[tuple[str, chess.Board]]:
+    for color in (chess.WHITE, chess.BLACK):
+        enemy = not color
+        for king_square in chess.SQUARES:
+            for direction in _ALL_DIRECTIONS:
+                ray = _ray_squares_from(king_square, direction)
+                if len(ray) < 2:
+                    continue
+                for blocker_index, blocker_square in enumerate(ray[:-1]):
+                    for slider_square in ray[blocker_index + 1:]:
+                        occupied = {king_square, blocker_square, slider_square}
+                        for blocker_type in _SYNTHETIC_MOVING_PIECES:
+                            if not _piece_type_allowed_on_square(
+                                blocker_type,
+                                blocker_square,
+                            ):
+                                continue
+                            for slider_type in _slider_types_for_direction(direction):
+                                for enemy_king in _enemy_king_candidates(
+                                    occupied,
+                                    king_square,
+                                ):
+                                    yield (
+                                        "pinned_piece_exposes_king",
+                                        _synthetic_board(
+                                            color,
+                                            [
+                                                (
+                                                    king_square,
+                                                    chess.Piece(chess.KING, color),
+                                                ),
+                                                (
+                                                    blocker_square,
+                                                    chess.Piece(blocker_type, color),
+                                                ),
+                                                (
+                                                    slider_square,
+                                                    chess.Piece(slider_type, enemy),
+                                                ),
+                                                (
+                                                    enemy_king,
+                                                    chess.Piece(chess.KING, enemy),
+                                                ),
+                                            ],
+                                        ),
+                                    )
+
+
+def _extended_unresolved_check_boards() -> Iterator[tuple[str, chess.Board]]:
+    for color in (chess.WHITE, chess.BLACK):
+        enemy = not color
+        for king_square in chess.SQUARES:
+            for direction in _ALL_DIRECTIONS:
+                ray = _ray_squares_from(king_square, direction)
+                for checker_square in ray:
+                    occupied_base = {king_square, checker_square}
+                    for checker_type in _slider_types_for_direction(direction):
+                        for decoy_square in chess.SQUARES:
+                            if decoy_square in occupied_base:
+                                continue
+                            for decoy_type in _SYNTHETIC_MOVING_PIECES:
+                                if not _piece_type_allowed_on_square(
+                                    decoy_type,
+                                    decoy_square,
+                                ):
+                                    continue
+                                occupied = set(occupied_base)
+                                occupied.add(decoy_square)
+                                for enemy_king in _enemy_king_candidates(
+                                    occupied,
+                                    king_square,
+                                ):
+                                    yield (
+                                        "does_not_resolve_check",
+                                        _synthetic_board(
+                                            color,
+                                            [
+                                                (
+                                                    king_square,
+                                                    chess.Piece(chess.KING, color),
+                                                ),
+                                                (
+                                                    checker_square,
+                                                    chess.Piece(checker_type, enemy),
+                                                ),
+                                                (
+                                                    decoy_square,
+                                                    chess.Piece(decoy_type, color),
+                                                ),
+                                                (
+                                                    enemy_king,
+                                                    chess.Piece(chess.KING, enemy),
+                                                ),
+                                            ],
+                                        ),
+                                    )
+
+
+def _extended_king_walk_boards() -> Iterator[tuple[str, chess.Board]]:
+    for color in (chess.WHITE, chess.BLACK):
+        enemy = not color
+        for king_square in chess.SQUARES:
+            for target_square in chess.SquareSet(chess.BB_KING_ATTACKS[king_square]):
+                for direction in _ALL_DIRECTIONS:
+                    ray = _ray_squares_from(target_square, direction)
+                    for attacker_square in ray:
+                        if attacker_square == king_square:
+                            continue
+                        occupied = {king_square, attacker_square}
+                        for attacker_type in _slider_types_for_direction(direction):
+                            for enemy_king in _enemy_king_candidates(
+                                occupied,
+                                king_square,
+                            ):
+                                yield (
+                                    "king_would_be_in_check",
+                                    _synthetic_board(
+                                        color,
+                                        [
+                                            (
+                                                king_square,
+                                                chess.Piece(chess.KING, color),
+                                            ),
+                                            (
+                                                attacker_square,
+                                                chess.Piece(attacker_type, enemy),
+                                            ),
+                                            (
+                                                enemy_king,
+                                                chess.Piece(chess.KING, enemy),
+                                            ),
+                                        ],
+                                    ),
+                                )
+
+
+def _extend_synthetic_pin_check_rows(
+    add,
+    rows: list[tuple[str, str]],
+    max_count: int,
+) -> None:
+    streams = [
+        iter(_extended_pinned_piece_boards()),
+        iter(_extended_unresolved_check_boards()),
+        iter(_extended_king_walk_boards()),
+    ]
+    active = [True] * len(streams)
+    while len(rows) < max_count and any(active):
+        for index, stream in enumerate(streams):
+            if len(rows) >= max_count:
+                break
+            if not active[index]:
+                continue
+            while len(rows) < max_count:
+                before = len(rows)
+                try:
+                    label, board = next(stream)
+                except StopIteration:
+                    active[index] = False
+                    break
+                add(label, board)
+                if len(rows) > before:
+                    break
+
+
 @lru_cache(maxsize=8)
 def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
     """Minimal valid positions with pseudo-legal-but-illegal moves.
@@ -1338,8 +1568,12 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
     def add(label: str, board: chess.Board) -> None:
         if len(rows) >= max_count or not board.is_valid():
             return
+        if format_legal_filter_trace_answer(board) is None:
+            return
         pseudo = {move.uci() for move in board.pseudo_legal_moves}
         legal = {move.uci() for move in board.legal_moves}
+        if not legal:
+            return
         if not (pseudo - legal):
             return
         fen = board.fen()
@@ -1347,15 +1581,6 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
             return
         seen.add(fen)
         rows.append((label, fen))
-
-    def build(turn: bool, placements: list[tuple[int, chess.Piece]]) -> chess.Board:
-        board = chess.Board.empty()
-        for square, piece in placements:
-            board.set_piece_at(square, piece)
-        board.turn = turn
-        board.castling_rights = 0
-        board.ep_square = None
-        return board
 
     for color in (chess.WHITE, chess.BLACK):
         enemy = not color
@@ -1371,7 +1596,7 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
             for offset in (1, 2):
                 add(
                     "pinned_piece_exposes_king",
-                    build(
+                    _synthetic_board(
                         color,
                         [
                             (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
@@ -1388,7 +1613,7 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
             # In check with pseudo-legal moves that do not resolve it.
             add(
                 "does_not_resolve_check",
-                build(
+                _synthetic_board(
                     color,
                     [
                         (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
@@ -1408,7 +1633,7 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
                     continue
                 add(
                     "king_would_be_in_check",
-                    build(
+                    _synthetic_board(
                         color,
                         [
                             (chess.square(file_index, home_rank), chess.Piece(chess.KING, color)),
@@ -1418,6 +1643,7 @@ def _synthetic_pin_check_fens(max_count: int) -> tuple[tuple[str, str], ...]:
                     ),
                 )
 
+    _extend_synthetic_pin_check_rows(add, rows, max_count)
     return tuple(rows)
 
 
