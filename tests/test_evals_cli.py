@@ -257,6 +257,144 @@ def test_run_benchmark_acpl_reuses_sqlite_score_cache_between_runs(tmp_path):
     assert first_engine.calls == 1
 
 
+def test_run_benchmark_acpl_parallel_uses_worker_engines_for_cache_misses():
+    from chess_llm.evals import run_benchmark
+
+    engines = []
+
+    class FakeEngine:
+        def __init__(self):
+            self.calls = 0
+            self.closed = False
+
+        def analyse(self, _board, _limit):
+            self.calls += 1
+            return {
+                "score": chess.engine.PovScore(chess.engine.Cp(40), chess.WHITE),
+            }
+
+        def quit(self):
+            self.closed = True
+
+    def engine_factory():
+        engine = FakeEngine()
+        engines.append(engine)
+        return engine
+
+    examples = [
+        BenchmarkExample(
+            example_id="planning_00000",
+            split="planning",
+            task_type="best_move",
+            fen=STARTING_FEN,
+            prompt="FEN: ...",
+            gold_answer="e2e4",
+            metric_type="move_extraction",
+            metadata={"cp": 100},
+        ),
+        BenchmarkExample(
+            example_id="planning_00001",
+            split="planning",
+            task_type="best_move",
+            fen=STARTING_FEN,
+            prompt="FEN: ...",
+            gold_answer="d2d4",
+            metric_type="move_extraction",
+            metadata={"cp": 100},
+        ),
+    ]
+
+    scores = run_benchmark.compute_acpl(
+        object(),
+        examples,
+        {
+            "planning_00000": "<move>e2e4</move>",
+            "planning_00001": "<move>d2d4</move>",
+        },
+        depth=1,
+        workers=2,
+        engine_factory=engine_factory,
+    )
+
+    assert scores == {
+        "planning_00000": 60.0,
+        "planning_00001": 60.0,
+    }
+    assert len(engines) == 2
+    assert sum(engine.calls for engine in engines) == 2
+    assert all(engine.closed for engine in engines)
+
+
+def test_run_benchmark_cli_passes_stockfish_workers_to_acpl(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.evals import run_benchmark
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    save_benchmark(
+        [
+            BenchmarkExample(
+                example_id="planning_00000",
+                split="planning",
+                task_type="best_move",
+                fen=STARTING_FEN,
+                prompt="FEN: ...",
+                gold_answer="e2e4",
+                metric_type="move_extraction",
+                metadata={"cp": 100},
+            )
+        ],
+        benchmark_dir / "planning.jsonl",
+    )
+    predictions_path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions_path,
+        [{"example_id": "planning_00000", "prediction": "<move>e2e4</move>"}],
+    )
+    stockfish_path = tmp_path / "stockfish.exe"
+    stockfish_path.write_text("", encoding="utf-8")
+
+    captured = {}
+
+    class FakeEngine:
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(
+        run_benchmark.chess.engine.SimpleEngine,
+        "popen_uci",
+        lambda _path: FakeEngine(),
+    )
+
+    def fake_compute_acpl(*_args, **kwargs):
+        captured["workers"] = kwargs["workers"]
+        captured["engine_factory"] = kwargs["engine_factory"]
+        return {}
+
+    monkeypatch.setattr(run_benchmark, "compute_acpl", fake_compute_acpl)
+    monkeypatch.setattr(run_benchmark, "compute_wpd", lambda *_args, **_kwargs: {})
+
+    exit_code = run_benchmark.main(
+        [
+            "--benchmark-dir",
+            str(benchmark_dir),
+            "--predictions",
+            str(predictions_path),
+            "--stockfish-path",
+            str(stockfish_path),
+            "--stockfish-workers",
+            "3",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["workers"] == 3
+    worker_engine = captured["engine_factory"]()
+    assert isinstance(worker_engine, FakeEngine)
+
+
 def test_run_benchmark_cli_writes_prediction_analysis_report(tmp_path):
     from chess_llm.evals import run_benchmark
 

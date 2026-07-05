@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from chess_llm.formats.prompts import SYSTEM_PROMPT
@@ -77,6 +78,27 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH") or shutil.which("stockfish") or "stockfish"
+
+
+@dataclass(frozen=True)
+class _ScalarEvalJob:
+    kind: str
+    fen: str
+    chess960: bool
+    depth: int
+    move_uci: str | None
+    pov: str
+
+    @property
+    def key(self) -> tuple[str, str, bool, int, str | None, str]:
+        return (
+            self.kind,
+            self.fen,
+            self.chess960,
+            self.depth,
+            self.move_uci,
+            self.pov,
+        )
 
 # Task types that predict moves (candidates for ACPL) — matches run_benchmark.py
 _MOVE_TASK_TYPES = frozenset({
@@ -188,6 +210,7 @@ class EvaluationConfig:
     decision_rule: str | None = None
     stockfish_path: str = DEFAULT_STOCKFISH_PATH
     acpl_depth: int = 20
+    acpl_workers: int = 1
     no_acpl: bool = False
     full_acpl_report: bool = False
     baseline: Path | None = None
@@ -240,6 +263,7 @@ class EvaluationConfig:
             decision_rule=getattr(args, "decision_rule", None),
             stockfish_path=args.stockfish_path,
             acpl_depth=args.acpl_depth,
+            acpl_workers=getattr(args, "acpl_workers", 1),
             no_acpl=args.no_acpl,
             full_acpl_report=args.full_acpl_report,
             baseline=args.baseline,
@@ -365,6 +389,7 @@ def _evaluation_run_artifact(
         scoring={
             "stockfish_path": config.stockfish_path,
             "acpl_depth": config.acpl_depth,
+            "acpl_workers": config.acpl_workers,
             "no_acpl": config.no_acpl,
             "full_acpl_report": config.full_acpl_report,
         },
@@ -511,6 +536,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stockfish-path", type=str, default=DEFAULT_STOCKFISH_PATH, help="Path to Stockfish binary for ACPL (default: from STOCKFISH_PATH env or settings)")
     parser.add_argument("--acpl-depth", type=int, default=20, help="Stockfish search depth for ACPL (default: 20)")
+    parser.add_argument(
+        "--stockfish-workers",
+        dest="acpl_workers",
+        type=int,
+        default=1,
+        help="Number of Stockfish worker processes for ACPL cache misses.",
+    )
     parser.add_argument("--no-acpl", action="store_true", help="Disable ACPL computation even if Stockfish is available")
     parser.add_argument(
         "--full-acpl-report",
@@ -1297,6 +1329,112 @@ def _cached_evaluate_predicted_move(
     return cp
 
 
+def _scalar_job_from_cache(
+    cache: SqliteMultipvCache | None,
+    job: _ScalarEvalJob,
+) -> tuple[bool, int | None]:
+    if cache is None:
+        return False, None
+    return cache.get_scalar_evaluation(
+        kind=job.kind,
+        fen=job.fen,
+        chess960=job.chess960,
+        depth=job.depth,
+        move_uci=job.move_uci,
+        pov=job.pov,
+    )
+
+
+def _put_scalar_job_cache(
+    cache: SqliteMultipvCache | None,
+    job: _ScalarEvalJob,
+    cp: int | None,
+) -> None:
+    if cache is None:
+        return
+    cache.put_scalar_evaluation(
+        kind=job.kind,
+        fen=job.fen,
+        chess960=job.chess960,
+        depth=job.depth,
+        move_uci=job.move_uci,
+        pov=job.pov,
+        cp=cp,
+    )
+
+
+def _evaluate_scalar_job(
+    engine: chess.engine.SimpleEngine,
+    job: _ScalarEvalJob,
+) -> int | None:
+    if job.kind == "position":
+        return _evaluate_position(
+            engine,
+            job.fen,
+            job.depth,
+            chess960=job.chess960,
+        )
+    return _evaluate_predicted_move(
+        engine,
+        job.fen,
+        job.move_uci or "",
+        job.depth,
+        chess960=job.chess960,
+    )
+
+
+def _split_scalar_jobs(
+    jobs: list[_ScalarEvalJob],
+    workers: int,
+) -> list[list[_ScalarEvalJob]]:
+    actual_workers = max(1, min(int(workers), len(jobs) or 1))
+    chunks: list[list[_ScalarEvalJob]] = [[] for _ in range(actual_workers)]
+    for index, job in enumerate(jobs):
+        chunks[index % actual_workers].append(job)
+    return [chunk for chunk in chunks if chunk]
+
+
+def _close_engine(engine: object) -> None:
+    quit_method = getattr(engine, "quit", None)
+    if callable(quit_method):
+        quit_method()
+
+
+def _run_scalar_job_chunk(
+    jobs: list[_ScalarEvalJob],
+    engine_factory: Callable[[], chess.engine.SimpleEngine],
+) -> dict[tuple[str, str, bool, int, str | None, str], int | None]:
+    engine = engine_factory()
+    try:
+        return {job.key: _evaluate_scalar_job(engine, job) for job in jobs}
+    finally:
+        _close_engine(engine)
+
+
+def _evaluate_scalar_jobs(
+    engine: chess.engine.SimpleEngine,
+    jobs: list[_ScalarEvalJob],
+    *,
+    workers: int,
+    engine_factory: Callable[[], chess.engine.SimpleEngine] | None,
+) -> dict[tuple[str, str, bool, int, str | None, str], int | None]:
+    if not jobs:
+        return {}
+    if workers <= 1 or engine_factory is None:
+        return {job.key: _evaluate_scalar_job(engine, job) for job in jobs}
+
+    chunks = _split_scalar_jobs(jobs, workers)
+    results: dict[tuple[str, str, bool, int, str | None, str], int | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        futures = [
+            pool.submit(_run_scalar_job_chunk, chunk, engine_factory)
+            for chunk in chunks
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            results.update(future.result())
+    return results
+
+
 def _example_is_chess960(example: BenchmarkExample) -> bool:
     return example_is_chess960(example)
 
@@ -1318,6 +1456,8 @@ def compute_acpl(
     flat_preds: dict[str, str],
     depth: int = 20,
     cache_path: Path | None = None,
+    workers: int = 1,
+    engine_factory: Callable[[], chess.engine.SimpleEngine] | None = None,
 ) -> dict[str, float]:
     """Compute per-example centipawn loss using Stockfish.
 
@@ -1331,10 +1471,30 @@ def compute_acpl(
     """
     acpl_scores: dict[str, float] = {}
     cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
-    best_cp_cache: dict[tuple[str, bool, int], int | None] = {}
+    scalar_values: dict[tuple[str, str, bool, int, str | None, str], int | None] = {}
+    queued_jobs: dict[
+        tuple[str, str, bool, int, str | None, str],
+        _ScalarEvalJob,
+    ] = {}
+    score_inputs: list[
+        tuple[
+            str,
+            tuple[str, str, bool, int, str | None, str],
+            tuple[str, str, bool, int, str | None, str],
+        ]
+    ] = []
     evaluated = 0
     missing_move = 0
     illegal_move = 0
+
+    def ensure_job(job: _ScalarEvalJob) -> None:
+        if job.key in scalar_values or job.key in queued_jobs:
+            return
+        hit, cp = _scalar_job_from_cache(cache, job)
+        if hit:
+            scalar_values[job.key] = cp
+            return
+        queued_jobs[job.key] = job
 
     for ex in examples:
         if ex.task_type not in _MOVE_TASK_TYPES:
@@ -1361,41 +1521,61 @@ def compute_acpl(
             acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
-        best_cache_key = (ex.fen, chess960, depth)
-        if best_cache_key not in best_cp_cache:
-            best_cp_cache[best_cache_key] = _cached_evaluate_position(
-                engine,
-                cache,
-                ex.fen,
-                depth,
-                chess960=chess960,
-            )
-        best_cp = best_cp_cache[best_cache_key]
+        best_job = _ScalarEvalJob(
+            kind="position",
+            fen=ex.fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=None,
+            pov="side_to_move",
+        )
+        predicted_job = _ScalarEvalJob(
+            kind="post_move",
+            fen=ex.fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci,
+            pov="original_side_to_move",
+        )
+        ensure_job(best_job)
+        ensure_job(predicted_job)
+        score_inputs.append((ex.example_id, best_job.key, predicted_job.key))
+
+    job_results = _evaluate_scalar_jobs(
+        engine,
+        list(queued_jobs.values()),
+        workers=workers,
+        engine_factory=engine_factory,
+    )
+    for job in queued_jobs.values():
+        cp = job_results.get(job.key)
+        scalar_values[job.key] = cp
+        _put_scalar_job_cache(cache, job, cp)
+
+    for example_id, best_key, predicted_key in score_inputs:
+        best_cp = scalar_values.get(best_key)
         if best_cp is None:
             continue
-
-        predicted_cp = _cached_evaluate_predicted_move(
-            engine,
-            cache,
-            ex.fen,
-            uci,
-            depth,
-            chess960=chess960,
-        )
+        predicted_cp = scalar_values.get(predicted_key)
         if predicted_cp is None:
             # Illegal move — apply penalty
             illegal_move += 1
-            acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
+            acpl_scores[example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
-        acpl_scores[ex.example_id] = centipawn_loss(float(best_cp), float(predicted_cp))
+        acpl_scores[example_id] = centipawn_loss(float(best_cp), float(predicted_cp))
         evaluated += 1
 
     logger.info(
-        "ACPL: evaluated %d positions with Stockfish (%d missing move, %d illegal move)",
+        (
+            "ACPL: evaluated %d positions with Stockfish "
+            "(%d missing move, %d illegal move, %d worker%s)"
+        ),
         evaluated,
         missing_move,
         illegal_move,
+        max(1, int(workers)),
+        "" if int(workers) == 1 else "s",
     )
     return acpl_scores
 
@@ -2046,6 +2226,15 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
             "ACPL disabled for this run. It is computed by default only for "
             "Phase C planning eval; use --full-acpl-report for all splits."
         )
+    acpl_engine_factory: Callable[[], chess.engine.SimpleEngine] | None = None
+    if engine is not None and args.acpl_workers > 1:
+        resolved_stockfish_path = _resolve_stockfish_path(args.stockfish_path)
+        if resolved_stockfish_path is not None:
+            acpl_engine_factory = (
+                lambda path=resolved_stockfish_path: chess.engine.SimpleEngine.popen_uci(
+                    path
+                )
+            )
 
     # Score each split
     split_results: dict[str, dict[str, float]] = {}
@@ -2063,6 +2252,8 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
                 flat_preds,
                 args.acpl_depth,
                 cache_path=eval_cache_path,
+                workers=args.acpl_workers,
+                engine_factory=acpl_engine_factory,
             )
             wpd_predictions: dict[str, object] = dict(flat_preds)
             if sampled_predictions:

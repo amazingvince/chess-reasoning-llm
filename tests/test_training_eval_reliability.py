@@ -1143,6 +1143,100 @@ def test_compute_acpl_reuses_sqlite_score_cache_between_runs(tmp_path):
     assert first_engine.calls == 2
 
 
+def test_compute_acpl_parallel_uses_worker_engines_for_cache_misses():
+    from chess_llm.training import evaluate
+
+    engines = []
+
+    class FakeEngine:
+        def __init__(self):
+            self.calls = 0
+            self.closed = False
+
+        def analyse(self, board, _limit):
+            self.calls += 1
+            cp = 100 if not board.move_stack else 40
+            return {
+                "score": chess.engine.PovScore(chess.engine.Cp(cp), chess.WHITE),
+            }
+
+        def quit(self):
+            self.closed = True
+
+    def engine_factory():
+        engine = FakeEngine()
+        engines.append(engine)
+        return engine
+
+    examples = [
+        BenchmarkExample(
+            example_id="planning_00000",
+            split="planning",
+            task_type="best_move",
+            fen=STARTING_FEN,
+            prompt="FEN: ...",
+            gold_answer="e2e4",
+            metric_type="move_extraction",
+            metadata={},
+        ),
+        BenchmarkExample(
+            example_id="planning_00001",
+            split="planning",
+            task_type="best_move",
+            fen=STARTING_FEN,
+            prompt="FEN: ...",
+            gold_answer="d2d4",
+            metric_type="move_extraction",
+            metadata={},
+        ),
+    ]
+
+    scores = evaluate.compute_acpl(
+        object(),
+        examples,
+        {
+            "planning_00000": "<move>e2e4</move>",
+            "planning_00001": "<move>d2d4</move>",
+        },
+        depth=1,
+        workers=2,
+        engine_factory=engine_factory,
+    )
+
+    assert scores == {
+        "planning_00000": 60.0,
+        "planning_00001": 60.0,
+    }
+    assert len(engines) == 2
+    assert sum(engine.calls for engine in engines) == 3
+    assert all(engine.closed for engine in engines)
+
+
+def test_evaluate_cli_config_exposes_acpl_workers(monkeypatch, tmp_path):
+    from chess_llm.training import evaluate
+
+    monkeypatch.setattr(
+        evaluate.sys,
+        "argv",
+        [
+            "chess-llm-evaluate",
+            "--model",
+            "model-id",
+            "--benchmark-dir",
+            str(tmp_path / "benchmark"),
+            "--output",
+            str(tmp_path / "predictions.jsonl"),
+            "--stockfish-workers",
+            "3",
+        ],
+    )
+
+    args = evaluate.parse_args()
+    config = evaluate.EvaluationConfig.from_namespace(args)
+
+    assert config.acpl_workers == 3
+
+
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):
     from chess_llm.training import evaluate
 

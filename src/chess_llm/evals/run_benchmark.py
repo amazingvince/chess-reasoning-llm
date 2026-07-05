@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import chess
 import chess.engine
@@ -35,6 +37,27 @@ _MOVE_TASK_TYPES = frozenset({
     "best_line_trace",
     "endgame_best_move",
 })
+
+
+@dataclass(frozen=True)
+class _ScalarEvalJob:
+    kind: str
+    fen: str
+    chess960: bool
+    depth: int
+    move_uci: str | None
+    pov: str
+
+    @property
+    def key(self) -> tuple[str, str, bool, int, str | None, str]:
+        return (
+            self.kind,
+            self.fen,
+            self.chess960,
+            self.depth,
+            self.move_uci,
+            self.pov,
+        )
 
 
 def load_predictions(
@@ -142,6 +165,102 @@ def _cached_evaluate_predicted_move(
     return cp
 
 
+def _scalar_job_from_cache(
+    cache: SqliteMultipvCache | None,
+    job: _ScalarEvalJob,
+) -> tuple[bool, int | None]:
+    if cache is None:
+        return False, None
+    return cache.get_scalar_evaluation(
+        kind=job.kind,
+        fen=job.fen,
+        chess960=job.chess960,
+        depth=job.depth,
+        move_uci=job.move_uci,
+        pov=job.pov,
+    )
+
+
+def _put_scalar_job_cache(
+    cache: SqliteMultipvCache | None,
+    job: _ScalarEvalJob,
+    cp: int | None,
+) -> None:
+    if cache is None:
+        return
+    cache.put_scalar_evaluation(
+        kind=job.kind,
+        fen=job.fen,
+        chess960=job.chess960,
+        depth=job.depth,
+        move_uci=job.move_uci,
+        pov=job.pov,
+        cp=cp,
+    )
+
+
+def _evaluate_scalar_job(engine, job: _ScalarEvalJob) -> int | None:
+    return evaluate_predicted_move(
+        engine,
+        job.fen,
+        job.move_uci or "",
+        job.depth,
+        chess960=job.chess960,
+    )
+
+
+def _split_scalar_jobs(
+    jobs: list[_ScalarEvalJob],
+    workers: int,
+) -> list[list[_ScalarEvalJob]]:
+    actual_workers = max(1, min(int(workers), len(jobs) or 1))
+    chunks: list[list[_ScalarEvalJob]] = [[] for _ in range(actual_workers)]
+    for index, job in enumerate(jobs):
+        chunks[index % actual_workers].append(job)
+    return [chunk for chunk in chunks if chunk]
+
+
+def _close_engine(engine: object) -> None:
+    quit_method = getattr(engine, "quit", None)
+    if callable(quit_method):
+        quit_method()
+
+
+def _run_scalar_job_chunk(
+    jobs: list[_ScalarEvalJob],
+    engine_factory: Callable[[], object],
+) -> dict[tuple[str, str, bool, int, str | None, str], int | None]:
+    engine = engine_factory()
+    try:
+        return {job.key: _evaluate_scalar_job(engine, job) for job in jobs}
+    finally:
+        _close_engine(engine)
+
+
+def _evaluate_scalar_jobs(
+    engine,
+    jobs: list[_ScalarEvalJob],
+    *,
+    workers: int,
+    engine_factory: Callable[[], object] | None,
+) -> dict[tuple[str, str, bool, int, str | None, str], int | None]:
+    if not jobs:
+        return {}
+    if workers <= 1 or engine_factory is None:
+        return {job.key: _evaluate_scalar_job(engine, job) for job in jobs}
+
+    chunks = _split_scalar_jobs(jobs, workers)
+    results: dict[tuple[str, str, bool, int, str | None, str], int | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        futures = [
+            pool.submit(_run_scalar_job_chunk, chunk, engine_factory)
+            for chunk in chunks
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            results.update(future.result())
+    return results
+
+
 def white_cp_to_side_to_move_cp(
     fen: str,
     cp: float | int,
@@ -162,11 +281,30 @@ def compute_acpl(
     flat_preds: dict[str, str],
     depth: int = 20,
     cache_path: Path | None = None,
+    workers: int = 1,
+    engine_factory: Callable[[], object] | None = None,
 ) -> dict[str, float]:
     """Compute per-example centipawn loss for move-prediction tasks."""
     acpl_scores: dict[str, float] = {}
     cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
+    scalar_values: dict[tuple[str, str, bool, int, str | None, str], int | None] = {}
+    queued_jobs: dict[
+        tuple[str, str, bool, int, str | None, str],
+        _ScalarEvalJob,
+    ] = {}
+    score_inputs: list[
+        tuple[str, tuple[str, str, bool, int, str | None, str], float]
+    ] = []
     evaluated = 0
+
+    def ensure_job(job: _ScalarEvalJob) -> None:
+        if job.key in scalar_values or job.key in queued_jobs:
+            return
+        hit, cp = _scalar_job_from_cache(cache, job)
+        if hit:
+            scalar_values[job.key] = cp
+            return
+        queued_jobs[job.key] = job
 
     for example in examples:
         if example.task_type not in _MOVE_TASK_TYPES:
@@ -182,27 +320,47 @@ def compute_acpl(
             acpl_scores[example.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
-        predicted_cp = _cached_evaluate_predicted_move(
-            engine,
-            cache,
-            example.fen,
-            uci,
-            depth,
-            chess960=chess960,
-        )
-        if predicted_cp is None:
-            acpl_scores[example.example_id] = ACPL_INVALID_MOVE_PENALTY
-            continue
-
         gold_side_cp = white_cp_to_side_to_move_cp(
             example.fen,
             gold_cp,
             chess960=chess960,
         )
-        acpl_scores[example.example_id] = centipawn_loss(gold_side_cp, float(predicted_cp))
+        predicted_job = _ScalarEvalJob(
+            kind="post_move",
+            fen=example.fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci,
+            pov="original_side_to_move",
+        )
+        ensure_job(predicted_job)
+        score_inputs.append((example.example_id, predicted_job.key, gold_side_cp))
+
+    job_results = _evaluate_scalar_jobs(
+        engine,
+        list(queued_jobs.values()),
+        workers=workers,
+        engine_factory=engine_factory,
+    )
+    for job in queued_jobs.values():
+        cp = job_results.get(job.key)
+        scalar_values[job.key] = cp
+        _put_scalar_job_cache(cache, job, cp)
+
+    for example_id, predicted_key, gold_side_cp in score_inputs:
+        predicted_cp = scalar_values.get(predicted_key)
+        if predicted_cp is None:
+            acpl_scores[example_id] = ACPL_INVALID_MOVE_PENALTY
+            continue
+        acpl_scores[example_id] = centipawn_loss(gold_side_cp, float(predicted_cp))
         evaluated += 1
 
-    logger.info("ACPL: evaluated %d positions with Stockfish", evaluated)
+    logger.info(
+        "ACPL: evaluated %d positions with Stockfish (%d worker%s)",
+        evaluated,
+        max(1, int(workers)),
+        "" if int(workers) == 1 else "s",
+    )
     return acpl_scores
 
 
@@ -311,6 +469,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--predictions", required=True)
     parser.add_argument("--stockfish-path", default=None)
     parser.add_argument("--acpl-depth", type=int, default=20)
+    parser.add_argument(
+        "--stockfish-workers",
+        type=int,
+        default=1,
+        help="Number of Stockfish worker processes for ACPL cache misses.",
+    )
     args = parser.parse_args(argv)
 
     benchmark_dir = Path(args.benchmark_dir)
@@ -341,12 +505,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
 
     engine = None
+    acpl_engine_factory: Callable[[], object] | None = None
     has_acpl = False
     if args.stockfish_path:
         stockfish_path = Path(args.stockfish_path)
         if stockfish_path.exists():
             try:
                 engine = chess.engine.SimpleEngine.popen_uci(str(stockfish_path))
+                if args.stockfish_workers > 1:
+                    acpl_engine_factory = (
+                        lambda path=str(stockfish_path): chess.engine.SimpleEngine.popen_uci(
+                            path
+                        )
+                    )
                 has_acpl = True
                 logger.info("Stockfish loaded for ACPL from %s", stockfish_path)
             except Exception as exc:
@@ -403,6 +574,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     flat_predictions,
                     args.acpl_depth,
                     cache_path=cache_path,
+                    workers=args.stockfish_workers,
+                    engine_factory=acpl_engine_factory,
                 )
                 wpd_scores = compute_wpd(
                     engine,
