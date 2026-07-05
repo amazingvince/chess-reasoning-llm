@@ -108,6 +108,27 @@ def test_package_freeze_planning_prompts_require_think_move_contract():
         assert "final lowercase UCI move" in example.prompt
 
 
+def test_package_freeze_preserves_puzzle_rating_and_themes():
+    examples = packaged.freeze_split(
+        "planning",
+        [
+            {
+                "fen": STARTING_FEN,
+                "puzzle_id": "puzzle-1",
+                "solution_first_move": "e2e4",
+                "rating": 1420,
+                "themes": ["fork", "pin"],
+            }
+        ],
+        seed=42,
+    )
+
+    assert len(examples) == 1
+    assert examples[0].task_type == "puzzle_solve"
+    assert examples[0].metadata["rating"] == 1420
+    assert examples[0].metadata["themes"] == ["fork", "pin"]
+
+
 def test_package_freeze_rejects_invalid_binary_choice_gold():
     examples = packaged.freeze_split(
         "mate",

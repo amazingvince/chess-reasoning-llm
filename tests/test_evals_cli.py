@@ -305,6 +305,67 @@ def test_run_benchmark_cli_writes_prediction_analysis_report(tmp_path):
     assert analysis["tasks"]["board_to_fen"]["failure_count"] == 1
 
 
+def test_run_benchmark_cli_reports_puzzle_rating_and_theme_strata(tmp_path):
+    from chess_llm.evals import run_benchmark
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    save_benchmark(
+        [
+            BenchmarkExample(
+                example_id="planning_00000",
+                split="planning",
+                task_type="puzzle_solve",
+                fen=STARTING_FEN,
+                prompt="FEN: ...\nSolve this puzzle.",
+                gold_answer="e2e4",
+                metric_type="move_extraction",
+                metadata={"rating": 1420, "themes": ["fork", "pin"]},
+            ),
+            BenchmarkExample(
+                example_id="planning_00001",
+                split="planning",
+                task_type="puzzle_solve",
+                fen=STARTING_FEN,
+                prompt="FEN: ...\nSolve this puzzle.",
+                gold_answer="d2d4",
+                metric_type="move_extraction",
+                metadata={"rating": 1810, "themes": ["fork", "backRankMate"]},
+            ),
+        ],
+        benchmark_dir / "planning.jsonl",
+    )
+    predictions_path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        predictions_path,
+        [
+            {"example_id": "planning_00000", "prediction": "<move>e2e4</move>"},
+            {"example_id": "planning_00001", "prediction": "<move>e2e4</move>"},
+        ],
+    )
+
+    exit_code = run_benchmark.main(
+        [
+            "--benchmark-dir",
+            str(benchmark_dir),
+            "--predictions",
+            str(predictions_path),
+        ]
+    )
+
+    analysis = json.loads(
+        predictions_path.with_suffix(".analysis.json").read_text(encoding="utf-8")
+    )
+    strata = analysis["puzzle_strata"]
+    assert exit_code == 0
+    assert strata["rating_buckets"]["1200-1599"]["primary_accuracy"] == 1.0
+    assert strata["rating_buckets"]["1600-1999"]["primary_accuracy"] == 0.0
+    assert strata["themes"]["fork"]["row_count"] == 2
+    assert strata["themes"]["fork"]["primary_accuracy"] == 0.5
+    assert strata["themes"]["pin"]["primary_accuracy"] == 1.0
+    assert strata["themes"]["backRankMate"]["primary_accuracy"] == 0.0
+
+
 def test_load_predictions_returns_normalized_and_raw_maps(tmp_path):
     from chess_llm.evals.run_benchmark import load_predictions
 

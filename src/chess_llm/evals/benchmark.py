@@ -321,7 +321,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
 _META_KEYS = frozenset({
     "cp", "mate", "wdl", "material", "eco", "name",
     "best_move", "solution_first_move", "better_move",
-    "move_a", "move_b", "puzzle_id", "source", "themes",
+    "move_a", "move_b", "puzzle_id", "rating", "source", "themes",
     "book_moves", "depth", "is_chess960", "chess960_id",
     "diagnostic", "hard_gate", "source_square", "side_to_move",
     "side_piece_inventory", "legality_reason_label", "move",

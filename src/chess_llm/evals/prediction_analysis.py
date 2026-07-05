@@ -60,6 +60,16 @@ _STEP_VERIFICATION_METADATA_KEYS = (
     "corruption_kind",
     "difficulty",
 )
+_PUZZLE_RATING_BUCKETS = (
+    (None, 800, "<800"),
+    (800, 1200, "800-1199"),
+    (1200, 1600, "1200-1599"),
+    (1600, 2000, "1600-1999"),
+    (2000, 2400, "2000-2399"),
+    (2400, 2800, "2400-2799"),
+    (2800, None, "2800+"),
+)
+_PUZZLE_RATING_BUCKET_ORDER = tuple(label for _low, _high, label in _PUZZLE_RATING_BUCKETS)
 
 
 def write_prediction_analysis_report(
@@ -89,6 +99,7 @@ def analyze_prediction_file(
     predictions_path = Path(predictions_path)
     task_buckets: dict[str, dict[str, Any]] = defaultdict(_new_prediction_analysis_bucket)
     split_buckets: dict[str, dict[str, Any]] = defaultdict(_new_prediction_analysis_bucket)
+    puzzle_strata = _new_puzzle_strata()
     format_bleed: list[dict[str, Any]] = []
     total_rows = 0
     example_ids: set[str] = set()
@@ -114,6 +125,7 @@ def analyze_prediction_file(
             primary_score = _prediction_primary_score(row)
             is_failure = primary_score is not None and primary_score < 1.0
             is_bleed = is_prediction_format_bleed(task_type, family)
+            _update_puzzle_strata(puzzle_strata, row, primary_score)
 
             for bucket in (task_buckets[task_type], split_buckets[split]):
                 _update_prediction_analysis_bucket(
@@ -142,6 +154,7 @@ def analyze_prediction_file(
             split: _finalize_prediction_analysis_bucket(bucket)
             for split, bucket in sorted(split_buckets.items())
         },
+        "puzzle_strata": _finalize_puzzle_strata(puzzle_strata),
         "format_bleed": format_bleed,
     }
 
@@ -315,6 +328,136 @@ def _finalize_prediction_analysis_bucket(bucket: dict[str, Any]) -> dict[str, An
         },
         "failure_examples": list(bucket["failure_examples"]),
     }
+
+
+def _new_puzzle_strata() -> dict[str, Any]:
+    return {
+        "rating_buckets": defaultdict(_new_stratum_bucket),
+        "themes": defaultdict(_new_stratum_bucket),
+        "missing_rating_count": 0,
+        "missing_themes_count": 0,
+    }
+
+
+def _new_stratum_bucket() -> dict[str, Any]:
+    return {
+        "row_count": 0,
+        "example_ids": set(),
+        "score_sum": 0.0,
+        "scored_count": 0,
+    }
+
+
+def _update_puzzle_strata(
+    strata: dict[str, Any],
+    row: Mapping[str, Any],
+    primary_score: float | None,
+) -> None:
+    if row.get("task_type") != "puzzle_solve":
+        return
+
+    metadata = row.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+
+    rating = _coerce_puzzle_rating(metadata.get("rating", row.get("rating")))
+    rating_bucket = _puzzle_rating_bucket(rating)
+    if rating_bucket is None:
+        strata["missing_rating_count"] += 1
+    else:
+        _update_stratum_bucket(
+            strata["rating_buckets"][rating_bucket],
+            row,
+            primary_score,
+        )
+
+    themes = _normalize_puzzle_themes(metadata.get("themes", row.get("themes")))
+    if not themes:
+        strata["missing_themes_count"] += 1
+    for theme in themes:
+        _update_stratum_bucket(strata["themes"][theme], row, primary_score)
+
+
+def _update_stratum_bucket(
+    bucket: dict[str, Any],
+    row: Mapping[str, Any],
+    primary_score: float | None,
+) -> None:
+    bucket["row_count"] += 1
+    example_id = row.get("example_id")
+    if example_id:
+        bucket["example_ids"].add(str(example_id))
+    if primary_score is None:
+        return
+    bucket["score_sum"] += primary_score
+    bucket["scored_count"] += 1
+
+
+def _finalize_puzzle_strata(strata: Mapping[str, Any]) -> dict[str, Any]:
+    rating_buckets: Mapping[str, dict[str, Any]] = strata["rating_buckets"]
+    themes: Mapping[str, dict[str, Any]] = strata["themes"]
+    return {
+        "rating_buckets": {
+            label: _finalize_stratum_bucket(rating_buckets[label])
+            for label in _PUZZLE_RATING_BUCKET_ORDER
+            if label in rating_buckets
+        },
+        "themes": {
+            theme: _finalize_stratum_bucket(bucket)
+            for theme, bucket in sorted(themes.items(), key=lambda item: item[0].lower())
+        },
+        "missing_rating_count": int(strata["missing_rating_count"]),
+        "missing_themes_count": int(strata["missing_themes_count"]),
+    }
+
+
+def _finalize_stratum_bucket(bucket: Mapping[str, Any]) -> dict[str, Any]:
+    scored_count = int(bucket["scored_count"])
+    return {
+        "row_count": int(bucket["row_count"]),
+        "example_count": len(bucket["example_ids"]),
+        "scored_count": scored_count,
+        "primary_accuracy": (
+            float(bucket["score_sum"]) / scored_count if scored_count else None
+        ),
+    }
+
+
+def _coerce_puzzle_rating(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(float(stripped))
+        except ValueError:
+            return None
+    return None
+
+
+def _puzzle_rating_bucket(rating: int | None) -> str | None:
+    if rating is None:
+        return None
+    for low, high, label in _PUZZLE_RATING_BUCKETS:
+        if (low is None or rating >= low) and (high is None or rating < high):
+            return label
+    return None
+
+
+def _normalize_puzzle_themes(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.replace(",", " ").split()
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        return []
+    return sorted({item.strip() for item in items if item.strip()})
 
 
 def _prediction_report_example(
