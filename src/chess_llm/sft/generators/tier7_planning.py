@@ -5,6 +5,7 @@
 7.3 Move consequence (PV line analysis)
 7.8 Candidate ratings (fixed grammar, true MultiPV only)
 7.10 Best-line trace (fixed grammar, true MultiPV PV only)
+7.11 History-conditioned best move (PGN prefix + FEN -> next move)
 """
 
 from __future__ import annotations
@@ -101,6 +102,70 @@ class BestMoveSelection(TaskGenerator):
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=trace)
+            count += 1
+
+
+class HistoryBestMoveSelection(TaskGenerator):
+    """Task 7.11: next-move imitation from a game prefix and current FEN."""
+
+    def task_id(self) -> str:
+        return "7.11_history_best_move"
+
+    def tier(self) -> int:
+        return 7
+
+    def generate(self) -> Iterator[dict]:
+        positions = self.config.get("game_positions", [])
+        target = self.target_volume()
+        count = 0
+
+        for position in positions:
+            if count >= target:
+                return
+            raw = self.source_row(position)
+            if self.is_blocked(raw):
+                continue
+
+            move_history = str(position.get("move_history", "") or "").strip()
+            target_move = str(position.get("move_played_uci", "") or "").strip().lower()
+            if not move_history or not target_move:
+                continue
+
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            try:
+                move = chess.Move.from_uci(target_move)
+            except ValueError:
+                continue
+            if move not in board.legal_moves:
+                continue
+
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source": "lichess_game_history",
+                    "target_move": target_move,
+                    "move_history": move_history,
+                    "game_id": position.get("game_id", ""),
+                    "ply": position.get("ply"),
+                    "game_phase": position.get("game_phase", ""),
+                }
+            )
+            raw.update(
+                {
+                    "move_history": move_history,
+                    "target_move": target_move,
+                    "metadata": metadata,
+                }
+            )
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=f"<move>{target_move}</move>",
+            )
             count += 1
 
 

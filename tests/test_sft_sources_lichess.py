@@ -40,6 +40,19 @@ def test_extract_game_positions_reads_compact_movetext():
     ]
 
 
+def test_extract_game_positions_preserves_prefix_history_before_each_move():
+    positions = list(extract_game_positions({"moves": "1.e4 e5 2.Nf3 Nc6"}))
+
+    assert [pos["move_history"] for pos in positions] == [
+        "",
+        "e2e4",
+        "e2e4 e7e5",
+        "e2e4 e7e5 g1f3",
+    ]
+    assert positions[2]["ply"] == 2
+    assert positions[2]["move_played_uci"] == "g1f3"
+
+
 def test_extract_game_positions_accepts_pgn_comments_and_variations():
     game = {
         "movetext": """

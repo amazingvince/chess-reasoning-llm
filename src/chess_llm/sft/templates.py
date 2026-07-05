@@ -260,6 +260,10 @@ ANSWER_CONTRACTS: dict[str, str] = {
         '"Faulty line: <line-number|none>", "Error type: <label>", and '
         '"Correction: <short correction|none>".'
     ),
+    "7.11_history_best_move": (
+        'Answer format: return exactly "<move><uci></move>" with the next '
+        "lowercase UCI move from the game prefix."
+    ),
 }
 
 
@@ -781,6 +785,12 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nTrace to verify:\n{verification_trace}\nFind the broken line, or say the trace is sound.",
         "Position: {fen}\nAudit this numbered trace:\n{verification_trace}\nReturn the verifier verdict.",
         "Board:\n{board}\nSide to move: {side_to_move}\nTrace to verify:\n{verification_trace}\nIdentify exactly one broken step, or mark it sound.",
+    ],
+    "7.11_history_best_move": [
+        "Moves so far: {move_history}\nFEN: {fen}\nChoose the next move.",
+        "Game prefix: {move_history}\nCurrent FEN: {fen}\nWhat move was played next?",
+        "FEN: {fen}\nMove history: {move_history}\nReturn the next move from this game.",
+        "Board:\n{board}\nMoves so far: {move_history}\nSide to move: {side_to_move}\nChoose the next move.",
     ],
 }
 

@@ -52,6 +52,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "7.8_candidate_ratings": ("candidate_moves",),
     "7.9_step_verification": ("source_task", "corruption_kind", "faulty_line"),
     "7.10_best_line_trace": ("best_move", "pv_line"),
+    "7.11_history_best_move": ("game_id", "ply", "move_history"),
 }
 
 

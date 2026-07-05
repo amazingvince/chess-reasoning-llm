@@ -1758,6 +1758,62 @@ def test_package_best_move_selection_excludes_mate_pairwise_rows():
     assert all(row["metadata"]["source"] == "lichess_evals" for row in rows)
 
 
+def test_package_history_best_move_uses_prefix_and_move_only_target(monkeypatch):
+    from chess_llm.sft.generators.tier7_planning import HistoryBestMoveSelection
+
+    tpl = "Moves so far: {move_history}\nFEN: {fen}\nChoose the next move."
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier7_planning.select_template",
+        lambda _task_id, _rng: tpl,
+    )
+
+    rows = list(
+        HistoryBestMoveSelection(
+            config={
+                "game_positions": [
+                    {
+                        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                        "move_history": "e2e4",
+                        "move_played_uci": "e7e5",
+                        "game_id": "game-1",
+                        "ply": 1,
+                    }
+                ],
+                "volume_override": 1,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    assert "Moves so far: e2e4" in rows[0]["messages"][1]["content"]
+    assert rows[0]["messages"][2]["content"] == "<move>e7e5</move>"
+    assert rows[0]["metadata"]["source"] == "lichess_game_history"
+    assert rows[0]["metadata"]["move_history"] == "e2e4"
+    assert rows[0]["metadata"]["target_move"] == "e7e5"
+    assert rows[0]["metadata"]["game_id"] == "game-1"
+
+
+def test_package_history_best_move_registered_for_tier7_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier7_planning import HistoryBestMoveSelection
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert HistoryBestMoveSelection in pipeline.TIER_GENERATORS[7]
+    assert DEFAULT_VOLUMES["7.11_history_best_move"] > 0
+    assert TEMPLATES["7.11_history_best_move"]
+    assert "<move><uci></move>" in ANSWER_CONTRACTS["7.11_history_best_move"]
+    assert TASK_IDENTITY_FIELDS["7.11_history_best_move"] == (
+        "game_id",
+        "ply",
+        "move_history",
+    )
+    assert TASK_DESCRIPTIONS["7.11_history_best_move"]
+
+
 def test_package_candidate_ratings_generator_uses_true_multipv_rows_only():
     from chess_llm.sft import validate_example
     from chess_llm.sft.generators.tier7_planning import CandidateRatings

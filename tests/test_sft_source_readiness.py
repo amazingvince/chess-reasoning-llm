@@ -42,6 +42,13 @@ def test_optional_tier_sources_do_not_make_report_fail():
             "position_evals": [{"fen": STANDARD_FEN, "best_move": "e2e4", "depth": 22}],
             "best_move_evals": [{"fen": STANDARD_FEN, "best_move": "e2e4", "depth": 22}],
             "consequence_evals": [{"fen": STANDARD_FEN, "best_move": "e2e4", "depth": 22}],
+            "game_positions": [
+                {
+                    "fen": STANDARD_FEN,
+                    "move_history": "e2e4",
+                    "move_played_uci": "e7e5",
+                }
+            ],
             "mate_rows": [],
         },
         tiers=[7],

@@ -66,6 +66,7 @@ from chess_llm.sft.generators.tier7_planning import (
     BestLineTrace,
     BestMoveSelection,
     CandidateRatings,
+    HistoryBestMoveSelection,
     MoveConsequence,
     PuzzleSolving,
 )
@@ -127,6 +128,7 @@ TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
         CandidateRatings,
         BestLineTrace,
         StepVerification,
+        HistoryBestMoveSelection,
     ],
 }
 
@@ -152,6 +154,7 @@ __all__ = [
     "HangingPieceClaimVerification",
     "HangingPieceStatus",
     "HangingPieces",
+    "HistoryBestMoveSelection",
     "KingSafetyFilter",
     "LegalFilterTrace",
     "LegalMoveGen",

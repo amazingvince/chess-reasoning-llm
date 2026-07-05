@@ -56,6 +56,7 @@ TIER_REQUIRED_SOURCES: dict[int, dict[str, tuple[str, ...]]] = {
     7: {
         "best_move_evals": ("tier7",),
         "consequence_evals": ("tier7",),
+        "game_positions": ("tier7",),
         "puzzles": ("tier7",),
     },
 }

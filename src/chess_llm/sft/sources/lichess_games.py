@@ -206,18 +206,21 @@ def _positions_from_moves(
     game_id: str | None = None,
 ) -> Iterator[dict]:
     board = initial_board.copy()
+    move_history: list[str] = []
     for ply, move in enumerate(moves):
         if move not in board.legal_moves:
             return
         yield {
             "fen": board.fen(),
             "move_played_uci": move.uci(),
+            "move_history": " ".join(move_history),
             "game_phase": game_phase(ply),
             "material_balance": material_balance(board),
             "ply": ply,
             "game_id": game_id,
         }
         board.push(move)
+        move_history.append(move.uci())
 
 
 __all__ = [
