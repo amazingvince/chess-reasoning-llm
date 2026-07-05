@@ -824,6 +824,48 @@ def _user_message(prompt: PromptArtifact) -> str:
     raise ValueError(f"prompt {prompt.prompt_id!r} has no user message")
 
 
+def _game_reliability(game: GameState) -> dict[str, int]:
+    model_turn_count = len(game.judgments)
+    legal_model_turn_count = sum(1 for judgment in game.judgments if judgment.legal is True)
+    random_fallback_count = sum(
+        1 for position in game.positions if position.get("mover") == MOVER_RANDOM_FALLBACK
+    )
+    return {
+        "model_turn_count": model_turn_count,
+        "legal_model_turn_count": legal_model_turn_count,
+        "model_failure_count": model_turn_count - legal_model_turn_count,
+        "random_fallback_count": random_fallback_count,
+    }
+
+
+def _summarize_reliability(games: list[GameState]) -> dict[str, object]:
+    game_rows = [_game_reliability(game) for game in games]
+    model_turn_count = sum(row["model_turn_count"] for row in game_rows)
+    legal_model_turn_count = sum(row["legal_model_turn_count"] for row in game_rows)
+    model_failure_count = sum(row["model_failure_count"] for row in game_rows)
+    clean_game_count = sum(1 for row in game_rows if row["model_failure_count"] == 0)
+    random_fallback_count = sum(row["random_fallback_count"] for row in game_rows)
+    failure_buckets = Counter(
+        str(judgment.failure_bucket)
+        for game in games
+        for judgment in game.judgments
+        if judgment.legal is not True and judgment.failure_bucket
+    )
+    return {
+        "game_count": len(games),
+        "clean_game_count": clean_game_count,
+        "clean_game_rate": clean_game_count / len(games) if games else None,
+        "model_turn_count": model_turn_count,
+        "legal_model_turn_count": legal_model_turn_count,
+        "model_failure_count": model_failure_count,
+        "legal_model_turn_rate": (
+            legal_model_turn_count / model_turn_count if model_turn_count else None
+        ),
+        "random_fallback_count": random_fallback_count,
+        "failure_buckets": dict(sorted(failure_buckets.items())),
+    }
+
+
 def _write_outputs(
     games: list[GameState],
     config: SelfPlayConfig,
@@ -849,6 +891,7 @@ def _write_outputs(
             "n_plies": len(game.moves),
             "moves": list(game.moves),
             "start_fen": game.start_fen,
+            **_game_reliability(game),
         }
         for game in games
     ]
@@ -884,6 +927,7 @@ def _write_outputs(
         "judgment_count": len(judgments),
         "position_count": len(positions),
         "terminations": dict(sorted(terminations.items())),
+        "reliability": _summarize_reliability(games),
         "opponent": {
             "mode": config.opponent,
             "self_play_fraction": config.self_play_fraction,

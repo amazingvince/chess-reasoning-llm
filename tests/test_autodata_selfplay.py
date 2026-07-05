@@ -124,6 +124,13 @@ def test_two_game_run_writes_triple_games_and_positions(tmp_path: Path):
     assert len(prompts) == result.prompt_count > 0
     assert manifest["artifact_type"] == "self_play_manifest"
     assert manifest["position_count"] == len(positions)
+    assert manifest["reliability"]["model_turn_count"] == result.judgment_count
+    assert manifest["reliability"]["legal_model_turn_count"] == result.judgment_count
+    assert manifest["reliability"]["model_failure_count"] == 0
+    assert manifest["reliability"]["legal_model_turn_rate"] == 1.0
+    assert manifest["reliability"]["clean_game_count"] == 2
+    assert manifest["reliability"]["clean_game_rate"] == 1.0
+    assert manifest["reliability"]["random_fallback_count"] == 0
 
     prompt_ids = [prompt.prompt_id for prompt in prompts]
     assert len(prompt_ids) == len(set(prompt_ids))
@@ -182,6 +189,7 @@ def test_illegal_outputs_backfill_teacher_and_hit_failure_cap(tmp_path: Path):
     judgments = list(read_jsonl(result.judgments_path, JudgmentArtifact))
     games = _read_dict_jsonl(result.games_path)
     positions = _read_dict_jsonl(result.positions_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert [judgment.failure_bucket for judgment in judgments] == [
         PARSE_FAILURE,
@@ -193,6 +201,21 @@ def test_illegal_outputs_backfill_teacher_and_hit_failure_cap(tmp_path: Path):
 
     assert games[0]["termination"] == "failure_cap"
     assert games[0]["result"] == "*"
+    assert games[0]["model_turn_count"] == 2
+    assert games[0]["legal_model_turn_count"] == 0
+    assert games[0]["model_failure_count"] == 2
+    assert games[0]["random_fallback_count"] == 2
+    assert manifest["reliability"]["model_turn_count"] == 2
+    assert manifest["reliability"]["legal_model_turn_count"] == 0
+    assert manifest["reliability"]["model_failure_count"] == 2
+    assert manifest["reliability"]["legal_model_turn_rate"] == 0.0
+    assert manifest["reliability"]["clean_game_count"] == 0
+    assert manifest["reliability"]["clean_game_rate"] == 0.0
+    assert manifest["reliability"]["random_fallback_count"] == 2
+    assert manifest["reliability"]["failure_buckets"] == {
+        ILLEGAL_MOVE: 1,
+        PARSE_FAILURE: 1,
+    }
     fallback_positions = [
         pos for pos in positions if pos["mover"] == "random_fallback"
     ]
