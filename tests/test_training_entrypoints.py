@@ -829,6 +829,24 @@ def test_package_train_eval_command_forwards_wandb_offline_allowance(tmp_path: P
     assert "--allow-wandb-offline" in cmd
 
 
+def test_package_train_eval_command_forwards_ledger_and_mirror_paths(tmp_path: Path):
+    from chess_llm.training.train import _build_eval_cmd
+
+    ledger = tmp_path / "runs.jsonl"
+    mirror = tmp_path / "mirror"
+    cmd = _build_eval_cmd(
+        "model-id",
+        tmp_path / "benchmark",
+        tmp_path / "predictions.jsonl",
+        run_ledger=ledger,
+        artifact_mirror_dir=mirror,
+        no_wandb=True,
+    )
+
+    assert cmd[cmd.index("--run-ledger") + 1] == str(ledger)
+    assert cmd[cmd.index("--artifact-mirror-dir") + 1] == str(mirror)
+
+
 def test_package_curriculum_train_command_uses_module_entrypoint(tmp_path: Path):
     from chess_llm.training.run_curriculum import _build_train_phase_cmd
 

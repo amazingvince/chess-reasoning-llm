@@ -30,6 +30,12 @@ python -m pip install -e ".[data,train,eval]"
 | `chess-llm-sft-refresh` | `chess_llm.autodata.sft_refresh` | Convert judged failures into targeted SFT refresh rows. |
 | `chess-llm-r0-report` | `chess_llm.training.r0_gate` | Report R0 gate diagnostics. |
 
+`chess-llm-evaluate` and `chess-llm-train` both accept
+`--run-ledger PATH` and `--artifact-mirror-dir DIR`. The ledger receives one
+finalized evaluation-run JSON row per invocation; the mirror stores existing
+prediction, results, analysis, eval-run, and MultiPV cache files under
+`DIR/<eval_run_id>/`.
+
 ## Training
 
 | Command | Module | Purpose |

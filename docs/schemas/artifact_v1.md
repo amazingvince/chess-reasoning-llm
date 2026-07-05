@@ -151,10 +151,25 @@ guessing from file names.
   },
   "metadata": {
     "eval_run_path": "predictions.eval_run.json",
-    "prediction_analysis_path": "predictions.analysis.json"
+    "prediction_analysis_path": "predictions.analysis.json",
+    "run_ledger_path": "artifacts/evals/runs.jsonl",
+    "artifact_mirror_root": "artifacts/evals",
+    "artifact_mirror_dir": "artifacts/evals/eval-20260629T120000Z-abc12345",
+    "mirrored_artifacts": {
+      "predictions": "artifacts/evals/eval-20260629T120000Z-abc12345/predictions.jsonl",
+      "results": "artifacts/evals/eval-20260629T120000Z-abc12345/predictions.results.json",
+      "analysis": "artifacts/evals/eval-20260629T120000Z-abc12345/predictions.analysis.json",
+      "eval_run": "artifacts/evals/eval-20260629T120000Z-abc12345/predictions.eval_run.json"
+    }
   }
 }
 ```
+
+When `chess-llm-evaluate --run-ledger PATH` is used, the finalized
+`EvaluationRunArtifact` is appended to `PATH` as one JSONL row. When
+`--artifact-mirror-dir DIR` is used, existing prediction sidecars are copied to
+`DIR/<run_id>/`; the mirrored files include predictions, results, analysis,
+eval-run metadata, and the MultiPV SQLite cache when present.
 
 ## PreferencePairArtifact
 

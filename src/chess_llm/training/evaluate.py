@@ -50,6 +50,7 @@ import chess
 import chess.engine
 
 from chess_llm.artifacts.schemas import EvaluationRunArtifact
+from chess_llm.artifacts.eval_runs import finalize_evaluation_artifacts
 from chess_llm.evals.benchmark import (
     ACPL_INVALID_MOVE_PENALTY,
     BenchmarkExample,
@@ -182,6 +183,8 @@ class EvaluationConfig:
     max_examples_per_split: int | None = None
     splits: tuple[str, ...] | None = None
     full_benchmark: bool = False
+    run_ledger: Path | None = None
+    artifact_mirror_dir: Path | None = None
     stockfish_path: str = DEFAULT_STOCKFISH_PATH
     acpl_depth: int = 20
     no_acpl: bool = False
@@ -201,6 +204,10 @@ class EvaluationConfig:
     def __post_init__(self) -> None:
         self.benchmark_dir = Path(self.benchmark_dir)
         self.output = Path(self.output)
+        if self.run_ledger is not None:
+            self.run_ledger = Path(self.run_ledger)
+        if self.artifact_mirror_dir is not None:
+            self.artifact_mirror_dir = Path(self.artifact_mirror_dir)
         if self.baseline is not None:
             self.baseline = Path(self.baseline)
 
@@ -227,6 +234,8 @@ class EvaluationConfig:
             max_examples_per_split=args.max_examples_per_split,
             splits=tuple(args.splits) if args.splits else None,
             full_benchmark=args.full_benchmark,
+            run_ledger=getattr(args, "run_ledger", None),
+            artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
             stockfish_path=args.stockfish_path,
             acpl_depth=args.acpl_depth,
             no_acpl=args.no_acpl,
@@ -313,6 +322,10 @@ def _evaluation_run_artifact(
         "wandb_enabled": not config.no_wandb,
         "wandb_offline_allowed": config.allow_wandb_offline,
         "require_benchmark_manifest": config.require_benchmark_manifest,
+        "run_ledger_path": str(config.run_ledger) if config.run_ledger else None,
+        "artifact_mirror_root": (
+            str(config.artifact_mirror_dir) if config.artifact_mirror_dir else None
+        ),
     }
     if metadata:
         resolved_metadata.update(metadata)
@@ -392,11 +405,34 @@ def _write_evaluation_result_artifact(
     )
 
 
+def _finalize_evaluation_result_artifacts(
+    config: EvaluationConfig,
+    result: EvaluationResult,
+) -> None:
+    finalize_evaluation_artifacts(
+        result.eval_run_path,
+        ledger_path=config.run_ledger,
+        mirror_dir=config.artifact_mirror_dir,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate model on frozen benchmark")
     parser.add_argument("--model", required=True, help="HF model ID or local checkpoint path")
     parser.add_argument("--benchmark-dir", required=True, type=Path, help="Frozen benchmark directory")
     parser.add_argument("--output", required=True, type=Path, help="Output predictions JSONL path")
+    parser.add_argument(
+        "--run-ledger",
+        type=Path,
+        default=None,
+        help="Append the evaluation-run artifact to this JSONL ledger.",
+    )
+    parser.add_argument(
+        "--artifact-mirror-dir",
+        type=Path,
+        default=None,
+        help="Copy prediction/result/analysis/eval sidecars under this directory by run id.",
+    )
     parser.add_argument(
         "--inference-backend",
         choices=["transformers", "vllm"],
@@ -1706,6 +1742,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
             result,
             metadata={"error": "benchmark_dir_missing"},
         )
+        _finalize_evaluation_result_artifacts(args, result)
         return result
 
     # Primary generation is always greedy (deterministic) for reliable gating.
@@ -1766,6 +1803,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
             result,
             metadata={"error": "benchmark_empty"},
         )
+        _finalize_evaluation_result_artifacts(args, result)
         return result
 
     acpl_splits = _select_acpl_splits(args, split_examples)
@@ -1793,6 +1831,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
                 "messages": preflight_errors,
             },
         )
+        _finalize_evaluation_result_artifacts(args, result)
         return result
 
     wandb_error = wandb_config_error(
@@ -1815,6 +1854,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
                 "message": wandb_error,
             },
         )
+        _finalize_evaluation_result_artifacts(args, result)
         return result
 
     # Load inference backend only after validating that there is work to run.
@@ -2058,6 +2098,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         sample_temperature=sample_temperature,
         metadata={"prediction_analysis_path": str(prediction_analysis_path)},
     )
+    _finalize_evaluation_result_artifacts(args, result)
     logger.info("Saved evaluation run metadata to %s", result.eval_run_path)
 
     _maybe_log_to_wandb(

@@ -92,6 +92,18 @@ def parse_args() -> argparse.Namespace:
         help=f"Frozen benchmark directory (default: {DEFAULT_BENCHMARK_DIR})",
     )
     parser.add_argument(
+        "--run-ledger",
+        type=Path,
+        default=None,
+        help="Append post-training/eval-only evaluation metadata to this JSONL ledger.",
+    )
+    parser.add_argument(
+        "--artifact-mirror-dir",
+        type=Path,
+        default=None,
+        help="Mirror evaluation artifacts under this directory by eval run id.",
+    )
+    parser.add_argument(
         "--base-model",
         type=str,
         default=None,
@@ -675,6 +687,8 @@ def main() -> int:
             eval_acpl_depth=args.eval_acpl_depth,
             no_acpl=args.no_acpl,
             full_acpl_report=args.full_acpl_report,
+            run_ledger=getattr(args, "run_ledger", None),
+            artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
             soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
             full_benchmark=eval_full_benchmark,
@@ -909,6 +923,8 @@ def main() -> int:
             eval_acpl_depth=args.eval_acpl_depth,
             no_acpl=args.no_acpl,
             full_acpl_report=args.full_acpl_report,
+            run_ledger=getattr(args, "run_ledger", None),
+            artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
             soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
             full_benchmark=eval_full_benchmark,
@@ -1786,6 +1802,8 @@ def _run_eval(
     eval_acpl_depth: int = 20,
     no_acpl: bool = False,
     full_acpl_report: bool = False,
+    run_ledger: Path | None = None,
+    artifact_mirror_dir: Path | None = None,
     soft_gate: bool = False,
     max_examples_per_split: int | None = None,
     full_benchmark: bool = False,
@@ -1815,6 +1833,8 @@ def _run_eval(
         eval_acpl_depth=eval_acpl_depth,
         no_acpl=no_acpl,
         full_acpl_report=full_acpl_report,
+        run_ledger=run_ledger,
+        artifact_mirror_dir=artifact_mirror_dir,
         soft_gate=soft_gate,
         max_examples_per_split=max_examples_per_split,
         full_benchmark=full_benchmark,
@@ -1845,6 +1865,8 @@ def _build_eval_cmd(
     eval_acpl_depth: int = 20,
     no_acpl: bool = False,
     full_acpl_report: bool = False,
+    run_ledger: Path | None = None,
+    artifact_mirror_dir: Path | None = None,
     report_only: bool = False,
     soft_gate: bool = False,
     max_examples_per_split: int | None = None,
@@ -1879,6 +1901,10 @@ def _build_eval_cmd(
         cmd.append("--no-acpl")
     if full_acpl_report:
         cmd.append("--full-acpl-report")
+    if run_ledger is not None:
+        cmd.extend(["--run-ledger", str(run_ledger)])
+    if artifact_mirror_dir is not None:
+        cmd.extend(["--artifact-mirror-dir", str(artifact_mirror_dir)])
     if report_only:
         cmd.append("--report-only")
     if soft_gate:

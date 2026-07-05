@@ -1218,6 +1218,74 @@ def test_run_evaluation_returns_structured_result_without_cli_parsing(
     assert eval_run["metadata"]["prediction_analysis_path"] == str(analysis_path)
 
 
+def test_run_evaluation_appends_run_ledger_and_mirrors_artifacts(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+    from chess_llm.training.eval_exit_codes import EVAL_SUCCESS_EXIT_CODE
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "predictions.jsonl"
+    ledger_path = tmp_path / "ledger" / "runs.jsonl"
+    mirror_dir = tmp_path / "mirror"
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: ("model", "tokenizer"),
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda _path, **_kwargs: [_benchmark_example()],
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "generate_predictions_transformers",
+        lambda *_args, **_kwargs: {
+            "planning_00000": [
+                "<think>claim the center</think><move>e2e4</move>",
+            ],
+        },
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=output_path,
+            max_new_tokens=32,
+            batch_size=1,
+            no_acpl=True,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+            run_ledger=ledger_path,
+            artifact_mirror_dir=mirror_dir,
+        )
+    )
+
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    run_id = rows[0]["run_id"]
+    mirrored = rows[0]["metadata"]["mirrored_artifacts"]
+
+    assert result.return_code == EVAL_SUCCESS_EXIT_CODE
+    assert len(rows) == 1
+    assert rows[0]["results_path"] == str(result.results_path)
+    assert rows[0]["metadata"]["artifact_mirror_dir"] == str(mirror_dir / run_id)
+    assert Path(mirrored["predictions"]).exists()
+    assert Path(mirrored["results"]).exists()
+    assert Path(mirrored["analysis"]).exists()
+    assert Path(mirrored["eval_run"]).exists()
+
+
 def test_planning_legal_move_rate_counts_tagless_predictions_as_zero(
     monkeypatch,
     tmp_path,
