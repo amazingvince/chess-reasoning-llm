@@ -74,6 +74,26 @@ def _tactical_theme_phrases(themes: list[str]) -> list[str]:
     ]
 
 
+def _color_name(color: chess.Color) -> str:
+    return "white" if color == chess.WHITE else "black"
+
+
+def _piece_description(piece: chess.Piece | None) -> str:
+    if piece is None:
+        return "empty"
+    return f"{_color_name(piece.color)} {_PIECE_NAMES[piece.piece_type]}"
+
+
+def _format_piece_list(board: chess.Board, squares: list[int]) -> str:
+    if not squares:
+        return "none"
+    return ", ".join(
+        f"{_PIECE_NAMES[board.piece_at(square).piece_type]} on {chess.square_name(square)}"
+        for square in squares
+        if board.piece_at(square) is not None
+    )
+
+
 class AvailableCaptures(TaskGenerator):
     """Task 3.1: List all capture moves."""
 
@@ -204,49 +224,54 @@ class AttackedDefended(TaskGenerator):
             if board is None:
                 continue
 
-            # Pick a random square that has a piece or is interesting
+            # Pick a square probe from this position.
             sq = self.rng.choice(chess.SQUARES)
             square_name = chess.square_name(sq)
             piece = board.piece_at(sq)
-            piece_name = _PIECE_NAMES.get(piece.piece_type, "piece") if piece else "square"
 
-            white_attackers = board.attackers(chess.WHITE, sq)
-            black_attackers = board.attackers(chess.BLACK, sq)
-            w_count = len(white_attackers)
-            b_count = len(black_attackers)
+            white_attackers = sorted(board.attackers(chess.WHITE, sq))
+            black_attackers = sorted(board.attackers(chess.BLACK, sq))
+            defenders = sorted(board.attackers(piece.color, sq)) if piece else []
+            defender_text = _format_piece_list(board, defenders) if piece else "not applicable"
+            occupant = _piece_description(piece)
 
-            w_pieces = [
-                f"{_PIECE_NAMES[board.piece_at(s).piece_type]} on {chess.square_name(s)}"
-                for s in white_attackers if board.piece_at(s)
-            ]
-            b_pieces = [
-                f"{_PIECE_NAMES[board.piece_at(s).piece_type]} on {chess.square_name(s)}"
-                for s in black_attackers if board.piece_at(s)
-            ]
-
-            parts = []
-            if w_count > 0:
-                parts.append(f"Attacked by white ({w_count}): {', '.join(w_pieces)}.")
-            if b_count > 0:
-                parts.append(f"Attacked by black ({b_count}): {', '.join(b_pieces)}.")
-            if not parts:
-                parts.append(f"Square {square_name} is not attacked by either side.")
-
-            # Defense: if a piece is on the square, note its defenders
-            if piece:
-                defenders = board.attackers(piece.color, sq)
-                if defenders:
-                    d_pieces = [
-                        f"{_PIECE_NAMES[board.piece_at(s).piece_type]} on {chess.square_name(s)}"
-                        for s in defenders if board.piece_at(s)
-                    ]
-                    color_name = "white" if piece.color == chess.WHITE else "black"
-                    parts.append(f"Defended by {color_name} ({len(d_pieces)}): {', '.join(d_pieces)}.")
-                else:
-                    parts.append(f"The {piece_name} on {square_name} is not defended.")
-
-            answer = " ".join(parts)
-            raw.update({"square": square_name, "piece": piece_name})
+            answer = "\n".join(
+                [
+                    f"Square: {square_name}",
+                    f"Occupant: {occupant}",
+                    f"White attackers ({len(white_attackers)}): {_format_piece_list(board, white_attackers)}",
+                    f"Black attackers ({len(black_attackers)}): {_format_piece_list(board, black_attackers)}",
+                    f"Defenders ({len(defenders)}): {defender_text}",
+                ]
+            )
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source": "attacked_defended",
+                    "query_square": square_name,
+                    "occupant": occupant,
+                    "white_attacker_count": len(white_attackers),
+                    "black_attacker_count": len(black_attackers),
+                    "defender_count": len(defenders),
+                    "white_attackers": [
+                        chess.square_name(square) for square in white_attackers
+                    ],
+                    "black_attackers": [
+                        chess.square_name(square) for square in black_attackers
+                    ],
+                    "defenders": [
+                        chess.square_name(square) for square in defenders
+                    ],
+                }
+            )
+            raw.update(
+                {
+                    "square": square_name,
+                    "query_square": square_name,
+                    "piece": occupant,
+                    "metadata": metadata,
+                }
+            )
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)

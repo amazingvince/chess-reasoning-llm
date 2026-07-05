@@ -206,6 +206,12 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'one line per side-to-move piece with "pseudo-legal ... | rejected ... '
         '| legal ..." fields, and "All legal moves:".'
     ),
+    "3.3_attacked_defended": (
+        'Answer format: return exactly five lines: "Square: <square>", '
+        '"Occupant: <empty|color piece>", "White attackers (<n>): <pieces|none>", '
+        '"Black attackers (<n>): <pieces|none>", and '
+        '"Defenders (<n>): <pieces|none|not applicable>".'
+    ),
     "3.6_hanging_piece_status": (
         'Answer format: return exactly four lines: "Piece: <color> <piece> on <square>", '
         '"Attacked: yes|no", "Defended: yes|no", and "Hanging: yes|no".'

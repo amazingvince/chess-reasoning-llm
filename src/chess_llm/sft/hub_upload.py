@@ -59,7 +59,7 @@ TASK_DESCRIPTIONS = {
     "2.11_legal_filter_trace": "Filter every piece's pseudo-legal moves into rejected and legal moves",
     "3.1_available_captures": "Find available capture moves",
     "3.2_threats": "Identify pieces that are threatening enemy pieces",
-    "3.3_attacked_defended": "Determine attacked or defended squares",
+    "3.3_attacked_defended": "Count attackers and defenders of a queried square",
     "3.4_tactical_patterns": "Recognize tactical motifs",
     "3.5_hanging_pieces": "Find undefended pieces that can be captured",
     "3.6_hanging_piece_status": "Classify whether one piece is attacked, defended, and hanging",

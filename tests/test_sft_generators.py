@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from random import Random
 
+import chess
+
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -1448,6 +1450,56 @@ def test_package_tactical_patterns_filter_and_humanize_themes():
     assert rows[1]["messages"][2]["content"] == (
         "The tactic is tactical. Best move: d2d4"
     )
+
+
+def test_package_attacked_defended_uses_fixed_count_grammar(monkeypatch):
+    from chess_llm.sft.generators.tier3_tactics import AttackedDefended
+
+    class ChooseE2:
+        def choice(self, _items):
+            return chess.E2
+
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier3_tactics.select_template",
+        lambda _task_id, _rng: "FEN: {fen}\nAnalyze attackers and defenders of {square}.",
+    )
+
+    rows = list(
+        AttackedDefended(
+            config={
+                "fen_pool": ["4k3/8/8/8/4r3/8/4Q3/4K3 w - - 0 1"],
+                "volume_override": 1,
+            },
+            rng=ChooseE2(),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["messages"][2]["content"] == (
+        "Square: e2\n"
+        "Occupant: white queen\n"
+        "White attackers (1): king on e1\n"
+        "Black attackers (1): rook on e4\n"
+        "Defenders (1): king on e1"
+    )
+    assert "White attackers" in rows[0]["messages"][1]["content"]
+    assert rows[0]["metadata"]["query_square"] == "e2"
+    assert rows[0]["metadata"]["white_attacker_count"] == 1
+    assert rows[0]["metadata"]["black_attacker_count"] == 1
+    assert rows[0]["metadata"]["defender_count"] == 1
+
+
+def test_package_attacked_defended_registered_with_fixed_contract():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier3_tactics import AttackedDefended
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.templates import ANSWER_CONTRACTS
+
+    assert AttackedDefended in pipeline.TIER_GENERATORS[3]
+    assert "White attackers" in ANSWER_CONTRACTS["3.3_attacked_defended"]
+    assert TASK_IDENTITY_FIELDS["3.3_attacked_defended"] == ("query_square",)
+    assert TASK_DESCRIPTIONS["3.3_attacked_defended"]
 
 
 def test_package_hanging_piece_status_teaches_attacked_defended_conjunction(monkeypatch):

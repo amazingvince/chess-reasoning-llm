@@ -40,6 +40,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "2.9_legal_moves_by_piece": (),
     "2.10_ray_walk": ("source_square",),
     "2.11_legal_filter_trace": (),
+    "3.3_attacked_defended": ("query_square",),
     "3.6_hanging_piece_status": ("query_square",),
     "3.8_hanging_piece_claim_verification": (
         "verification_claim",
