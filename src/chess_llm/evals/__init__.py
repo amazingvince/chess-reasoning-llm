@@ -1,5 +1,6 @@
 """Evaluation interfaces for static benchmarks and arenas."""
 
+from chess_llm.evals import compare_predictions
 from chess_llm.evals.batch_judge import BatchJudgeResult, judge_prediction_file
 from chess_llm.evals.benchmark import (
     BenchmarkExample,
@@ -26,6 +27,7 @@ __all__ = [
     "BenchmarkExample",
     "EvalResult",
     "benchmark_row_to_prompt",
+    "compare_predictions",
     "derive_gold_answer",
     "evaluate_split",
     "freeze_and_save",

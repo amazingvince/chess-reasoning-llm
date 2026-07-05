@@ -67,6 +67,7 @@ vllm = [
 [project.scripts]
 chess-llm-batch-judge = "chess_llm.evals.batch_judge:main"
 chess-llm-build-candidate-ratings = "chess_llm.sft.candidate_ratings:main"
+chess-llm-compare-predictions = "chess_llm.evals.compare_predictions:main"
 chess-llm-download-tablebases = "chess_llm.sft.download_tablebases:main"
 chess-llm-evaluate = "chess_llm.training.evaluate:main"
 chess-llm-export-vllm = "chess_llm.training.vllm_export:main"
