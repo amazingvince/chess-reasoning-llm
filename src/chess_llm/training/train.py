@@ -376,6 +376,43 @@ def _training_torch_dtype(pure_bf16: bool) -> str:
     return "auto" if pure_bf16 else "float32"
 
 
+def _training_launcher_preflight_error(torch_module: Any | None = None) -> str | None:
+    """Return an error when multiple GPUs are visible outside torchrun."""
+    if torch_module is None:
+        try:
+            import torch as torch_module
+        except Exception:
+            return None
+
+    cuda = getattr(torch_module, "cuda", None)
+    is_available = getattr(cuda, "is_available", None) if cuda is not None else None
+    device_count_fn = getattr(cuda, "device_count", None) if cuda is not None else None
+    if not callable(is_available) or not callable(device_count_fn) or not is_available():
+        return None
+
+    device_count = int(device_count_fn())
+    if device_count <= 1:
+        return None
+
+    world_size_text = os.environ.get("WORLD_SIZE", "1")
+    try:
+        world_size = int(world_size_text)
+    except ValueError:
+        world_size = 1
+    local_rank = os.environ.get("LOCAL_RANK")
+    if world_size > 1 and local_rank is not None:
+        return None
+
+    return (
+        f"{device_count} CUDA devices are visible, but this process was not "
+        "launched by torchrun. Refusing single-process multi-GPU training "
+        "because it can fall into DataParallel and crash or silently diverge "
+        "under flash-attention kernels. Relaunch with "
+        f"`torchrun --nproc_per_node={device_count} -m chess_llm.training.train ...` "
+        "or set CUDA_VISIBLE_DEVICES to a single GPU."
+    )
+
+
 def _float_metric(value: Any) -> float | None:
     try:
         return float(value)
@@ -590,6 +627,12 @@ def main() -> int:
         logger.error(wandb_error)
         return EVAL_INFRA_FAILURE_EXIT_CODE
 
+    if not args.eval_only:
+        launcher_error = _training_launcher_preflight_error()
+        if launcher_error is not None:
+            logger.error(launcher_error)
+            return EVAL_INFRA_FAILURE_EXIT_CODE
+
     if not args.eval_only and not args.skip_eval:
         preflight_error = _post_training_eval_preflight_error(
             args.benchmark_dir,
@@ -791,6 +834,10 @@ def main() -> int:
         return EVAL_INFRA_FAILURE_EXIT_CODE
     if resume_checkpoint is not None:
         logger.info("Resuming training from checkpoint: %s", resume_checkpoint)
+        resume_key_error = _resume_checkpoint_model_key_error(model, resume_checkpoint)
+        if resume_key_error is not None:
+            logger.error(resume_key_error)
+            return EVAL_INFRA_FAILURE_EXIT_CODE
 
     # --- Train ---
     logger.info("Starting training...")
@@ -1115,6 +1162,71 @@ def _resolve_resume_checkpoint(output_dir: Path, requested: str | None) -> str |
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Resume checkpoint is not a directory: {checkpoint}")
     return str(checkpoint)
+
+
+def _resume_checkpoint_model_key_error(model: Any, resume_checkpoint: str | None) -> str | None:
+    """Return an error when resume checkpoint weights do not match the model."""
+    if resume_checkpoint is None:
+        return None
+    checkpoint_keys = _checkpoint_model_keys(Path(resume_checkpoint))
+    if checkpoint_keys is None:
+        logger.warning(
+            "Could not inspect model keys for resume checkpoint %s; "
+            "falling back to Trainer resume loading.",
+            resume_checkpoint,
+        )
+        return None
+
+    model_keys = {str(key) for key in model.state_dict()}
+    missing = sorted(model_keys.difference(checkpoint_keys))
+    unexpected = sorted(checkpoint_keys.difference(model_keys))
+    if not missing and not unexpected:
+        return None
+
+    parts = [
+        "Resume checkpoint model keys do not match the loaded model; refusing "
+        "to call Trainer.train(resume_from_checkpoint=...) because Transformers "
+        "can otherwise downgrade this into a misleading fresh start.",
+        f"{len(missing)} missing model key(s)",
+        f"{len(unexpected)} unexpected checkpoint key(s)",
+    ]
+    if missing:
+        parts.append(f"first missing model key: {missing[0]}")
+    if unexpected:
+        parts.append(f"first unexpected checkpoint key: {unexpected[0]}")
+    return "; ".join(parts)
+
+
+def _checkpoint_model_keys(checkpoint: Path) -> set[str] | None:
+    """Read model weight names without loading tensor payloads when possible."""
+    for index_name in (
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    ):
+        index_path = checkpoint / index_name
+        if not index_path.exists():
+            continue
+        with index_path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+        weight_map = payload.get("weight_map")
+        if isinstance(weight_map, dict):
+            return {str(key) for key in weight_map}
+
+    safetensor_paths = sorted(checkpoint.glob("model*.safetensors"))
+    if not safetensor_paths:
+        return None
+
+    try:
+        from safetensors import safe_open
+    except Exception:
+        logger.warning("safetensors is unavailable; cannot inspect %s", checkpoint)
+        return None
+
+    keys: set[str] = set()
+    for path in safetensor_paths:
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            keys.update(str(key) for key in handle.keys())
+    return keys
 
 
 def _find_latest_trainer_checkpoint(output_dir: Path) -> Path | None:

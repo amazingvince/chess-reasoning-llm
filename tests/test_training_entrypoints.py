@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
 import logging
 from argparse import Namespace
 from pathlib import Path
@@ -705,6 +706,90 @@ def test_resolve_resume_checkpoint_rejects_missing_path(tmp_path: Path):
         assert str(missing) in str(exc)
     else:
         raise AssertionError("missing resume checkpoint should fail")
+
+
+def test_training_launcher_preflight_rejects_multi_gpu_without_torchrun(monkeypatch):
+    from chess_llm.training import train
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 2,
+        ),
+    )
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+
+    error = train._training_launcher_preflight_error(torch_module=fake_torch)
+
+    assert error is not None
+    assert "torchrun --nproc_per_node=2" in error
+
+
+def test_training_launcher_preflight_allows_torchrun_multi_gpu(monkeypatch):
+    from chess_llm.training import train
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 2,
+        ),
+    )
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+
+    assert train._training_launcher_preflight_error(torch_module=fake_torch) is None
+
+
+def test_resume_checkpoint_model_key_mismatch_is_a_hard_error(tmp_path: Path):
+    from chess_llm.training import train
+
+    checkpoint = tmp_path / "checkpoint-100"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {},
+                "weight_map": {
+                    "model.language_model.layers.0.weight": "model-00001-of-00001.safetensors",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = types.SimpleNamespace(
+        state_dict=lambda: {"model.layers.0.weight": object()},
+    )
+
+    error = train._resume_checkpoint_model_key_error(model, str(checkpoint))
+
+    assert error is not None
+    assert "missing model key" in error
+    assert "unexpected checkpoint key" in error
+    assert "model.language_model.layers.0.weight" in error
+
+
+def test_resume_checkpoint_model_key_match_is_allowed(tmp_path: Path):
+    from chess_llm.training import train
+
+    checkpoint = tmp_path / "checkpoint-100"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {},
+                "weight_map": {
+                    "model.layers.0.weight": "model-00001-of-00001.safetensors",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = types.SimpleNamespace(
+        state_dict=lambda: {"model.layers.0.weight": object()},
+    )
+
+    assert train._resume_checkpoint_model_key_error(model, str(checkpoint)) is None
 
 
 def test_package_train_eval_command_supports_full_benchmark_override(tmp_path: Path):
