@@ -1154,6 +1154,40 @@ def test_package_scoring_metrics_cover_move_protocol_and_acpl():
     assert aggregate["overall"] == 1.0
 
 
+def test_package_centipawn_loss_clamps_tail_values():
+    assert packaged.ACPL_CP_LOSS_CLAMP == 1000.0
+    assert packaged.ACPL_INVALID_MOVE_PENALTY == 1000.0
+    assert packaged.centipawn_loss(12000.0, -5000.0) == 1000.0
+    assert packaged.centipawn_loss(120.0, 20.0) == 100.0
+    assert packaged.centipawn_loss(-20.0, 120.0) == 0.0
+
+
+def test_package_score_split_reports_acpl_distribution_stats():
+    examples = [_example(example_id=f"planning_{index:05d}") for index in range(5)]
+    prediction = "<think>control center</think><move>e2e4</move>"
+
+    aggregate = packaged.score_split(
+        examples,
+        {example.example_id: prediction for example in examples},
+        acpl_scores={
+            examples[0].example_id: 0.0,
+            examples[1].example_id: 10.0,
+            examples[2].example_id: 100.0,
+            examples[3].example_id: 400.0,
+            examples[4].example_id: 1000.0,
+        },
+    )
+
+    assert aggregate["best_move_acpl"] == 302.0
+    assert aggregate["best_move_acpl_median"] == 100.0
+    assert aggregate["best_move_acpl_p90"] == 1000.0
+    assert aggregate["best_move_acpl_p95"] == 1000.0
+    assert aggregate["acpl"] == 302.0
+    assert aggregate["acpl_median"] == 100.0
+    assert aggregate["acpl_p90"] == 1000.0
+    assert aggregate["acpl_p95"] == 1000.0
+
+
 def test_package_score_split_reports_wpd_diagnostics():
     example = _example()
     prediction = "<think>control center</think><move>e2e4</move>"

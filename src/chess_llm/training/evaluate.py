@@ -51,6 +51,7 @@ import chess.engine
 
 from chess_llm.artifacts.schemas import EvaluationRunArtifact
 from chess_llm.evals.benchmark import (
+    ACPL_INVALID_MOVE_PENALTY,
     BenchmarkExample,
     _UCI_RE,
     _extract_canonical_fen,
@@ -80,8 +81,6 @@ DEFAULT_STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH") or shutil.which("stock
 _MOVE_TASK_TYPES = frozenset({
     "best_move", "puzzle_solve", "best_line_trace", "endgame_best_move",
 })
-
-_ACPL_INVALID_MOVE_PENALTY = 150.0
 
 PHASE_DEFAULT_BENCHMARK_SPLITS: dict[str, tuple[str, ...]] = {
     "a": ("perception", "rules"),
@@ -1198,7 +1197,7 @@ def compute_acpl(
         if uci is None:
             # No valid move tag — apply penalty
             missing_move += 1
-            acpl_scores[ex.example_id] = _ACPL_INVALID_MOVE_PENALTY
+            acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
         try:
@@ -1206,11 +1205,11 @@ def compute_acpl(
             move = chess.Move.from_uci(uci)
             if uci not in {legal_move.uci() for legal_move in board.legal_moves}:
                 illegal_move += 1
-                acpl_scores[ex.example_id] = _ACPL_INVALID_MOVE_PENALTY
+                acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
                 continue
         except Exception:
             illegal_move += 1
-            acpl_scores[ex.example_id] = _ACPL_INVALID_MOVE_PENALTY
+            acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
         best_cache_key = (ex.fen, chess960)
@@ -1235,7 +1234,7 @@ def compute_acpl(
         if predicted_cp is None:
             # Illegal move — apply penalty
             illegal_move += 1
-            acpl_scores[ex.example_id] = _ACPL_INVALID_MOVE_PENALTY
+            acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
         acpl_scores[ex.example_id] = centipawn_loss(float(best_cp), float(predicted_cp))

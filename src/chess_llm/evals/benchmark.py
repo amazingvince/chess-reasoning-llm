@@ -374,6 +374,9 @@ _STATE_TRACKING_MAX_PLIES = 1
 _MULTI_STATE_TRACKING_MIN_PLIES = 2
 _MULTI_STATE_TRACKING_MAX_PLIES = 3
 
+ACPL_CP_LOSS_CLAMP = 1000.0
+ACPL_INVALID_MOVE_PENALTY = ACPL_CP_LOSS_CLAMP
+
 
 def _append_full_fen_state(user_text: str, context: dict) -> str:
     """Append non-board FEN fields so full-FEN prompts are answerable."""
@@ -1131,9 +1134,15 @@ def pass_at_k(predictions: list[str], gold_move: str) -> float:
     return 0.0
 
 
-def centipawn_loss(gold_cp: float, predicted_cp: float) -> float:
-    """Centipawn loss when both scores use the same perspective."""
-    return max(0.0, gold_cp - predicted_cp)
+def centipawn_loss(
+    gold_cp: float,
+    predicted_cp: float,
+    *,
+    clamp: float = ACPL_CP_LOSS_CLAMP,
+) -> float:
+    """Bounded centipawn loss when both scores use the same perspective."""
+    loss = max(0.0, gold_cp - predicted_cp)
+    return min(float(clamp), loss)
 
 
 def threat_f1(prediction: str, gold: str) -> float:
@@ -1577,7 +1586,7 @@ def score_split(
             result[key] = sum(values) / len(values)
     for task_type, values in task_acpl.items():
         if values:
-            result[f"{task_type}_acpl"] = sum(values) / len(values)
+            _append_acpl_summary(result, f"{task_type}_acpl", values)
     for task_type, metrics in task_wpd.items():
         for key, values in metrics.items():
             if not values:
@@ -1586,7 +1595,7 @@ def score_split(
 
     all_acpl = [value for values in task_acpl.values() for value in values]
     if all_acpl:
-        result["acpl"] = sum(all_acpl) / len(all_acpl)
+        _append_acpl_summary(result, "acpl", all_acpl)
     all_wpd = [
         value
         for metrics in task_wpd.values()
@@ -1606,6 +1615,32 @@ def score_split(
     if all_primary:
         result["overall"] = sum(all_primary) / len(all_primary)
     return result
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _nearest_rank(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        raise ValueError("percentile requires at least one value")
+    ordered = sorted(float(value) for value in values)
+    rank = math.ceil((percentile / 100.0) * len(ordered))
+    index = min(max(rank - 1, 0), len(ordered) - 1)
+    return ordered[index]
+
+
+def _append_acpl_summary(
+    result: dict[str, float],
+    prefix: str,
+    values: list[float],
+) -> None:
+    if not values:
+        return
+    result[prefix] = _mean(values)
+    result[f"{prefix}_median"] = _nearest_rank(values, 50.0)
+    result[f"{prefix}_p90"] = _nearest_rank(values, 90.0)
+    result[f"{prefix}_p95"] = _nearest_rank(values, 95.0)
 
 
 def _append_wpd_metrics(

@@ -177,6 +177,35 @@ def test_run_benchmark_package_acpl_accepts_chess960_id():
     assert scores["chess960_00000"] == 0.0
 
 
+def test_run_benchmark_acpl_invalid_move_uses_shared_clamp():
+    from chess_llm.evals import run_benchmark
+    from chess_llm.evals.benchmark import ACPL_INVALID_MOVE_PENALTY
+
+    class FakeEngine:
+        def analyse(self, _board, _limit):
+            raise AssertionError("invalid moves should not call Stockfish")
+
+    example = BenchmarkExample(
+        example_id="planning_00000",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={"cp": 23},
+    )
+
+    scores = run_benchmark.compute_acpl(
+        FakeEngine(),
+        [example],
+        {"planning_00000": "no move tag"},
+        depth=1,
+    )
+
+    assert scores["planning_00000"] == ACPL_INVALID_MOVE_PENALTY
+
+
 def test_run_benchmark_cli_writes_prediction_analysis_report(tmp_path):
     from chess_llm.evals import run_benchmark
 

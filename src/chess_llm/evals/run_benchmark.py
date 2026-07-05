@@ -13,6 +13,7 @@ import chess
 import chess.engine
 
 from chess_llm.evals.benchmark import (
+    ACPL_INVALID_MOVE_PENALTY,
     BenchmarkExample,
     centipawn_loss,
     example_is_chess960,
@@ -34,7 +35,6 @@ _MOVE_TASK_TYPES = frozenset({
     "best_line_trace",
     "endgame_best_move",
 })
-_ACPL_INVALID_MOVE_PENALTY = 150.0
 
 
 def load_predictions(
@@ -138,10 +138,7 @@ def compute_acpl(
         prediction = flat_preds.get(example.example_id, "")
         uci = extract_move(prediction)
         if uci is None:
-            acpl_scores[example.example_id] = max(
-                _ACPL_INVALID_MOVE_PENALTY,
-                min(abs(gold_cp), 500.0),
-            )
+            acpl_scores[example.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
         predicted_cp = evaluate_predicted_move(
@@ -152,10 +149,7 @@ def compute_acpl(
             chess960=chess960,
         )
         if predicted_cp is None:
-            acpl_scores[example.example_id] = max(
-                _ACPL_INVALID_MOVE_PENALTY,
-                min(abs(gold_cp), 500.0),
-            )
+            acpl_scores[example.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
         gold_side_cp = white_cp_to_side_to_move_cp(

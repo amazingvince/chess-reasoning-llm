@@ -1045,6 +1045,52 @@ def test_compute_wpd_scores_multiple_samples_per_prompt(monkeypatch, tmp_path):
     assert scores[example.example_id][2]["reward_bucket"] == "missing_move"
 
 
+def test_compute_acpl_uses_shared_clamp_for_invalid_and_tail_losses(monkeypatch):
+    from chess_llm.evals.benchmark import ACPL_INVALID_MOVE_PENALTY
+    from chess_llm.training import evaluate
+
+    invalid = BenchmarkExample(
+        example_id="planning_00000",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={},
+    )
+    tail = BenchmarkExample(
+        example_id="planning_00001",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={},
+    )
+
+    monkeypatch.setattr(evaluate, "_evaluate_position", lambda *_args, **_kwargs: 10000)
+    monkeypatch.setattr(
+        evaluate,
+        "_evaluate_predicted_move",
+        lambda *_args, **_kwargs: -10000,
+    )
+
+    scores = evaluate.compute_acpl(
+        object(),
+        [invalid, tail],
+        {
+            invalid.example_id: "no move tag",
+            tail.example_id: "<move>e2e4</move>",
+        },
+        depth=1,
+    )
+
+    assert scores[invalid.example_id] == ACPL_INVALID_MOVE_PENALTY
+    assert scores[tail.example_id] == ACPL_INVALID_MOVE_PENALTY
+
+
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):
     from chess_llm.training import evaluate
 
