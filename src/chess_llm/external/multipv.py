@@ -138,6 +138,80 @@ class SqliteMultipvCache:
                 ),
             )
 
+    def get_scalar_evaluation(
+        self,
+        *,
+        kind: str,
+        fen: str,
+        chess960: bool,
+        depth: int,
+        move_uci: str | None = None,
+        pov: str = "side_to_move",
+        engine_config: Mapping[str, Any] | None = None,
+    ) -> tuple[bool, int | None]:
+        """Return ``(hit, cp)`` for a cached scalar Stockfish evaluation."""
+        key = self._scalar_key(
+            kind=kind,
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=move_uci,
+            pov=pov,
+            engine_config=engine_config,
+        )
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT cp FROM scalar_evaluations WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return False, None
+        return True, int(row[0]) if row[0] is not None else None
+
+    def put_scalar_evaluation(
+        self,
+        *,
+        kind: str,
+        fen: str,
+        chess960: bool,
+        depth: int,
+        cp: int | None,
+        move_uci: str | None = None,
+        pov: str = "side_to_move",
+        engine_config: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Cache one scalar Stockfish evaluation."""
+        key = self._scalar_key(
+            kind=kind,
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=move_uci,
+            pov=pov,
+            engine_config=engine_config,
+        )
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scalar_evaluations
+                    (cache_key, kind, fen, chess960, depth, move_uci, pov,
+                     engine_config, cp, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    kind,
+                    fen,
+                    int(chess960),
+                    int(depth),
+                    move_uci,
+                    pov,
+                    _stable_json(engine_config or {}),
+                    cp,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
     def _init_db(self) -> None:
         with sqlite3.connect(self.path) as conn:
             conn.execute(
@@ -151,6 +225,22 @@ class SqliteMultipvCache:
                     pv_len INTEGER NOT NULL,
                     engine_config TEXT NOT NULL,
                     payload TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scalar_evaluations (
+                    cache_key TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    fen TEXT NOT NULL,
+                    chess960 INTEGER NOT NULL,
+                    depth INTEGER NOT NULL,
+                    move_uci TEXT,
+                    pov TEXT NOT NULL,
+                    engine_config TEXT NOT NULL,
+                    cp INTEGER,
                     created_at_utc TEXT NOT NULL
                 )
                 """
@@ -173,6 +263,29 @@ class SqliteMultipvCache:
             "depth": int(depth),
             "k": int(k),
             "pv_len": int(pv_len),
+            "engine_config": engine_config or {},
+        }
+        return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+    def _scalar_key(
+        self,
+        *,
+        kind: str,
+        fen: str,
+        chess960: bool,
+        depth: int,
+        move_uci: str | None = None,
+        pov: str = "side_to_move",
+        engine_config: Mapping[str, Any] | None = None,
+    ) -> str:
+        payload = {
+            "version": _CACHE_VERSION,
+            "kind": kind,
+            "fen": fen,
+            "chess960": bool(chess960),
+            "depth": int(depth),
+            "move_uci": move_uci,
+            "pov": pov,
             "engine_config": engine_config or {},
         }
         return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()

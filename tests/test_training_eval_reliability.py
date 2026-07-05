@@ -6,6 +6,7 @@ import types
 from argparse import Namespace
 from pathlib import Path
 
+import chess
 import pytest
 
 from chess_llm.evals.benchmark import BenchmarkExample
@@ -1089,6 +1090,57 @@ def test_compute_acpl_uses_shared_clamp_for_invalid_and_tail_losses(monkeypatch)
 
     assert scores[invalid.example_id] == ACPL_INVALID_MOVE_PENALTY
     assert scores[tail.example_id] == ACPL_INVALID_MOVE_PENALTY
+
+
+def test_compute_acpl_reuses_sqlite_score_cache_between_runs(tmp_path):
+    from chess_llm.training import evaluate
+
+    class FakeEngine:
+        def __init__(self):
+            self.calls = 0
+
+        def analyse(self, board, _limit):
+            self.calls += 1
+            cp = 100 if not board.move_stack else 40
+            return {
+                "score": chess.engine.PovScore(chess.engine.Cp(cp), chess.WHITE),
+            }
+
+    class FailingEngine:
+        def analyse(self, _board, _limit):
+            raise AssertionError("cached ACPL should not call the engine")
+
+    example = BenchmarkExample(
+        example_id="planning_00000",
+        split="planning",
+        task_type="best_move",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="e2e4",
+        metric_type="move_extraction",
+        metadata={},
+    )
+    cache_path = tmp_path / "eval_cache.sqlite"
+    first_engine = FakeEngine()
+
+    first = evaluate.compute_acpl(
+        first_engine,
+        [example],
+        {example.example_id: "<move>e2e4</move>"},
+        depth=1,
+        cache_path=cache_path,
+    )
+    second = evaluate.compute_acpl(
+        FailingEngine(),
+        [example],
+        {example.example_id: "<move>e2e4</move>"},
+        depth=1,
+        cache_path=cache_path,
+    )
+
+    assert first == {example.example_id: 60.0}
+    assert second == first
+    assert first_engine.calls == 2
 
 
 def test_prediction_analysis_report_classifies_fen_row_rewrite_trace(tmp_path):

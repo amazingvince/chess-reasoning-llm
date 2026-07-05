@@ -1222,6 +1222,69 @@ def _evaluate_position(
         return None
 
 
+def _cached_evaluate_position(
+    engine: chess.engine.SimpleEngine,
+    cache: SqliteMultipvCache | None,
+    fen: str,
+    depth: int,
+    chess960: bool = False,
+) -> int | None:
+    if cache is not None:
+        hit, cp = cache.get_scalar_evaluation(
+            kind="position",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            pov="side_to_move",
+        )
+        if hit:
+            return cp
+    cp = _evaluate_position(engine, fen, depth, chess960=chess960)
+    if cache is not None:
+        cache.put_scalar_evaluation(
+            kind="position",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            pov="side_to_move",
+            cp=cp,
+        )
+    return cp
+
+
+def _cached_evaluate_predicted_move(
+    engine: chess.engine.SimpleEngine,
+    cache: SqliteMultipvCache | None,
+    fen: str,
+    uci_move: str,
+    depth: int,
+    chess960: bool = False,
+) -> int | None:
+    if cache is not None:
+        hit, cp = cache.get_scalar_evaluation(
+            kind="post_move",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci_move,
+            pov="original_side_to_move",
+        )
+        if hit:
+            return cp
+    cp = _evaluate_predicted_move(engine, fen, uci_move, depth, chess960=chess960)
+    if cache is not None:
+        cache.put_scalar_evaluation(
+            kind="post_move",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci_move,
+            pov="original_side_to_move",
+            cp=cp,
+        )
+    return cp
+
+
 def _example_is_chess960(example: BenchmarkExample) -> bool:
     return example_is_chess960(example)
 
@@ -1242,6 +1305,7 @@ def compute_acpl(
     examples: list[BenchmarkExample],
     flat_preds: dict[str, str],
     depth: int = 20,
+    cache_path: Path | None = None,
 ) -> dict[str, float]:
     """Compute per-example centipawn loss using Stockfish.
 
@@ -1254,7 +1318,8 @@ def compute_acpl(
     Returns mapping of example_id -> centipawn loss.
     """
     acpl_scores: dict[str, float] = {}
-    best_cp_cache: dict[tuple[str, bool], int | None] = {}
+    cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
+    best_cp_cache: dict[tuple[str, bool, int], int | None] = {}
     evaluated = 0
     missing_move = 0
     illegal_move = 0
@@ -1284,10 +1349,11 @@ def compute_acpl(
             acpl_scores[ex.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
-        best_cache_key = (ex.fen, chess960)
+        best_cache_key = (ex.fen, chess960, depth)
         if best_cache_key not in best_cp_cache:
-            best_cp_cache[best_cache_key] = _evaluate_position(
+            best_cp_cache[best_cache_key] = _cached_evaluate_position(
                 engine,
+                cache,
                 ex.fen,
                 depth,
                 chess960=chess960,
@@ -1296,8 +1362,9 @@ def compute_acpl(
         if best_cp is None:
             continue
 
-        predicted_cp = _evaluate_predicted_move(
+        predicted_cp = _cached_evaluate_predicted_move(
             engine,
+            cache,
             ex.fen,
             uci,
             depth,
@@ -1977,7 +2044,14 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         acpl_scores: dict[str, float] | None = None
         wpd_scores: dict[str, dict[str, object]] | None = None
         if engine and split_name in acpl_splits:
-            acpl_scores = compute_acpl(engine, examples, flat_preds, args.acpl_depth)
+            eval_cache_path = args.output.with_suffix(".multipv.sqlite")
+            acpl_scores = compute_acpl(
+                engine,
+                examples,
+                flat_preds,
+                args.acpl_depth,
+                cache_path=eval_cache_path,
+            )
             wpd_predictions: dict[str, object] = dict(flat_preds)
             if sampled_predictions:
                 wpd_predictions = {}
@@ -1995,7 +2069,7 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
                 examples,
                 wpd_predictions,
                 depth=args.acpl_depth,
-                cache_path=args.output.with_suffix(".multipv.sqlite"),
+                cache_path=eval_cache_path,
             )
 
         metrics = _score_split_with_protocol_predictions(

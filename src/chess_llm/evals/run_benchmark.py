@@ -103,6 +103,45 @@ def evaluate_predicted_move(
 _evaluate_predicted_move = evaluate_predicted_move
 
 
+def _cached_evaluate_predicted_move(
+    engine,
+    cache: SqliteMultipvCache | None,
+    fen: str,
+    uci_move: str,
+    depth: int,
+    chess960: bool = False,
+) -> int | None:
+    if cache is not None:
+        hit, cp = cache.get_scalar_evaluation(
+            kind="post_move",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci_move,
+            pov="original_side_to_move",
+        )
+        if hit:
+            return cp
+    cp = evaluate_predicted_move(
+        engine,
+        fen,
+        uci_move,
+        depth,
+        chess960=chess960,
+    )
+    if cache is not None:
+        cache.put_scalar_evaluation(
+            kind="post_move",
+            fen=fen,
+            chess960=chess960,
+            depth=depth,
+            move_uci=uci_move,
+            pov="original_side_to_move",
+            cp=cp,
+        )
+    return cp
+
+
 def white_cp_to_side_to_move_cp(
     fen: str,
     cp: float | int,
@@ -122,9 +161,11 @@ def compute_acpl(
     examples: list[BenchmarkExample],
     flat_preds: dict[str, str],
     depth: int = 20,
+    cache_path: Path | None = None,
 ) -> dict[str, float]:
     """Compute per-example centipawn loss for move-prediction tasks."""
     acpl_scores: dict[str, float] = {}
+    cache = SqliteMultipvCache(cache_path) if cache_path is not None else None
     evaluated = 0
 
     for example in examples:
@@ -141,8 +182,9 @@ def compute_acpl(
             acpl_scores[example.example_id] = ACPL_INVALID_MOVE_PENALTY
             continue
 
-        predicted_cp = evaluate_predicted_move(
+        predicted_cp = _cached_evaluate_predicted_move(
             engine,
+            cache,
             example.fen,
             uci,
             depth,
@@ -354,13 +396,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             acpl_scores = None
             wpd_scores = None
             if engine is not None:
-                acpl_scores = compute_acpl(engine, examples, flat_predictions, args.acpl_depth)
+                cache_path = predictions_path.with_suffix(".multipv.sqlite")
+                acpl_scores = compute_acpl(
+                    engine,
+                    examples,
+                    flat_predictions,
+                    args.acpl_depth,
+                    cache_path=cache_path,
+                )
                 wpd_scores = compute_wpd(
                     engine,
                     examples,
                     flat_predictions,
                     depth=args.acpl_depth,
-                    cache_path=predictions_path.with_suffix(".multipv.sqlite"),
+                    cache_path=cache_path,
                 )
 
             scoring_predictions = dict(flat_predictions)
