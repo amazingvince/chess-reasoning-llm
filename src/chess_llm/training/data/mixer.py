@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -223,6 +224,23 @@ def _sampled_count(n_rows: int, fraction: float) -> int:
     return max(1, min(n_rows, round(n_rows * fraction)))
 
 
+def _largest_remainder_counts(total: int, weights: list[float]) -> list[int]:
+    """Allocate ``total`` integer rows proportionally to ``weights``."""
+    weight_sum = sum(weights)
+    if total < 0 or weight_sum <= 0:
+        raise ValueError(f"Cannot allocate {total} rows across weights {weights!r}")
+    quotas = [total * weight / weight_sum for weight in weights]
+    counts = [math.floor(quota) for quota in quotas]
+    remainder = total - sum(counts)
+    by_fraction = sorted(
+        range(len(weights)),
+        key=lambda i: (-(quotas[i] - counts[i]), i),
+    )
+    for i in by_fraction[:remainder]:
+        counts[i] += 1
+    return counts
+
+
 def _split_by_fen(
     ds: Dataset,
     eval_fraction: float,
@@ -251,12 +269,15 @@ def build_phase_dataset(
     eval_fraction: float = 0.02,
     seed: int = 42,
     task_upsample: Mapping[str, int] | None = None,
+    task_fractions: Mapping[str, float] | None = None,
     data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> tuple[Dataset, Dataset]:
     """Build train/eval datasets for one curriculum phase."""
     train_parts: list[Dataset] = []
     eval_parts: list[Dataset] = []
     task_upsample = _normalize_task_upsample(task_upsample)
+    task_fractions = _normalize_task_fractions(task_fractions)
+    observed_train_tasks: set[str] = set()
 
     fen_key_cache: dict[tuple[str, bool], str] = {}
     loaded_tiers: list[tuple[_TierMixLike, Dataset, list[str]]] = []
@@ -320,6 +341,15 @@ def build_phase_dataset(
             task_upsample,
             tier=tier_mix.tier,
         )
+        if "task" in tier_train.column_names:
+            observed_train_tasks.update(str(task) for task in tier_train["task"])
+
+        tier_train = _apply_task_fraction_targets(
+            tier_train,
+            task_fractions,
+            tier=tier_mix.tier,
+            seed=seed,
+        )
 
         if tier_mix.upsample > 1 and len(tier_train) > 0:
             original_len = len(tier_train)
@@ -336,6 +366,12 @@ def build_phase_dataset(
             train_parts.append(tier_train)
         if len(tier_eval) > 0:
             eval_parts.append(tier_eval)
+
+    _validate_task_fraction_targets_present(
+        task_fractions,
+        observed_train_tasks,
+        context=f"Phase {phase.name!r}",
+    )
 
     if not train_parts:
         raise ValueError(
@@ -374,12 +410,15 @@ def summarize_phase_data(
     phase: _PhaseLike,
     data_root: Path,
     task_upsample: Mapping[str, int] | None = None,
+    task_fractions: Mapping[str, float] | None = None,
     data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> dict[str, int]:
     """Compute expected example counts per tier without building train/eval splits."""
     summary: dict[str, int] = {}
     total = 0
     task_upsample = _normalize_task_upsample(task_upsample)
+    task_fractions = _normalize_task_fractions(task_fractions)
+    observed_tasks: set[str] = set()
 
     for tier_mix in phase.tier_mix:
         ds = load_tier_data(
@@ -387,6 +426,8 @@ def summarize_phase_data(
             data_root,
             transform_config=data_transform_config,
         )
+        if "task" in ds.column_names:
+            observed_tasks.update(str(task) for task in ds["task"])
         raw_count = len(ds)
 
         sampled = _sampled_count(raw_count, tier_mix.fraction)
@@ -409,6 +450,12 @@ def summarize_phase_data(
             final,
             tier_mix.upsample,
         )
+
+    _validate_task_fraction_targets_present(
+        task_fractions,
+        observed_tasks,
+        context=f"Phase {phase.name!r} summary",
+    )
 
     summary["total"] = total
     return summary
@@ -440,6 +487,127 @@ class _IndexCycler:
         return indices
 
 
+class _TaskFractionDrawer:
+    """Draw tier-local indices with exact target task fractions."""
+
+    def __init__(
+        self,
+        ds: Dataset,
+        task_fractions: Mapping[str, float],
+        *,
+        tier: int,
+        seed: int,
+    ) -> None:
+        self._tier = tier
+        self._rng = random.Random(seed * 1009 + tier)
+        self._target_tasks: list[str] = []
+        self._target_fractions: list[float] = []
+        self._target_indices: dict[str, list[int]] = {}
+        self._target_cyclers: dict[str, _IndexCycler] = {}
+        self._other_indices: list[int] = []
+        self._other_cycler: _IndexCycler | None = None
+        self._default_cycler: _IndexCycler | None = None
+
+        if not task_fractions or "task" not in ds.column_names or len(ds) == 0:
+            self._default_cycler = _IndexCycler(len(ds), random.Random(seed * 31 + tier))
+            return
+
+        indices_by_task: dict[str, list[int]] = {}
+        for idx, task in enumerate(ds["task"]):
+            indices_by_task.setdefault(str(task), []).append(idx)
+
+        self._target_tasks = [
+            task for task in sorted(task_fractions) if task in indices_by_task
+        ]
+        if not self._target_tasks:
+            self._default_cycler = _IndexCycler(len(ds), random.Random(seed * 31 + tier))
+            return
+
+        target_task_set = set(self._target_tasks)
+        for task_index, task in enumerate(self._target_tasks):
+            self._target_fractions.append(task_fractions[task])
+            indices = indices_by_task[task]
+            self._target_indices[task] = indices
+            self._target_cyclers[task] = _IndexCycler(
+                len(indices),
+                random.Random(seed * 7919 + tier * 101 + task_index),
+            )
+        self._other_indices = [
+            idx
+            for task, indices in indices_by_task.items()
+            if task not in target_task_set
+            for idx in indices
+        ]
+        remaining_fraction = 1.0 - sum(self._target_fractions)
+        if remaining_fraction > 1e-9:
+            if not self._other_indices:
+                tasks = ", ".join(self._target_tasks)
+                raise ValueError(
+                    f"Tier {tier}: task fraction target(s) {tasks} leave "
+                    "non-target remainder, but no non-target rows are available"
+                )
+            self._other_cycler = _IndexCycler(
+                len(self._other_indices),
+                random.Random(seed * 3571 + tier),
+            )
+
+    @property
+    def has_targets(self) -> bool:
+        return bool(self._target_tasks)
+
+    def draw(self, count: int) -> list[int]:
+        if self._default_cycler is not None:
+            return self._default_cycler.draw(count)
+
+        labels: list[str] = list(self._target_tasks)
+        weights = list(self._target_fractions)
+        remaining_fraction = 1.0 - sum(weights)
+        if remaining_fraction > 1e-9:
+            labels.append("__other__")
+            weights.append(remaining_fraction)
+
+        allocations = _largest_remainder_counts(count, weights)
+        drawn: list[int] = []
+        for label, n_rows in zip(labels, allocations):
+            if n_rows <= 0:
+                continue
+            if label == "__other__":
+                assert self._other_cycler is not None
+                drawn.extend(
+                    self._other_indices[pos]
+                    for pos in self._other_cycler.draw(n_rows)
+                )
+                continue
+            cycler = self._target_cyclers[label]
+            indices = self._target_indices[label]
+            drawn.extend(indices[pos] for pos in cycler.draw(n_rows))
+        self._rng.shuffle(drawn)
+        return drawn
+
+
+def _apply_task_fraction_targets(
+    ds: Dataset,
+    task_fractions: Mapping[str, float],
+    *,
+    tier: int,
+    seed: int,
+) -> Dataset:
+    """Resample a tier train split to target selected task fractions."""
+    if not task_fractions or "task" not in ds.column_names or len(ds) == 0:
+        return ds
+    drawer = _TaskFractionDrawer(ds, task_fractions, tier=tier, seed=seed)
+    if not drawer.has_targets:
+        return ds
+    indices = drawer.draw(len(ds))
+    logger.info(
+        "Tier %d: applied task fraction target(s) %s over %d train rows",
+        tier,
+        task_fractions,
+        len(ds),
+    )
+    return ds.select(indices)
+
+
 def _drop_metadata_columns(ds: Dataset) -> Dataset:
     """Drop split-identity columns, keeping task and tier for telemetry."""
     drop_cols = [name for name in _DROPPED_METADATA_COLUMNS if name in ds.column_names]
@@ -452,6 +620,7 @@ def build_schedule_dataset(
     eval_fraction: float = 0.02,
     seed: int = 42,
     task_upsample: Mapping[str, int] | None = None,
+    task_fractions: Mapping[str, float] | None = None,
     total_examples: int | None = None,
     data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> tuple[Dataset, Dataset, list[SegmentPlan]]:
@@ -466,6 +635,7 @@ def build_schedule_dataset(
     sequential sampler and never reshuffled.
     """
     task_upsample = _normalize_task_upsample(task_upsample)
+    task_fractions = _normalize_task_fractions(task_fractions)
     tiers_needed = schedule_tiers(schedule.segments)
 
     fen_key_cache: dict[tuple[str, bool], str] = {}
@@ -501,6 +671,7 @@ def build_schedule_dataset(
 
     train_pools: list[tuple[int, Dataset]] = []
     eval_parts: list[Dataset] = []
+    observed_train_tasks: set[str] = set()
     for tier, ds, keys in loaded_tiers:
         if eval_fraction <= 0.0:
             tier_train, tier_eval = ds, ds.select([])
@@ -515,9 +686,17 @@ def build_schedule_dataset(
             tier_train, tier_eval = ds.select(train_indices), ds.select(eval_indices)
 
         tier_train = _apply_task_upsampling(tier_train, task_upsample, tier=tier)
+        if "task" in tier_train.column_names:
+            observed_train_tasks.update(str(task) for task in tier_train["task"])
         train_pools.append((tier, tier_train))
         if len(tier_eval) > 0:
             eval_parts.append(tier_eval)
+
+    _validate_task_fraction_targets_present(
+        task_fractions,
+        observed_train_tasks,
+        context=f"Schedule {schedule.name!r}",
+    )
 
     pool_sizes = {tier: len(pool) for tier, pool in train_pools}
     total = total_examples if total_examples is not None else sum(pool_sizes.values())
@@ -539,8 +718,13 @@ def build_schedule_dataset(
     for tier, pool in train_pools:
         offsets[tier] = running
         running += len(pool)
-    cyclers = {
-        tier: _IndexCycler(len(pool), random.Random(seed * 31 + tier))
+    drawers = {
+        tier: _TaskFractionDrawer(
+            pool,
+            task_fractions,
+            tier=tier,
+            seed=seed,
+        )
         for tier, pool in train_pools
     }
 
@@ -552,7 +736,7 @@ def build_schedule_dataset(
                 continue
             offset = offsets[tier]
             segment_indices.extend(
-                offset + idx for idx in cyclers[tier].draw(n_rows)
+                offset + idx for idx in drawers[tier].draw(n_rows)
             )
         random.Random(seed * 1009 + plan.index).shuffle(segment_indices)
         order.extend(segment_indices)
@@ -596,21 +780,32 @@ def summarize_schedule_data(
     schedule: ScheduleConfig,
     data_root: Path,
     task_upsample: Mapping[str, int] | None = None,
+    task_fractions: Mapping[str, float] | None = None,
     total_examples: int | None = None,
     data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> dict[str, Any]:
     """Dry-run summary: per-segment per-tier row counts plus boundary steps."""
     task_upsample = _normalize_task_upsample(task_upsample)
+    task_fractions = _normalize_task_fractions(task_fractions)
 
     pool_sizes: dict[int, int] = {}
+    observed_tasks: set[str] = set()
     for tier in schedule_tiers(schedule.segments):
         ds = load_tier_data(
             tier,
             data_root,
             transform_config=data_transform_config,
         )
+        if "task" in ds.column_names:
+            observed_tasks.update(str(task) for task in ds["task"])
         task_extra = _estimated_task_upsample_extra(ds, task_upsample, fraction=1.0)
         pool_sizes[tier] = len(ds) + task_extra
+
+    _validate_task_fraction_targets_present(
+        task_fractions,
+        observed_tasks,
+        context=f"Schedule {schedule.name!r} summary",
+    )
 
     total = total_examples if total_examples is not None else sum(pool_sizes.values())
     plans = plan_segments(schedule.segments, total)
@@ -647,6 +842,45 @@ def _normalize_task_upsample(
         for task, factor in task_upsample.items()
         if task and int(factor) > 1
     }
+
+
+def _normalize_task_fractions(
+    task_fractions: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Validate task target fractions keyed by task id."""
+    if not task_fractions:
+        return {}
+    normalized: dict[str, float] = {}
+    for task, fraction in task_fractions.items():
+        task = str(task).strip()
+        value = float(fraction)
+        if not task:
+            raise ValueError("Task fraction overrides require a non-empty task id")
+        if not math.isfinite(value) or value <= 0.0 or value > 1.0:
+            raise ValueError(
+                f"Task fraction for {task!r} must be > 0 and <= 1, got {fraction!r}"
+            )
+        normalized[task] = value
+    total = sum(normalized.values())
+    if total > 1.0 + 1e-9:
+        raise ValueError(f"Task fractions must sum to <= 1.0, got {total:g}")
+    return normalized
+
+
+def _validate_task_fraction_targets_present(
+    task_fractions: Mapping[str, float],
+    observed_tasks: set[str],
+    *,
+    context: str,
+) -> None:
+    if not task_fractions:
+        return
+    missing = sorted(set(task_fractions) - observed_tasks)
+    if missing:
+        raise ValueError(
+            f"{context}: task fraction target(s) not found after data transforms: "
+            + ", ".join(missing)
+        )
 
 
 def _apply_task_upsampling(
@@ -711,10 +945,12 @@ def _estimated_task_upsample_extra(
 __all__ = [
     "_EVAL_FEN_KEYS_FILENAME",
     "_fen_key",
+    "_apply_task_fraction_targets",
     "_apply_task_upsampling",
     "_dataset_fen_keys",
     "_estimated_task_upsample_extra",
     "_load_or_extend_eval_fen_keys",
+    "_normalize_task_fractions",
     "_normalize_task_upsample",
     "_sampled_count",
     "_select_eval_fen_keys",

@@ -150,6 +150,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--task-fraction",
+        action="append",
+        default=[],
+        metavar="TASK=FRACTION",
+        help=(
+            "Target a train-split task to a fraction of each tier draw while "
+            "preserving total row counts. Repeat for multiple tasks, e.g. "
+            "--task-fraction 7.8_candidate_ratings=0.05"
+        ),
+    )
+    parser.add_argument(
         "--task-include",
         action="append",
         default=[],
@@ -490,6 +501,9 @@ def main() -> int:
     task_upsample = _parse_task_upsample_overrides(
         getattr(args, "task_upsample", [])
     )
+    task_fractions = _parse_task_fraction_overrides(
+        getattr(args, "task_fraction", [])
+    )
     data_transform_config = _build_data_transform_config(args)
 
     from chess_llm.training.data.mixer import build_phase_dataset, summarize_phase_data
@@ -548,6 +562,7 @@ def main() -> int:
                 args,
                 overrides,
                 task_upsample,
+                task_fractions,
                 data_transform_config,
             )
         logger.info("--- DRY RUN: data summary ---")
@@ -555,6 +570,7 @@ def main() -> int:
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            task_fractions=task_fractions,
             **_data_transform_kwargs(data_transform_config),
         )
         for key, count in sorted(summary.items()):
@@ -563,6 +579,7 @@ def main() -> int:
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            task_fractions=task_fractions,
             **_data_transform_kwargs(data_transform_config),
         )
         train_split_count = len(train_ds)
@@ -762,6 +779,7 @@ def main() -> int:
                 args,
                 overrides,
                 task_upsample,
+                task_fractions,
                 output_dir,
                 data_transform_config=data_transform_config,
             )
@@ -771,6 +789,7 @@ def main() -> int:
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            task_fractions=task_fractions,
             **_data_transform_kwargs(data_transform_config),
         )
         train_ds = _limit_dataset(train_ds, overrides.max_train_examples, seed=42)
@@ -1308,6 +1327,35 @@ def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:
     return result
 
 
+def _parse_task_fraction_overrides(values: list[str] | None) -> dict[str, float]:
+    """Parse ``TASK=FRACTION`` CLI overrides for target task fractions."""
+    result: dict[str, float] = {}
+    for value in values or []:
+        task, sep, fraction_text = value.partition("=")
+        task = task.strip()
+        if not sep or not task:
+            raise ValueError(
+                f"Invalid --task-fraction {value!r}; expected TASK=FRACTION",
+            )
+        try:
+            fraction = float(fraction_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --task-fraction {value!r}; FRACTION must be a number",
+            ) from exc
+        if fraction <= 0.0 or fraction > 1.0:
+            raise ValueError(
+                f"Invalid --task-fraction {value!r}; FRACTION must be > 0 and <= 1",
+            )
+        result[task] = fraction
+    total = sum(result.values())
+    if total > 1.0 + 1e-9:
+        raise ValueError(
+            f"Invalid --task-fraction overrides; fractions sum to {total:g} > 1"
+        )
+    return result
+
+
 def _build_data_transform_config(args: argparse.Namespace):
     """Build row-level training-data transform controls from CLI args."""
     from chess_llm.training.data.loader import TrainingDataTransformConfig
@@ -1367,6 +1415,7 @@ def _build_schedule_training_data(
     args: argparse.Namespace,
     overrides: RunOverrides,
     task_upsample: dict[str, int],
+    task_fractions: dict[str, float],
     output_dir: Path,
     *,
     data_transform_config=None,
@@ -1388,6 +1437,7 @@ def _build_schedule_training_data(
         schedule,
         args.data_root,
         task_upsample=task_upsample,
+        task_fractions=task_fractions,
         total_examples=total_examples,
         **_data_transform_kwargs(data_transform_config),
     )
@@ -1446,6 +1496,7 @@ def _schedule_dry_run(
     args: argparse.Namespace,
     overrides: RunOverrides,
     task_upsample: dict[str, int],
+    task_fractions: dict[str, float],
     data_transform_config,
 ) -> int:
     """Print the schedule data plan, boundaries, and warmup, then exit."""
@@ -1462,6 +1513,7 @@ def _schedule_dry_run(
         schedule,
         args.data_root,
         task_upsample=task_upsample,
+        task_fractions=task_fractions,
         total_examples=total_examples,
         **_data_transform_kwargs(data_transform_config),
     )

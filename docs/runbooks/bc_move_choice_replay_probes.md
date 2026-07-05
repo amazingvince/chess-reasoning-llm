@@ -20,6 +20,8 @@ The trainer now has three named schedules:
   `--move-only-task` instead of filtering the whole data root down to those
   tasks. Exclude trace/verifier-only Tier 7 tasks for a pure move-choice
   probe.
+- Use `--task-fraction 7.8_candidate_ratings=0.05` when candidate-rating rows
+  are available. The trainer enforces this fraction inside each Tier 7 draw.
 - Do not use global `--task-include 7.1...` filters with replay schedules
   unless tiers 1-6 also contain included task names. Global includes can empty
   the replay pools and make the schedule invalid.
@@ -41,6 +43,7 @@ chess-llm-train --phase bc-probe-r0 \
   --packing off \
   --move-only-task 7.1_best_move_selection \
   --move-only-task 7.2_puzzle_solving \
+  --task-fraction 7.8_candidate_ratings=0.05 \
   --task-exclude 7.9_step_verification \
   --task-exclude 7.10_best_line_trace \
   --dry-run
@@ -66,6 +69,7 @@ COMMON_ARGS=(
   --trainer-save-steps 2000
   --move-only-task 7.1_best_move_selection
   --move-only-task 7.2_puzzle_solving
+  --task-fraction 7.8_candidate_ratings=0.05
   --task-exclude 7.9_step_verification
   --task-exclude 7.10_best_line_trace
   --max-benchmark-examples-per-split 500

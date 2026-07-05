@@ -57,6 +57,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--task-fraction",
+        action="append",
+        default=[],
+        metavar="TASK=FRACTION",
+        help=(
+            "Target a task to a fraction of each tier draw while preserving "
+            "train row counts. Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
         "--task-include",
         action="append",
         default=[],
@@ -208,6 +218,8 @@ def _append_common_train_args(cmd: list[str], args: argparse.Namespace, *, run_n
         cmd.extend(["--max-train-examples", str(args.max_train_examples)])
     for upsample_override in args.task_upsample:
         cmd.extend(["--task-upsample", upsample_override])
+    for fraction_override in getattr(args, "task_fraction", []):
+        cmd.extend(["--task-fraction", fraction_override])
     for task in getattr(args, "task_include", []):
         cmd.extend(["--task-include", task])
     for task in getattr(args, "task_exclude", []):

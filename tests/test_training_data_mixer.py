@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -128,6 +130,35 @@ def test_package_build_phase_dataset_upsamples_selected_task_train_only(tmp_path
     assert train_ds["task"].count("1.1_fen_to_board") == 1
     assert summary["tier_1"] == 5
     assert summary["total"] == 5
+
+
+def test_build_phase_dataset_enforces_task_fraction_target(tmp_path):
+    from chess_llm.training.data.mixer import build_phase_dataset
+    from chess_llm.training.phases import TierMix
+
+    for i in range(20):
+        _append_jsonl(
+            tmp_path / "tier7" / "rows.jsonl",
+            _row(7, _pawn_fen(i % 8, turn="w"), f"best-{i}", task="7.1_best_move_selection"),
+        )
+    for i in range(4):
+        _append_jsonl(
+            tmp_path / "tier7" / "rows.jsonl",
+            _row(7, _pawn_fen(i % 8, turn="b"), f"candidate-{i}", task="7.8_candidate_ratings"),
+        )
+
+    train_ds, eval_ds = build_phase_dataset(
+        _phase(TierMix(tier=7)),
+        tmp_path,
+        eval_fraction=0.0,
+        seed=5,
+        task_fractions={"7.8_candidate_ratings": 0.25},
+    )
+
+    assert len(eval_ds) == 0
+    assert len(train_ds) == 24
+    assert train_ds["task"].count("7.8_candidate_ratings") == 6
+    assert train_ds["task"].count("7.1_best_move_selection") == 18
 
 
 def test_build_phase_dataset_applies_task_include_and_skips_empty_tiers(tmp_path):
@@ -406,6 +437,36 @@ def test_build_schedule_dataset_orders_rows_by_segment_and_respects_total(tmp_pa
     assert "tier" in train_ds.column_names
 
 
+def test_build_schedule_dataset_enforces_task_fraction_per_tier_draw(tmp_path):
+    from chess_llm.training.data.mixer import build_schedule_dataset
+
+    for i in range(20):
+        _append_jsonl(
+            tmp_path / "tier7" / "rows.jsonl",
+            _row(7, _grid_fen(i, "w"), f"best-{i}", task="7.1_best_move_selection"),
+        )
+    for i in range(4):
+        _append_jsonl(
+            tmp_path / "tier7" / "rows.jsonl",
+            _row(7, _grid_fen(i, "b"), f"candidate-{i}", task="7.8_candidate_ratings"),
+        )
+
+    schedule = _schedule(_segment("move_choice", 1.0, [(7, 1.0)]))
+    train_ds, eval_ds, plans = build_schedule_dataset(
+        schedule,
+        tmp_path,
+        eval_fraction=0.0,
+        seed=3,
+        total_examples=20,
+        task_fractions={"7.8_candidate_ratings": 0.25},
+    )
+
+    assert len(eval_ds) == 0
+    assert plans[0].tier_rows == ((7, 20),)
+    assert train_ds["task"].count("7.8_candidate_ratings") == 5
+    assert train_ds["task"].count("7.1_best_move_selection") == 15
+
+
 def test_build_schedule_dataset_interleaves_tiers_within_segment(tmp_path):
     from chess_llm.training.data.mixer import build_schedule_dataset
 
@@ -572,3 +633,17 @@ def test_summarize_schedule_data_reports_segments_and_boundaries(tmp_path):
     assert summary["segments"][1]["tier_rows"] == {"tier_1": 16, "tier_2": 16}
     assert summary["segments"][1]["start_row"] == 32
     assert summary["segments"][1]["end_row"] == 64
+
+
+def test_summarize_schedule_data_rejects_missing_task_fraction_target(tmp_path):
+    from chess_llm.training.data.mixer import summarize_schedule_data
+
+    _write_tier_rows(tmp_path, 7, 8)
+    schedule = _schedule(_segment("move_choice", 1.0, [(7, 1.0)]))
+
+    with pytest.raises(ValueError, match="task fraction target"):
+        summarize_schedule_data(
+            schedule,
+            tmp_path,
+            task_fractions={"7.8_candidate_ratings": 0.05},
+        )

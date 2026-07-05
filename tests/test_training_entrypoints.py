@@ -262,6 +262,28 @@ def test_train_cli_accepts_data_transform_overrides(monkeypatch):
     assert config.move_only_tasks == frozenset({"7.1_best_move_selection"})
 
 
+def test_train_cli_parses_task_fraction_overrides(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "bc-probe-r10",
+            "--task-fraction",
+            "7.8_candidate_ratings=0.05",
+        ],
+    )
+
+    args = train.parse_args()
+    parsed = train._parse_task_fraction_overrides(args.task_fraction)
+
+    assert args.task_fraction == ["7.8_candidate_ratings=0.05"]
+    assert parsed == {"7.8_candidate_ratings": 0.05}
+
+
 def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     from chess_llm.training import train
 
@@ -566,6 +588,7 @@ def _eval_only_args(tmp_path: Path) -> Namespace:
         require_phase_gate=False,
         max_train_examples=None,
         task_upsample=[],
+        task_fraction=[],
         max_eval_examples=None,
         max_benchmark_examples_per_split=None,
         full_benchmark_eval=False,
@@ -971,6 +994,7 @@ def test_package_curriculum_train_command_forwards_data_transform_flags(tmp_path
         smoke_run=False,
         max_train_examples=None,
         task_upsample=[],
+        task_fraction=["7.8_candidate_ratings=0.05"],
         task_include=["7.1_best_move_selection", "7.2_puzzle_solving"],
         task_exclude=["7.8_candidate_ratings"],
         move_only_task=["7.1_best_move_selection"],
@@ -1000,6 +1024,9 @@ def test_package_curriculum_train_command_forwards_data_transform_flags(tmp_path
 
     assert cmd.count("--task-include") == 2
     assert "7.2_puzzle_solving" in cmd
+    assert ["--task-fraction", "7.8_candidate_ratings=0.05"] == cmd[
+        cmd.index("--task-fraction"): cmd.index("--task-fraction") + 2
+    ]
     assert ["--task-exclude", "7.8_candidate_ratings"] == cmd[
         cmd.index("--task-exclude"): cmd.index("--task-exclude") + 2
     ]
@@ -1802,9 +1829,11 @@ def test_schedule_training_budget_flows_into_builder_not_limit_dataset(
         eval_fraction=0.02,
         seed=42,
         task_upsample=None,
+        task_fractions=None,
         total_examples=None,
     ):
         captured["total_examples"] = total_examples
+        captured["task_fractions"] = task_fractions
         return FakeDataset(64), FakeDataset(4), plans
 
     monkeypatch.setattr(mixer, "build_schedule_dataset", fake_build_schedule_dataset)
@@ -1819,7 +1848,11 @@ def test_schedule_training_budget_flows_into_builder_not_limit_dataset(
 
     output_dir = tmp_path / "phase_schedule"
     output_dir.mkdir(parents=True)
-    args = _schedule_args(tmp_path, schedule_total_examples=100)
+    args = _schedule_args(
+        tmp_path,
+        schedule_total_examples=100,
+        task_fraction=["7.8_candidate_ratings=0.05"],
+    )
     overrides = train.RunOverrides(max_train_examples=64)
 
     train_ds, eval_ds, out_plans, boundaries = train._build_schedule_training_data(
@@ -1827,12 +1860,14 @@ def test_schedule_training_budget_flows_into_builder_not_limit_dataset(
         args,
         overrides,
         {},
+        {"7.8_candidate_ratings": 0.05},
         output_dir,
     )
 
     # min(--schedule-total-examples, --max-train-examples) becomes the budget;
     # the ordered train split must never pass through _limit_dataset.
     assert captured["total_examples"] == 64
+    assert captured["task_fractions"] == {"7.8_candidate_ratings": 0.05}
     assert limit_calls == []
     assert out_plans == plans
     assert boundaries == [2]
@@ -1856,8 +1891,15 @@ def test_schedule_dry_run_caps_budget_by_max_train_examples(
 
     captured: dict[str, object] = {}
 
-    def fake_summarize(schedule, data_root, task_upsample=None, total_examples=None):
+    def fake_summarize(
+        schedule,
+        data_root,
+        task_upsample=None,
+        task_fractions=None,
+        total_examples=None,
+    ):
         captured["total_examples"] = total_examples
+        captured["task_fractions"] = task_fractions
         return {
             "total_examples": total_examples,
             "tier_pool_sizes": {"tier_1": 1000},
@@ -1883,11 +1925,13 @@ def test_schedule_dry_run_caps_budget_by_max_train_examples(
             dry_run=True,
             schedule_total_examples=100,
             max_train_examples=50,
+            task_fraction=["7.8_candidate_ratings=0.05"],
         ),
     )
 
     assert train.main() == 0
     assert captured["total_examples"] == 50
+    assert captured["task_fractions"] == {"7.8_candidate_ratings": 0.05}
 
 
 def test_build_sft_config_sequential_dataset_sets_sampler_fields(
