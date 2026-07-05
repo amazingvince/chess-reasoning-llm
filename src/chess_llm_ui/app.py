@@ -130,6 +130,7 @@ def create_app(
     app.state.game_locks: dict[str, threading.RLock] = {}
     app.state.games_lock = threading.Lock()
     app.state.artifact_runs: dict[str, ArtifactRun] = {}
+    app.state.artifact_runs_lock = threading.Lock()
     register_artifact_routes(app, resolved_settings)
 
     @app.get("/api/health")

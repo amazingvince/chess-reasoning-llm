@@ -2033,6 +2033,18 @@ def test_build_sft_config_sequential_rejects_packing(monkeypatch, tmp_path: Path
         raise AssertionError("sequential_dataset with packing on should raise ValueError")
 
 
+def test_schedule_sft_config_validation_rejects_dropped_sampler_fields():
+    from chess_llm.training import train
+
+    broken_config = types.SimpleNamespace(
+        train_sampling_strategy=None,
+        shuffle_dataset=True,
+    )
+
+    with pytest.raises(RuntimeError, match="Schedule mode requires"):
+        train._validate_schedule_sft_config(broken_config)
+
+
 def _load_schedule_callback(monkeypatch):
     fake_transformers = sys.modules.get("transformers") or types.SimpleNamespace(
         TrainerCallback=type("TrainerCallback", (), {}),

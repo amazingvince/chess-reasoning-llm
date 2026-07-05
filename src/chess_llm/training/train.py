@@ -71,6 +71,20 @@ class RunOverrides:
     skip_trainer_eval: bool = False
 
 
+def _validate_schedule_sft_config(sft_config: Any) -> None:
+    """Fail loudly if TRL did not preserve schedule-mode sampler settings."""
+    if getattr(sft_config, "train_sampling_strategy", None) != "sequential":
+        raise RuntimeError(
+            "Schedule mode requires SFTConfig.train_sampling_strategy='sequential'; "
+            "the installed TRL dropped, ignored, or mutated the kwarg."
+        )
+    if getattr(sft_config, "shuffle_dataset", None) is not False:
+        raise RuntimeError(
+            "Schedule mode requires SFTConfig.shuffle_dataset=False; "
+            "the installed TRL dropped, ignored, or mutated the kwarg."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chess SFT training harness")
     parser.add_argument(
@@ -882,14 +896,11 @@ def main() -> int:
         sequential_dataset=is_schedule,
     )
     if is_schedule:
-        assert getattr(sft_config, "train_sampling_strategy", None) == "sequential", (
-            "Schedule mode requires SFTConfig.train_sampling_strategy='sequential'; "
-            "the installed TRL dropped or ignored the kwarg."
-        )
-        assert sft_config.shuffle_dataset is False, (
-            "Schedule mode requires SFTConfig.shuffle_dataset=False; "
-            "the installed TRL dropped or ignored the kwarg."
-        )
+        try:
+            _validate_schedule_sft_config(sft_config)
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            return EVAL_INFRA_FAILURE_EXIT_CODE
     try:
         resume_checkpoint = _resolve_resume_checkpoint(
             output_dir,

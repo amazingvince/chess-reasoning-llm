@@ -1,6 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 
 import chess
@@ -49,6 +50,52 @@ class BlockingLegalLLMClient:
             model_id=request.model_id,
             raw_text=f"<think>Blocked legal test move.</think>\n<move>{move_uci}</move>",
             metadata={"client": "blocking-test"},
+        )
+
+
+class BlockingReviewToolService:
+    def __init__(self) -> None:
+        self.a_entered = threading.Event()
+        self.b_entered = threading.Event()
+        self.allow_a_finish = threading.Event()
+
+    def status(self) -> dict:
+        return {
+            "stockfish": {
+                "enabled": False,
+                "available": False,
+                "path": None,
+                "name": None,
+                "depth": 16,
+                "threads": 1,
+                "hash_mb": 256,
+                "error": None,
+            },
+            "capabilities": {
+                "legal_moves": True,
+                "opening_book_moves": True,
+                "stockfish_analysis": False,
+            },
+            "batch_limit": 10,
+        }
+
+    def close(self) -> None:
+        return None
+
+    def judge_rollout(self, prompt, rollout, *, metadata=None, depth=None):
+        del prompt, metadata, depth
+        if rollout.rollout_id == "rollout-a":
+            self.a_entered.set()
+            self.allow_a_finish.wait(timeout=2.0)
+        if rollout.rollout_id == "rollout-b":
+            self.b_entered.set()
+        return JudgmentArtifact(
+            judgment_id=f"judgment-scored-{rollout.rollout_id}",
+            rollout_id=rollout.rollout_id,
+            legal=True,
+            teacher_move_uci=rollout.parsed_answer.move_uci,
+            feedback=f"Scored {rollout.rollout_id}.",
+            metadata={"judge": "blocking_review"},
         )
 
 
@@ -506,6 +553,33 @@ def test_artifact_loader_joins_prompt_rollout_and_judgment(client, tmp_path):
     assert detail.json()["prompt"]["metadata"]["split"] == "planning"
 
 
+def test_artifact_loader_allows_unjudged_rollouts(client, tmp_path):
+    artifact_dir = tmp_path / "artifact-run"
+    prompt = PromptArtifact(
+        prompt_id="prompt-1",
+        fen=STARTING_FEN,
+        task_type="best_move",
+        messages=[ChatMessage(role="user", content="FEN: start")],
+    )
+    rollout = RolloutArtifact(
+        rollout_id="rollout-1",
+        prompt_id="prompt-1",
+        model_id="unit-model",
+        raw_output="<move>e2e4</move>",
+        parsed_answer=ParsedAnswer(raw_text="<move>e2e4</move>", move_uci="e2e4", format_type="move_tag"),
+    )
+    write_jsonl(artifact_dir / "prompts.jsonl", [prompt])
+    write_jsonl(artifact_dir / "rollouts.jsonl", [rollout])
+
+    loaded = client.post("/api/artifacts/load", json={"artifact_dir": str(artifact_dir)})
+
+    assert loaded.status_code == 200
+    rows = client.get(f"/api/artifacts/{loaded.json()['run_id']}/rollouts").json()["items"]
+    assert rows[0]["prompt"]["prompt_id"] == "prompt-1"
+    assert rows[0]["rollout"]["rollout_id"] == "rollout-1"
+    assert rows[0]["judgment"] is None
+
+
 def test_review_score_updates_selected_rollouts_in_memory(tool_client, tmp_path):
     artifact_dir = tmp_path / "artifact-run"
     prompt = PromptArtifact(
@@ -548,6 +622,88 @@ def test_review_score_updates_selected_rollouts_in_memory(tool_client, tmp_path)
 
     reloaded = tool_client.get(f"/api/artifacts/{run_id}/rollouts/rollout-1").json()
     assert reloaded["judgment"]["teacher_move_uci"] == "e2e4"
+
+
+def test_review_score_persists_selected_rollouts_to_disk(tool_client, tmp_path):
+    artifact_dir = tmp_path / "artifact-run"
+    prompt = PromptArtifact(
+        prompt_id="prompt-1",
+        fen=STARTING_FEN,
+        task_type="best_move",
+        messages=[ChatMessage(role="user", content="FEN: start")],
+    )
+    rollout = RolloutArtifact(
+        rollout_id="rollout-1",
+        prompt_id="prompt-1",
+        model_id="unit-model",
+        raw_output="<move>d2d4</move>",
+        parsed_answer=ParsedAnswer(raw_text="<move>d2d4</move>", move_uci="d2d4", format_type="move_tag"),
+    )
+    judgment = JudgmentArtifact(
+        judgment_id="judgment-old",
+        rollout_id="rollout-1",
+        legal=True,
+        feedback="Old judgment.",
+    )
+    write_jsonl(artifact_dir / "prompts.jsonl", [prompt])
+    write_jsonl(artifact_dir / "rollouts.jsonl", [rollout])
+    write_jsonl(artifact_dir / "judgments.jsonl", [judgment])
+    run_id = tool_client.post("/api/artifacts/load", json={"artifact_dir": str(artifact_dir)}).json()["run_id"]
+
+    response = tool_client.post(
+        f"/api/artifacts/{run_id}/score",
+        json={"rollout_ids": ["rollout-1"], "depth": 18},
+    )
+    assert response.status_code == 200
+
+    reloaded_run_id = tool_client.post("/api/artifacts/load", json={"artifact_dir": str(artifact_dir)}).json()["run_id"]
+    reloaded = tool_client.get(f"/api/artifacts/{reloaded_run_id}/rollouts/rollout-1").json()
+    disk_text = (artifact_dir / "judgments.jsonl").read_text(encoding="utf-8")
+    assert reloaded["judgment"]["teacher_move_uci"] == "e2e4"
+    assert reloaded["judgment"]["regret_cp"] == 25.0
+    assert "judgment-old" not in disk_text
+    assert "stockfish" in disk_text
+
+
+def test_concurrent_review_score_requests_for_same_run_are_serialized(tmp_path):
+    service = BlockingReviewToolService()
+    settings = BackendSettings(
+        artifact_root=tmp_path / "runs",
+        book_root=tmp_path / "books",
+        llm_model="unit-model",
+        tool_batch_limit=10,
+    )
+    app = create_app(
+        settings=settings,
+        llm_client=StaticLLMClient("<think>Mirror the center.</think>\n<move>e7e5</move>"),
+        tool_service=service,
+    )
+    local_client = TestClient(app, raise_server_exceptions=False)
+    artifact_dir = tmp_path / "artifact-run"
+    _write_artifact_fixture(artifact_dir, "a", move_uci="e2e4")
+    _write_artifact_fixture(artifact_dir, "b", mode="a", move_uci="d2d4")
+    run_id = local_client.post("/api/artifacts/load", json={"artifact_dir": str(artifact_dir)}).json()["run_id"]
+
+    def score(rollout_id: str) -> int:
+        return local_client.post(
+            f"/api/artifacts/{run_id}/score",
+            json={"rollout_ids": [rollout_id]},
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(score, "rollout-a")
+        assert service.a_entered.wait(timeout=2.0)
+        second = executor.submit(score, "rollout-b")
+        if service.b_entered.wait(timeout=0.2):
+            assert second.result(timeout=2.0) == 200
+        service.allow_a_finish.set()
+        assert first.result(timeout=3.0) == 200
+        assert second.result(timeout=3.0) == 200
+
+    rows = local_client.get(f"/api/artifacts/{run_id}/rollouts").json()["items"]
+    judgments = {item["rollout"]["rollout_id"]: item["judgment"] for item in rows}
+    assert judgments["rollout-a"]["feedback"] == "Scored rollout-a."
+    assert judgments["rollout-b"]["feedback"] == "Scored rollout-b."
 
 
 def test_review_score_rejects_batches_over_configured_limit(tool_client, tmp_path):
@@ -700,7 +856,13 @@ def test_ui_llm_module_keeps_deterministic_stub_import_path_working():
     assert "<move>a2a3</move>" in response.raw_text
 
 
-def _write_artifact_fixture(artifact_dir: Path, suffix: str) -> None:
+def _write_artifact_fixture(
+    artifact_dir: Path,
+    suffix: str,
+    *,
+    mode: str = "w",
+    move_uci: str = "e2e4",
+) -> None:
     prompt = PromptArtifact(
         prompt_id=f"prompt-{suffix}",
         fen=STARTING_FEN,
@@ -711,14 +873,24 @@ def _write_artifact_fixture(artifact_dir: Path, suffix: str) -> None:
         rollout_id=f"rollout-{suffix}",
         prompt_id=prompt.prompt_id,
         model_id="unit-model",
-        raw_output="<move>e2e4</move>",
-        parsed_answer=ParsedAnswer(raw_text="<move>e2e4</move>", move_uci="e2e4", format_type="move_tag"),
+        raw_output=f"<move>{move_uci}</move>",
+        parsed_answer=ParsedAnswer(
+            raw_text=f"<move>{move_uci}</move>",
+            move_uci=move_uci,
+            format_type="move_tag",
+        ),
     )
     judgment = JudgmentArtifact(
         judgment_id=f"judgment-{suffix}",
         rollout_id=rollout.rollout_id,
         legal=True,
     )
-    write_jsonl(artifact_dir / "prompts.jsonl", [prompt])
-    write_jsonl(artifact_dir / "rollouts.jsonl", [rollout])
-    write_jsonl(artifact_dir / "judgments.jsonl", [judgment])
+    path_mode = "a" if mode == "a" else "w"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for path, row in (
+        (artifact_dir / "prompts.jsonl", prompt),
+        (artifact_dir / "rollouts.jsonl", rollout),
+        (artifact_dir / "judgments.jsonl", judgment),
+    ):
+        with path.open(path_mode, encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row.to_dict(), ensure_ascii=False) + "\n")

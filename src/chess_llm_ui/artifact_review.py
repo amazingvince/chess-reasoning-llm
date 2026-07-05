@@ -1,13 +1,14 @@
-"""Read-only artifact loading for rollout review."""
+"""Artifact loading and judgment persistence for rollout review."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+import threading
 
-from chess_llm.artifacts.jsonl import read_jsonl
+from chess_llm.artifacts.jsonl import read_jsonl, write_jsonl
 from chess_llm.artifacts.schemas import JudgmentArtifact, PromptArtifact, RolloutArtifact
 
 
@@ -38,6 +39,7 @@ class ArtifactRun:
     run_id: str
     artifact_dir: Path
     items: list[JoinedRollout]
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 def load_artifact_run(artifact_dir: str | Path, *, run_id: str | None = None) -> ArtifactRun:
@@ -46,16 +48,18 @@ def load_artifact_run(artifact_dir: str | Path, *, run_id: str | None = None) ->
     prompts_path = root / "prompts.jsonl"
     rollouts_path = root / "rollouts.jsonl"
     judgments_path = root / "judgments.jsonl"
-    for path in [prompts_path, rollouts_path, judgments_path]:
+    for path in [prompts_path, rollouts_path]:
         if not path.exists():
             raise FileNotFoundError(f"missing artifact file: {path}")
 
     try:
         prompts = {prompt.prompt_id: prompt for prompt in read_jsonl(prompts_path, PromptArtifact)}
-        judgments = {
-            judgment.rollout_id: judgment
-            for judgment in read_jsonl(judgments_path, JudgmentArtifact)
-        }
+        judgments = {}
+        if judgments_path.exists():
+            judgments = {
+                judgment.rollout_id: judgment
+                for judgment in read_jsonl(judgments_path, JudgmentArtifact)
+            }
         items = [
             JoinedRollout(
                 prompt=prompts.get(rollout.prompt_id),
@@ -67,6 +71,14 @@ def load_artifact_run(artifact_dir: str | Path, *, run_id: str | None = None) ->
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ArtifactLoadError(f"invalid artifact data in {root}: {exc}") from exc
     return ArtifactRun(run_id=run_id or _default_run_id(root), artifact_dir=root, items=items)
+
+
+def write_artifact_judgments(run: ArtifactRun) -> None:
+    """Persist the current joined judgments in rollout order."""
+    write_jsonl(
+        run.artifact_dir / "judgments.jsonl",
+        (item.judgment for item in run.items if item.judgment is not None),
+    )
 
 
 def _default_run_id(root: Path) -> str:
