@@ -153,6 +153,7 @@ guessing from file names.
     "eval_run_path": "predictions.eval_run.json",
     "prediction_analysis_path": "predictions.analysis.json",
     "run_ledger_path": "artifacts/evals/runs.jsonl",
+    "decision_rule": "keep if paired planning delta >= +2pp and WPD does not regress",
     "artifact_mirror_root": "artifacts/evals",
     "artifact_mirror_dir": "artifacts/evals/eval-20260629T120000Z-abc12345",
     "mirrored_artifacts": {

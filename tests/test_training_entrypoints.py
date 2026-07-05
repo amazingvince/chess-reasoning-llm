@@ -847,6 +847,21 @@ def test_package_train_eval_command_forwards_ledger_and_mirror_paths(tmp_path: P
     assert cmd[cmd.index("--artifact-mirror-dir") + 1] == str(mirror)
 
 
+def test_package_train_eval_command_forwards_decision_rule(tmp_path: Path):
+    from chess_llm.training.train import _build_eval_cmd
+
+    decision_rule = "kill if puzzle pass@1 drops by more than 2pp"
+    cmd = _build_eval_cmd(
+        "model-id",
+        tmp_path / "benchmark",
+        tmp_path / "predictions.jsonl",
+        decision_rule=decision_rule,
+        no_wandb=True,
+    )
+
+    assert cmd[cmd.index("--decision-rule") + 1] == decision_rule
+
+
 def test_package_curriculum_train_command_uses_module_entrypoint(tmp_path: Path):
     from chess_llm.training.run_curriculum import _build_train_phase_cmd
 

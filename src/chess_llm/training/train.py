@@ -104,6 +104,15 @@ def parse_args() -> argparse.Namespace:
         help="Mirror evaluation artifacts under this directory by eval run id.",
     )
     parser.add_argument(
+        "--decision-rule",
+        type=str,
+        default=None,
+        help=(
+            "Pre-registered keep/kill/escalate rule for this run. Forwarded "
+            "to post-training/eval-only benchmark metadata."
+        ),
+    )
+    parser.add_argument(
         "--base-model",
         type=str,
         default=None,
@@ -689,6 +698,7 @@ def main() -> int:
             full_acpl_report=args.full_acpl_report,
             run_ledger=getattr(args, "run_ledger", None),
             artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
+            decision_rule=getattr(args, "decision_rule", None),
             soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
             full_benchmark=eval_full_benchmark,
@@ -925,6 +935,7 @@ def main() -> int:
             full_acpl_report=args.full_acpl_report,
             run_ledger=getattr(args, "run_ledger", None),
             artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
+            decision_rule=getattr(args, "decision_rule", None),
             soft_gate=eval_soft_gate,
             max_examples_per_split=overrides.max_benchmark_examples_per_split,
             full_benchmark=eval_full_benchmark,
@@ -1804,6 +1815,7 @@ def _run_eval(
     full_acpl_report: bool = False,
     run_ledger: Path | None = None,
     artifact_mirror_dir: Path | None = None,
+    decision_rule: str | None = None,
     soft_gate: bool = False,
     max_examples_per_split: int | None = None,
     full_benchmark: bool = False,
@@ -1835,6 +1847,7 @@ def _run_eval(
         full_acpl_report=full_acpl_report,
         run_ledger=run_ledger,
         artifact_mirror_dir=artifact_mirror_dir,
+        decision_rule=decision_rule,
         soft_gate=soft_gate,
         max_examples_per_split=max_examples_per_split,
         full_benchmark=full_benchmark,
@@ -1867,6 +1880,7 @@ def _build_eval_cmd(
     full_acpl_report: bool = False,
     run_ledger: Path | None = None,
     artifact_mirror_dir: Path | None = None,
+    decision_rule: str | None = None,
     report_only: bool = False,
     soft_gate: bool = False,
     max_examples_per_split: int | None = None,
@@ -1905,6 +1919,8 @@ def _build_eval_cmd(
         cmd.extend(["--run-ledger", str(run_ledger)])
     if artifact_mirror_dir is not None:
         cmd.extend(["--artifact-mirror-dir", str(artifact_mirror_dir)])
+    if decision_rule is not None:
+        cmd.extend(["--decision-rule", decision_rule])
     if report_only:
         cmd.append("--report-only")
     if soft_gate:

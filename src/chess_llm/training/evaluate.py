@@ -185,6 +185,7 @@ class EvaluationConfig:
     full_benchmark: bool = False
     run_ledger: Path | None = None
     artifact_mirror_dir: Path | None = None
+    decision_rule: str | None = None
     stockfish_path: str = DEFAULT_STOCKFISH_PATH
     acpl_depth: int = 20
     no_acpl: bool = False
@@ -236,6 +237,7 @@ class EvaluationConfig:
             full_benchmark=args.full_benchmark,
             run_ledger=getattr(args, "run_ledger", None),
             artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
+            decision_rule=getattr(args, "decision_rule", None),
             stockfish_path=args.stockfish_path,
             acpl_depth=args.acpl_depth,
             no_acpl=args.no_acpl,
@@ -326,6 +328,7 @@ def _evaluation_run_artifact(
         "artifact_mirror_root": (
             str(config.artifact_mirror_dir) if config.artifact_mirror_dir else None
         ),
+        "decision_rule": config.decision_rule,
     }
     if metadata:
         resolved_metadata.update(metadata)
@@ -432,6 +435,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Copy prediction/result/analysis/eval sidecars under this directory by run id.",
+    )
+    parser.add_argument(
+        "--decision-rule",
+        type=str,
+        default=None,
+        help=(
+            "Pre-registered keep/kill/escalate rule for this run. Stored in "
+            "the evaluation-run metadata and run ledger."
+        ),
     )
     parser.add_argument(
         "--inference-backend",

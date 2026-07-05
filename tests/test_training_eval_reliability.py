@@ -1270,6 +1270,59 @@ def test_run_evaluation_returns_structured_result_without_cli_parsing(
     assert eval_run["metadata"]["prediction_analysis_path"] == str(analysis_path)
 
 
+def test_run_evaluation_records_pre_registered_decision_rule(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "predictions.jsonl"
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: ("model", "tokenizer"),
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda _path, **_kwargs: [_benchmark_example()],
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "generate_predictions_transformers",
+        lambda *_args, **_kwargs: {
+            "planning_00000": [
+                "<think>claim the center</think><move>e2e4</move>",
+            ],
+        },
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=output_path,
+            max_new_tokens=32,
+            batch_size=1,
+            no_acpl=True,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+            decision_rule="keep if paired planning delta >= +2pp and WPD does not regress",
+        )
+    )
+
+    eval_run = json.loads(result.eval_run_path.read_text(encoding="utf-8"))
+
+    assert eval_run["metadata"]["decision_rule"] == (
+        "keep if paired planning delta >= +2pp and WPD does not regress"
+    )
+
+
 def test_run_evaluation_appends_run_ledger_and_mirrors_artifacts(
     monkeypatch,
     tmp_path,
