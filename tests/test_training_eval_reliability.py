@@ -2043,6 +2043,137 @@ def test_evaluate_converts_runtime_error_to_infra_failure(monkeypatch, tmp_path)
     assert evaluate.main() == EVAL_INFRA_FAILURE_EXIT_CODE
 
 
+def test_evaluate_preflight_rejects_phase_c_trace_decode_budget_before_model_load(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+    from chess_llm.training.eval_exit_codes import EVAL_INFRA_FAILURE_EXIT_CODE
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    trace_example = BenchmarkExample(
+        example_id="planning_trace",
+        split="planning",
+        task_type="best_line_trace",
+        fen=STARTING_FEN,
+        prompt="FEN: ...",
+        gold_answer="<think>line</think><move>e2e4</move>",
+        metric_type="best_line_trace",
+        metadata={},
+    )
+    monkeypatch.setattr(evaluate, "load_benchmark", lambda *_args, **_kwargs: [trace_example])
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model should not load after preflight failure")
+        ),
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=tmp_path / "predictions.jsonl",
+            phase="c",
+            max_new_tokens=128,
+            no_acpl=True,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+        )
+    )
+
+    assert result.return_code == EVAL_INFRA_FAILURE_EXIT_CODE
+    eval_run = json.loads(result.eval_run_path.read_text(encoding="utf-8"))
+    assert eval_run["metadata"]["error"] == "eval_preflight_failed"
+    assert "max_new_tokens=128" in eval_run["metadata"]["messages"][0]
+
+
+def test_evaluate_preflight_requires_stockfish_for_phase_c_acpl_before_model_load(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+    from chess_llm.training.eval_exit_codes import EVAL_INFRA_FAILURE_EXIT_CODE
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda *_args, **_kwargs: [_benchmark_example()],
+    )
+    monkeypatch.setattr(evaluate, "_resolve_stockfish_path", lambda _path: None)
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model should not load after preflight failure")
+        ),
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=tmp_path / "predictions.jsonl",
+            phase="c",
+            stockfish_path="missing-stockfish",
+            no_acpl=False,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+        )
+    )
+
+    assert result.return_code == EVAL_INFRA_FAILURE_EXIT_CODE
+    eval_run = json.loads(result.eval_run_path.read_text(encoding="utf-8"))
+    assert eval_run["metadata"]["error"] == "eval_preflight_failed"
+    assert "Stockfish" in eval_run["metadata"]["messages"][0]
+
+
+def test_evaluate_preflight_can_require_benchmark_manifest_before_model_load(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+    from chess_llm.training.eval_exit_codes import EVAL_INFRA_FAILURE_EXIT_CODE
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(evaluate, "load_benchmark", lambda *_args, **_kwargs: [_benchmark_example()])
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model should not load after preflight failure")
+        ),
+    )
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=tmp_path / "predictions.jsonl",
+            require_benchmark_manifest=True,
+            no_acpl=True,
+            no_wandb=True,
+            report_only=True,
+            soft_gate=True,
+        )
+    )
+
+    assert result.return_code == EVAL_INFRA_FAILURE_EXIT_CODE
+    eval_run = json.loads(result.eval_run_path.read_text(encoding="utf-8"))
+    assert eval_run["metadata"]["error"] == "eval_preflight_failed"
+    assert "manifest.json" in eval_run["metadata"]["messages"][0]
+
+
 def test_soft_gate_only_softens_metric_failures():
     from chess_llm.training.train import _post_training_eval_failure_return_code
     from chess_llm.training.eval_exit_codes import (

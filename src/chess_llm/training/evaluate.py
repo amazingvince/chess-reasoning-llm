@@ -177,6 +177,7 @@ class EvaluationConfig:
     pass_k: int = 1
     temperature: float | None = None
     max_new_tokens: int = 512
+    min_planning_max_new_tokens: int = 256
     batch_size: int = 16
     max_examples_per_split: int | None = None
     splits: tuple[str, ...] | None = None
@@ -189,6 +190,7 @@ class EvaluationConfig:
     phase: str | None = None
     report_only: bool = False
     soft_gate: bool = False
+    require_benchmark_manifest: bool = False
     wandb_project: str = "chess-sft"
     wandb_run_name: str | None = None
     wandb_group: str | None = None
@@ -216,6 +218,11 @@ class EvaluationConfig:
             pass_k=args.pass_k,
             temperature=args.temperature,
             max_new_tokens=args.max_new_tokens,
+            min_planning_max_new_tokens=getattr(
+                args,
+                "min_planning_max_new_tokens",
+                256,
+            ),
             batch_size=args.batch_size,
             max_examples_per_split=args.max_examples_per_split,
             splits=tuple(args.splits) if args.splits else None,
@@ -228,6 +235,11 @@ class EvaluationConfig:
             phase=args.phase,
             report_only=args.report_only,
             soft_gate=args.soft_gate,
+            require_benchmark_manifest=getattr(
+                args,
+                "require_benchmark_manifest",
+                False,
+            ),
             wandb_project=args.wandb_project,
             wandb_run_name=args.wandb_run_name,
             wandb_group=args.wandb_group,
@@ -300,6 +312,7 @@ def _evaluation_run_artifact(
         "wandb_job_type": config.wandb_job_type,
         "wandb_enabled": not config.no_wandb,
         "wandb_offline_allowed": config.allow_wandb_offline,
+        "require_benchmark_manifest": config.require_benchmark_manifest,
     }
     if metadata:
         resolved_metadata.update(metadata)
@@ -326,6 +339,7 @@ def _evaluation_run_artifact(
             "primary_temperature": primary_temperature,
             "sample_temperature": sample_temperature,
             "max_new_tokens": config.max_new_tokens,
+            "min_planning_max_new_tokens": config.min_planning_max_new_tokens,
             "batch_size": config.batch_size,
             "max_examples_per_split": config.max_examples_per_split,
             "splits": list(config.splits) if config.splits is not None else None,
@@ -413,6 +427,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-k", type=int, default=1, help="Number of samples per example for pass@k (default: 1)")
     parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature (default: 0.0 for pass@1, 0.7 for pass@k)")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Max tokens to generate (default: 512; legal_moves_by_piece gold answers routinely exceed shorter budgets)")
+    parser.add_argument(
+        "--min-planning-max-new-tokens",
+        type=int,
+        default=256,
+        help=(
+            "Minimum --max-new-tokens allowed for Phase C planning trace "
+            "evals before model loading (default: 256)"
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for generation (default: 16)")
     parser.add_argument(
         "--max-examples-per-split", type=int, default=None,
@@ -432,6 +455,11 @@ def parse_args() -> argparse.Namespace:
         "--full-benchmark",
         action="store_true",
         help="Evaluate every benchmark split instead of phase-aware default splits.",
+    )
+    parser.add_argument(
+        "--require-benchmark-manifest",
+        action="store_true",
+        help="Fail preflight when benchmark manifest.json is missing or lacks a version.",
     )
     parser.add_argument("--stockfish-path", type=str, default=DEFAULT_STOCKFISH_PATH, help="Path to Stockfish binary for ACPL (default: from STOCKFISH_PATH env or settings)")
     parser.add_argument("--acpl-depth", type=int, default=20, help="Stockfish search depth for ACPL (default: 20)")
@@ -1084,13 +1112,21 @@ def _score_split_with_protocol_predictions(
     return score_split(examples, scoring_predictions, acpl_scores, wpd_scores)
 
 
+def _resolve_stockfish_path(stockfish_path: str) -> str | None:
+    if not stockfish_path:
+        return None
+    sf_path = Path(stockfish_path)
+    if sf_path.exists():
+        return str(sf_path)
+    return shutil.which(stockfish_path)
+
+
 def _open_stockfish(stockfish_path: str) -> chess.engine.SimpleEngine | None:
     """Try to open a Stockfish engine; return None on failure."""
     if not stockfish_path:
         logger.info("Stockfish path not configured; ACPL will be skipped")
         return None
-    sf_path = Path(stockfish_path)
-    resolved_path = str(sf_path) if sf_path.exists() else shutil.which(stockfish_path)
+    resolved_path = _resolve_stockfish_path(stockfish_path)
     if resolved_path is None:
         logger.info("Stockfish not found at %s; ACPL will be skipped", stockfish_path)
         return None
@@ -1364,6 +1400,46 @@ def _select_acpl_splits(
     if args.phase == "c" and "planning" in split_examples:
         return {"planning"}
     return set()
+
+
+def _eval_preflight_errors(
+    config: EvaluationConfig,
+    *,
+    manifest: dict,
+    split_examples: dict[str, list[BenchmarkExample]],
+    acpl_splits: set[str],
+) -> list[str]:
+    """Return infrastructure errors that should block model loading."""
+    errors: list[str] = []
+    manifest_path = config.benchmark_dir / "manifest.json"
+    if config.require_benchmark_manifest:
+        if not manifest_path.exists():
+            errors.append(f"Benchmark manifest.json is required but missing: {manifest_path}")
+        elif not manifest.get("version"):
+            errors.append(f"Benchmark manifest lacks a version: {manifest_path}")
+
+    planning_examples = split_examples.get("planning", [])
+    has_trace_protocol = any(
+        example.task_type in _TRACE_PROTOCOL_TASKS for example in planning_examples
+    )
+    if (
+        config.phase == "c"
+        and has_trace_protocol
+        and config.max_new_tokens < config.min_planning_max_new_tokens
+    ):
+        errors.append(
+            f"Phase C planning trace eval has max_new_tokens={config.max_new_tokens}, "
+            f"below required minimum {config.min_planning_max_new_tokens}; "
+            "increase --max-new-tokens or adjust --min-planning-max-new-tokens."
+        )
+
+    if acpl_splits and _resolve_stockfish_path(config.stockfish_path) is None:
+        errors.append(
+            "Stockfish is required for ACPL/WPD on split(s) "
+            f"{', '.join(sorted(acpl_splits))}, but was not found at "
+            f"{config.stockfish_path!r}. Pass --stockfish-path or --no-acpl."
+        )
+    return errors
 
 
 def _resolve_benchmark_split_names(
@@ -1692,6 +1768,33 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
         )
         return result
 
+    acpl_splits = _select_acpl_splits(args, split_examples)
+    preflight_errors = _eval_preflight_errors(
+        args,
+        manifest=manifest,
+        split_examples=split_examples,
+        acpl_splits=acpl_splits,
+    )
+    if preflight_errors:
+        print("[FAIL] Eval preflight failed:")
+        for error in preflight_errors:
+            print(f"  - {error}")
+        result = _evaluation_result(
+            args,
+            return_code=EVAL_INFRA_FAILURE_EXIT_CODE,
+            version=version,
+            split_counts={split: len(examples) for split, examples in split_examples.items()},
+        )
+        _write_evaluation_result_artifact(
+            args,
+            result,
+            metadata={
+                "error": "eval_preflight_failed",
+                "messages": preflight_errors,
+            },
+        )
+        return result
+
     wandb_error = wandb_config_error(
         no_wandb=args.no_wandb,
         allow_offline=args.allow_wandb_offline,
@@ -1814,7 +1917,6 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     # Phase C planning gate, not every report split in every phase.
     engine: chess.engine.SimpleEngine | None = None
     has_acpl = False
-    acpl_splits = _select_acpl_splits(args, split_examples)
     if acpl_splits:
         engine = _open_stockfish(args.stockfish_path)
         has_acpl = engine is not None
