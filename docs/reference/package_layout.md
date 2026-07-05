@@ -37,3 +37,9 @@ Local generated assets use these package defaults:
 - Syzygy tablebases: `data/syzygy/`
 - Generated SFT data: `chess_sft_data/`
 - Checkpoints: `chess_sft_checkpoints/`
+- Evaluation, judge, and refresh artifacts: `artifacts/`
+- Runtime scratch and launcher state: `.runtime/`
+- Logs: `logs/`
+
+These roots are local machine state and are ignored by Git. Generated data is
+reproducible from the package CLIs or external providers, not source.

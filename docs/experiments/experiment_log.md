@@ -22,8 +22,8 @@ The working curriculum idea is:
 
 ### Data Generation State
 
-As of the 2026-07-04 docs cleanup, package settings define 52 SFT tasks and
-3.15M target examples across all tiers. Phase A is tiers 1-2 and totals 2.30M
+As of the 2026-07-05 docs cleanup, package settings define 57 SFT tasks and
+3.38M target examples across all tiers. Phase A is tiers 1-2 and totals 2.30M
 target rows before task upsampling. Earlier entries below may mention the
 pre-expansion 38-task, 2.48M-row plan.
 

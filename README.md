@@ -20,9 +20,11 @@ entry points.
   archived historical material.
 - `sft/training/` is now only operational scaffolding: Docker files,
   PowerShell launchers, requirements files, and local environment templates.
-- `polyglot_opening_books/` stores tracked Polyglot source archives. Extracted
-  `.bin` books are local generated files and are ignored.
+- `polyglot_opening_books/` stores local Polyglot source archives and extracted
+  `.bin` books. Both are ignored and can be provisioned per machine.
 - `data/syzygy/` is the ignored local tablebase cache used by package defaults.
+- `chess_sft_data/`, `chess_sft_checkpoints/`, `artifacts/`, `.runtime/`, and
+  `logs/` are local generated/runtime roots and are ignored.
 
 The old Python compatibility shims under `sft/make_data/` and `sft/training/`
 have been removed. Use `chess_llm.*` imports and `chess-llm-*` commands.
@@ -116,12 +118,12 @@ The source of truth is `src/chess_llm/sft/settings.py`.
 | --- | --- | ---: | ---: |
 | 1 | Perception, state, material mechanics | 19 | 1,560,000 |
 | 2 | Rules and legal-move decomposition | 12 | 740,000 |
-| 3 | Tactics | 5 | 260,000 |
+| 3 | Tactics | 9 | 450,000 |
 | 4 | Evaluation | 3 | 150,000 |
 | 5 | Openings | 3 | 30,000 |
 | 6 | Endgames | 4 | 140,000 |
-| 7 | Planning and verification | 6 | 270,000 |
-| **Total** |  | **52** | **3,150,000** |
+| 7 | Planning and verification | 7 | 310,000 |
+| **Total** |  | **57** | **3,380,000** |
 
 Phase A uses tiers 1-2: 31 tasks and 2,300,000 target rows before task
 upsampling.

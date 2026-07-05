@@ -3,8 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState } from "./domain/types";
 
+const chessboardMock = vi.hoisted(() => ({
+  latestProps: null as Record<string, unknown> | null
+}));
+
 vi.mock("react-chessboard", () => ({
-  Chessboard: () => <div data-testid="chessboard" />
+  Chessboard: (props: Record<string, unknown>) => {
+    chessboardMock.latestProps = props;
+    return <div data-testid="chessboard" />;
+  }
 }));
 
 vi.mock("./api", () => ({
@@ -43,6 +50,7 @@ const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 describe("App", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    chessboardMock.latestProps = null;
     vi.mocked(fetchBooks).mockResolvedValue({ items: [] });
     vi.mocked(fetchHealth).mockResolvedValue({
       status: "ok",
@@ -295,6 +303,29 @@ describe("App", () => {
       });
     });
   });
+
+  it("submits the selected drag-promotion piece as a human move", async () => {
+    vi.mocked(createGame).mockResolvedValue(promotionGame("promotion-game"));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "New game" }));
+    expect(await screen.findByText("promotion-game")).toBeInTheDocument();
+
+    const onPromotionPieceSelect = chessboardMock.latestProps?.onPromotionPieceSelect as
+      | ((piece?: string, from?: string, to?: string) => boolean)
+      | undefined;
+    expect(onPromotionPieceSelect).toBeDefined();
+
+    let accepted = false;
+    await act(async () => {
+      accepted = onPromotionPieceSelect?.("wQ", "a7", "a8") ?? false;
+    });
+
+    expect(accepted).toBe(true);
+    await waitFor(() => {
+      expect(sendHumanMove).toHaveBeenCalledWith("promotion-game", "a7a8q");
+    });
+  });
 });
 
 function gameState(gameId: string, humanSide: "white" | "black" = "white"): GameState {
@@ -311,6 +342,14 @@ function gameState(gameId: string, humanSide: "white" | "black" = "white"): Game
     last_judgment: null,
     pending_recovery: null,
     legal_moves: ["e2e4"]
+  };
+}
+
+function promotionGame(gameId: string): GameState {
+  return {
+    ...gameState(gameId),
+    fen: "7k/P7/8/8/8/8/8/7K w - - 0 1",
+    legal_moves: ["a7a8q", "a7a8r", "a7a8b", "a7a8n"]
   };
 }
 

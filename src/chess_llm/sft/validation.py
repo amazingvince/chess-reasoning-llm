@@ -978,6 +978,13 @@ def _normalize_messages(value: object) -> tuple[list[dict[str, str]], list[str]]
     return messages, errors
 
 
+def _valid_tier7_move_answer_format(task: str, content: str) -> bool:
+    if task == "7.11_history_best_move":
+        uci = _extract_uci_from_move_tag(content)
+        return uci is not None and content == f"<move>{uci}</move>"
+    return validate_think_move_format(content)
+
+
 def validate_example(example: object) -> tuple[bool, list[str]]:
     """Run task-aware validation on one legacy-compatible SFT row."""
     if not isinstance(example, Mapping):
@@ -1046,7 +1053,7 @@ def validate_example(example: object) -> tuple[bool, list[str]]:
         expected_move = _expected_target_move(metadata)
         for msg in messages:
             if msg["role"] == "assistant" and msg["content"]:
-                if not validate_think_move_format(msg["content"]):
+                if not _valid_tier7_move_answer_format(task, msg["content"]):
                     errors.append("Missing or invalid <think>/<move> tags")
                 uci = _extract_uci_from_move_tag(msg["content"])
                 if uci and validate_fen(fen, chess960=is_960):

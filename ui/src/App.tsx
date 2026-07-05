@@ -363,9 +363,12 @@ export default function App() {
       return false;
     }
     const promotion = promotionChoiceFromPiece(piece);
-    return Boolean(
-      promotion && buildMoveUci(game.fen, promoteFromSquare, promoteToSquare, promotion)
-    );
+    const moveUci = promotion ? buildMoveUci(game.fen, promoteFromSquare, promoteToSquare, promotion) : null;
+    if (!moveUci) {
+      return false;
+    }
+    void submitHumanMove(moveUci);
+    return true;
   }
 
   function handlePieceDragBegin(_piece: string, sourceSquare: string) {

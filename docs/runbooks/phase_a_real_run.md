@@ -21,7 +21,7 @@ Current target volumes:
 | Tier 1 perception/state/material mechanics | 19 | 1,560,000 |
 | Tier 2 rules/legal-move decomposition | 12 | 740,000 |
 | Phase A total | 31 | 2,300,000 |
-| All tiers | 52 | 3,150,000 |
+| All tiers | 57 | 3,380,000 |
 
 ## Launch Principles
 

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from random import Random
@@ -65,8 +64,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_SETTINGS_ROOT = _REPO_ROOT
+_SETTINGS_ROOT = Path.cwd()
 
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
@@ -1418,11 +1416,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def cli(argv: Sequence[str] | None = None) -> None:
-    """Console-script wrapper that avoids third-party finalizer aborts."""
+    """Console-script wrapper."""
     exit_code = main(argv)
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(exit_code)
+    raise SystemExit(exit_code)
 
 
 def _ensure_output_dirs() -> None:

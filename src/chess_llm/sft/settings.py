@@ -10,7 +10,6 @@ from typing import Mapping
 
 
 DEFAULT_OUTPUT_DIR = "chess_sft_data"
-_PACKAGE_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CACHE_ROOT = Path(
     os.environ.get("XDG_CACHE_HOME")
     or os.environ.get("LOCALAPPDATA")
@@ -177,16 +176,12 @@ class SftDataSettings:
     ) -> "SftDataSettings":
         """Resolve settings from an environment mapping without mutating it."""
         values = os.environ if env is None else env
-        root = Path(project_root)
+        root = Path(project_root).resolve()
         output_override = values.get("CHESS_SFT_OUTPUT")
         if output_override:
             output_dir = Path(output_override)
         else:
-            # Anchor the relative default at the project root so runs from
-            # different working directories share one data root.
-            output_dir = Path(DEFAULT_OUTPUT_DIR)
-            if not output_dir.is_absolute():
-                output_dir = _PACKAGE_PROJECT_ROOT / output_dir
+            output_dir = root / DEFAULT_OUTPUT_DIR
         return cls(
             project_root=root,
             hf_cache_dir=values.get("HF_HOME", DEFAULT_HF_CACHE_DIR),
@@ -220,7 +215,7 @@ class SftDataSettings:
 
 
 def apply_hf_cache_env(settings: SftDataSettings) -> None:
-    """Apply the legacy HuggingFace cache default using ``setdefault``."""
+    """Apply the HuggingFace cache default using ``setdefault``."""
     if settings.hf_cache_dir:
         os.environ.setdefault("HF_HOME", settings.hf_cache_dir)
 

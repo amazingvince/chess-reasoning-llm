@@ -141,6 +141,7 @@ guessing from file names.
   "scoring": {
     "stockfish_path": "stockfish",
     "acpl_depth": 20,
+    "acpl_workers": 1,
     "no_acpl": false,
     "full_acpl_report": false
   },

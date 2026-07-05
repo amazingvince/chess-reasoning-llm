@@ -126,8 +126,9 @@ Interpretation:
 2. Pick the fastest GPU mask and batch size.
 3. Run the selected eval shape once with ACPL/WPD enabled at the target depth.
 4. Run `scripts/tune_stockfish_speed.py` with the same depth and `multipv=5`.
-5. If Stockfish is a visible bottleneck, use the probe result to implement or
-   configure parallel WPD/ACPL workers.
+5. If Stockfish is a visible bottleneck, use the probe result to set
+   `--stockfish-workers`; ACPL cache misses are parallelized, while WPD/MultiPV
+   fallback scoring still runs through the main engine path.
 6. Launch training with `torchrun --nproc_per_node=2 ... --skip-eval`.
 7. Run bounded eval separately first, then full eval only for promising
    checkpoints.
@@ -144,5 +145,6 @@ From the 2026-07-05 Phase C sequence:
 - Batch 128 fit in memory but was slower.
 - Bounded all-split eval at 100 examples/split took about 58s without ACPL and
   about 75s with ACPL/WPD depth 12.
-- Current eval Stockfish use is sequential and not CPU-saturated on short
-  bounded evals, so generation batching is the first knob to tune.
+- Current eval Stockfish use supports parallel ACPL cache misses via
+  `--stockfish-workers`, but short bounded evals are still usually dominated by
+  generation batching before Stockfish saturation.

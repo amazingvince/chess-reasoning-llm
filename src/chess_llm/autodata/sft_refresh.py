@@ -1,4 +1,4 @@
-"""Build legacy SFT refresh rows from judged Autodata artifacts."""
+"""Build SFT refresh rows from judged Autodata artifacts."""
 
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ from chess_llm.sft.settings import SftDataSettings
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_SETTINGS_ROOT = _REPO_ROOT
+_SETTINGS_ROOT = Path.cwd()
 DEFAULT_BLOCKLIST_PATH = (
     SftDataSettings.from_env(_SETTINGS_ROOT).eval_splits_dir / "blocklist.txt"
 )

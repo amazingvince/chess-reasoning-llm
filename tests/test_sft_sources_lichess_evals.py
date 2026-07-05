@@ -145,7 +145,7 @@ def test_default_dedup_db_path_uses_sft_settings_default_root(tmp_path, monkeypa
     )
 
     assert _default_dedup_db_path() == expected
-    assert not _default_dedup_db_path().is_relative_to(tmp_path)
+    assert _default_dedup_db_path().is_relative_to(tmp_path)
 
 
 def test_stream_evals_closes_streaming_dataset_after_early_stop(tmp_path):

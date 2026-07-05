@@ -18,8 +18,7 @@ from chess_llm.sft.settings import (
     apply_hf_cache_env,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_SETTINGS_ROOT = _REPO_ROOT
+_SETTINGS_ROOT = Path.cwd()
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
 HF_DATASETS = dict(SETTINGS.hf_datasets)

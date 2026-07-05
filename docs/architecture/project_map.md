@@ -54,11 +54,13 @@ logic.
 
 Local generated or bulky assets use package-default roots:
 
-- `polyglot_opening_books/` for tracked source archives and ignored extracted
-  `.bin` books.
+- `polyglot_opening_books/` for local source archives and extracted `.bin`
+  books.
 - `data/syzygy/` for ignored Syzygy tablebase files.
 - `chess_sft_data/` for generated data and benchmark artifacts.
 - `chess_sft_checkpoints/` for model checkpoints.
+- `artifacts/`, `.runtime/`, and `logs/` for local run artifacts, launcher
+  state, and diagnostics.
 
 ## Current Documentation
 

@@ -22,8 +22,7 @@ from chess_llm.sft.settings import DEFAULT_STOCKFISH_PATH, SftDataSettings
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_SETTINGS = SftDataSettings.from_env(_REPO_ROOT)
+_SETTINGS = SftDataSettings.from_env(Path.cwd())
 DEFAULT_OUTPUT_PATH = _SETTINGS.annotations_dir / "candidate_ratings.jsonl"
 DEFAULT_CACHE_PATH = _SETTINGS.annotations_dir / "multipv.sqlite"
 DEFAULT_WORKERS = max(1, min(os.cpu_count() or 1, 8))

@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+def _workspace_root() -> Path:
+    return Path.cwd()
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class BackendSettings:
 
     @classmethod
     def from_env(cls) -> "BackendSettings":
-        root = _repo_root()
+        root = _workspace_root()
         return cls(
             artifact_root=Path(os.getenv("CHESS_UI_ARTIFACT_ROOT", root / "ui" / "runs")),
             book_root=Path(

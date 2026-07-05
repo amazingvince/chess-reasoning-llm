@@ -315,7 +315,7 @@ Run:
 
 ```powershell
 git diff --stat
-git diff -- docs/superpowers/specs/2026-07-05-feedback-metrics-design.md docs/superpowers/plans/2026-07-05-feedback-metrics-repair.md src/chess_llm/evals/benchmark.py src/chess_llm/evals/run_benchmark.py src/chess_llm/training/evaluate.py tests/test_evals_benchmark.py tests/test_evals_cli.py tests/test_training_eval_reliability.py
+git diff -- docs/archive/agent_plans/specs/2026-07-05-feedback-metrics-design.md docs/archive/agent_plans/plans/2026-07-05-feedback-metrics-repair.md src/chess_llm/evals/benchmark.py src/chess_llm/evals/run_benchmark.py src/chess_llm/training/evaluate.py tests/test_evals_benchmark.py tests/test_evals_cli.py tests/test_training_eval_reliability.py
 ```
 
 Expected: only metric-slice files changed.
@@ -325,7 +325,7 @@ Expected: only metric-slice files changed.
 Run:
 
 ```powershell
-git add docs/superpowers/specs/2026-07-05-feedback-metrics-design.md docs/superpowers/plans/2026-07-05-feedback-metrics-repair.md src/chess_llm/evals/benchmark.py src/chess_llm/evals/run_benchmark.py src/chess_llm/training/evaluate.py tests/test_evals_benchmark.py tests/test_evals_cli.py tests/test_training_eval_reliability.py
+git add docs/archive/agent_plans/specs/2026-07-05-feedback-metrics-design.md docs/archive/agent_plans/plans/2026-07-05-feedback-metrics-repair.md src/chess_llm/evals/benchmark.py src/chess_llm/evals/run_benchmark.py src/chess_llm/training/evaluate.py tests/test_evals_benchmark.py tests/test_evals_cli.py tests/test_training_eval_reliability.py
 git commit -m "fix: bound acpl metric reporting"
 ```
 

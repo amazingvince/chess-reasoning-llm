@@ -582,6 +582,21 @@ def test_artifact_loader_keeps_same_named_directories_distinct(client, tmp_path)
     assert client.get(f"/api/artifacts/{second_run_id}/rollouts/rollout-second").status_code == 200
 
 
+def test_artifact_loader_uses_url_safe_run_ids(client, tmp_path):
+    artifact_dir = tmp_path / "artifact run #1%"
+    _write_artifact_fixture(artifact_dir, "safe")
+
+    loaded = client.post("/api/artifacts/load", json={"artifact_dir": str(artifact_dir)})
+
+    assert loaded.status_code == 200
+    run_id = loaded.json()["run_id"]
+    assert " " not in run_id
+    assert "#" not in run_id
+    assert "?" not in run_id
+    assert "%" not in run_id
+    assert client.get(f"/api/artifacts/{run_id}/rollouts/rollout-safe").status_code == 200
+
+
 def test_default_no_endpoint_uses_deterministic_legal_stub(tmp_path):
     settings = BackendSettings(
         artifact_root=tmp_path / "runs",

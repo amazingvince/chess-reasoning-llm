@@ -59,8 +59,6 @@ def test_default_paths_are_portable_and_not_machine_specific():
         DEFAULT_OUTPUT_DIR,
         DEFAULT_STOCKFISH_PATH,
         settings.stockfish_path,
-        settings.syzygy_path,
-        settings.polyglot_dir,
     ]
 
     for value in values:
@@ -71,16 +69,18 @@ def test_default_paths_are_portable_and_not_machine_specific():
 
     assert Path(DEFAULT_HF_CACHE_DIR).is_absolute()
     assert "chess_sft_data" not in DEFAULT_HF_CACHE_DIR.replace("\\", "/")
+    assert Path(settings.syzygy_path) == settings.project_root / "data" / "syzygy"
+    assert Path(settings.polyglot_dir) == settings.project_root / "polyglot_opening_books"
 
 
-def test_default_output_dir_resolves_against_package_project_root():
-    import chess_llm.sft.settings as settings_module
+def test_default_output_dir_resolves_against_requested_project_root(tmp_path):
+    project_root = tmp_path / "caller-project"
 
-    settings = SftDataSettings.from_env(Path("unrelated-project"), env={})
+    settings = SftDataSettings.from_env(project_root, env={})
 
-    expected_root = Path(settings_module.__file__).resolve().parents[3]
-    assert settings.output_dir == expected_root / DEFAULT_OUTPUT_DIR
-    assert settings.pool_dir == expected_root / DEFAULT_OUTPUT_DIR / "pool"
+    assert settings.project_root == project_root.resolve()
+    assert settings.output_dir == project_root.resolve() / DEFAULT_OUTPUT_DIR
+    assert settings.pool_dir == project_root.resolve() / DEFAULT_OUTPUT_DIR / "pool"
 
 
 def test_output_dir_env_override_is_used_as_given(tmp_path):

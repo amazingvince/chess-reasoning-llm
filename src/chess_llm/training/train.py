@@ -806,8 +806,16 @@ def main() -> int:
     # --- Load model + tokenizer ---
     logger.info("Loading model and tokenizer from %s", model_path)
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from chess_llm.training.tokenizer import (
+        add_move_special_tokens,
+        resize_and_initialize_move_special_tokens,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    original_vocab_size = len(tokenizer)
+    added_move_tokens = add_move_special_tokens(tokenizer)
+    if added_move_tokens:
+        logger.info("Added %d move-tag special token(s)", added_move_tokens)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         logger.info("Set pad_token to eos_token: %s", tokenizer.pad_token)
@@ -828,6 +836,12 @@ def main() -> int:
         logger=logger,
     )
     logger.info("Selected attention implementation: %s", selected_attn or "<default>")
+    resize_and_initialize_move_special_tokens(
+        model,
+        tokenizer,
+        original_vocab_size=original_vocab_size,
+        added_token_count=added_move_tokens,
+    )
     model_type = getattr(getattr(model, "config", None), "model_type", None)
     logger.info("Model type: %s", model_type or "<unknown>")
 

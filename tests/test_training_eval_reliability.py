@@ -1364,6 +1364,128 @@ def test_run_evaluation_returns_structured_result_without_cli_parsing(
     assert eval_run["metadata"]["prediction_analysis_path"] == str(analysis_path)
 
 
+def test_run_evaluation_closes_stockfish_when_acpl_scoring_raises(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "predictions.jsonl"
+
+    class FakeEngine:
+        def __init__(self):
+            self.quit_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+    engine = FakeEngine()
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: ("model", "tokenizer"),
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda _path, **_kwargs: [_benchmark_example()],
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "generate_predictions_transformers",
+        lambda *_args, **_kwargs: {
+            "planning_00000": [
+                "<think>claim the center</think><move>e2e4</move>",
+            ],
+        },
+    )
+    monkeypatch.setattr(evaluate, "_resolve_stockfish_path", lambda _path: "stockfish")
+    monkeypatch.setattr(evaluate, "_open_stockfish", lambda _path: engine)
+
+    def fail_compute_acpl(*_args, **_kwargs):
+        raise RuntimeError("stockfish scoring failed")
+
+    monkeypatch.setattr(evaluate, "compute_acpl", fail_compute_acpl)
+
+    with pytest.raises(RuntimeError, match="stockfish scoring failed"):
+        evaluate.run_evaluation(
+            evaluate.EvaluationConfig(
+                model="model-id",
+                benchmark_dir=benchmark_dir,
+                output=output_path,
+                max_new_tokens=256,
+                batch_size=1,
+                phase="c",
+                no_wandb=True,
+                report_only=True,
+                soft_gate=True,
+            )
+        )
+
+    assert engine.quit_called is True
+
+
+def test_run_evaluation_treats_wandb_logging_failure_as_warning(
+    monkeypatch,
+    tmp_path,
+):
+    from chess_llm.training import evaluate
+    from chess_llm.training.eval_exit_codes import EVAL_SUCCESS_EXIT_CODE
+
+    benchmark_dir = tmp_path / "benchmark"
+    benchmark_dir.mkdir()
+    (benchmark_dir / "planning.jsonl").write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "predictions.jsonl"
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: ("model", "tokenizer"),
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "load_benchmark",
+        lambda _path, **_kwargs: [_benchmark_example()],
+    )
+    monkeypatch.setattr(
+        evaluate,
+        "generate_predictions_transformers",
+        lambda *_args, **_kwargs: {
+            "planning_00000": [
+                "<think>claim the center</think><move>e2e4</move>",
+            ],
+        },
+    )
+    monkeypatch.setattr(evaluate, "wandb_config_error", lambda **_kwargs: None)
+
+    def fail_wandb_logging(*_args, **_kwargs):
+        raise RuntimeError("wandb upload failed")
+
+    monkeypatch.setattr(evaluate, "_maybe_log_to_wandb", fail_wandb_logging)
+
+    result = evaluate.run_evaluation(
+        evaluate.EvaluationConfig(
+            model="model-id",
+            benchmark_dir=benchmark_dir,
+            output=output_path,
+            max_new_tokens=32,
+            batch_size=1,
+            no_acpl=True,
+            no_wandb=False,
+            report_only=True,
+            soft_gate=True,
+        )
+    )
+
+    assert result.return_code == EVAL_SUCCESS_EXIT_CODE
+    assert result.results_path.exists()
+    assert result.eval_run_path.exists()
+
+
 def test_run_evaluation_records_pre_registered_decision_rule(
     monkeypatch,
     tmp_path,

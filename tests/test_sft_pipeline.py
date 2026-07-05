@@ -447,13 +447,10 @@ def test_pipeline_no_args_prints_help_without_creating_data_dirs_or_loading_sour
     assert not (tmp_path / "data-root").exists()
 
 
-def test_pipeline_cli_flushes_and_uses_hard_exit(monkeypatch):
+def test_pipeline_cli_flushes_and_raises_system_exit(monkeypatch):
     from chess_llm.sft import pipeline
 
     calls = []
-
-    class HardExit(Exception):
-        pass
 
     monkeypatch.setattr(pipeline, "main", lambda argv=None: 7)
     monkeypatch.setattr(
@@ -467,16 +464,11 @@ def test_pipeline_cli_flushes_and_uses_hard_exit(monkeypatch):
         lambda: calls.append("stderr"),
     )
 
-    def fake_exit(code):
-        calls.append(f"exit:{code}")
-        raise HardExit
-
-    monkeypatch.setattr(pipeline.os, "_exit", fake_exit)
-
-    with pytest.raises(HardExit):
+    with pytest.raises(SystemExit) as exc_info:
         pipeline.cli(["--fake"])
 
-    assert calls == ["stdout", "stderr", "exit:7"]
+    assert exc_info.value.code == 7
+    assert calls == ["stdout", "stderr"]
 
 
 def test_package_pipeline_module_help_runs_as_python_m():

@@ -7,13 +7,18 @@ build/
 dist/
 *.egg-info/
 .tmp/
+.runtime/
 logs/
+artifacts/
+wandb/
 
 # Local environment files
 .env
 
-# Extracted polyglot books (regenerable via chess-llm-extract-polyglot-books)
+# Local Polyglot archives and extracted books
 polyglot_opening_books/*.bin
+polyglot_opening_books/*.zip
+polyglot_opening_books/*.7z
 
 # Syzygy tablebase data (940MB, downloaded via chess-llm-download-tablebases)
 data/syzygy/

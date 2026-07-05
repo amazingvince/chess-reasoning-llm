@@ -3,17 +3,37 @@
 .claude
 .vscode
 .idea
+.tmp
+.runtime
+.venv
 
 **/__pycache__
 **/.pytest_cache
 **/*.pyc
 **/*.pyo
 **/*.pyd
+*.egg-info
 
 plan
 
-sft/make_data/polyglot_opening_books/*.bin
-sft/make_data/data
+artifacts
+logs
+wandb
+build
+dist
+chess_sft_data
+chess_sft_checkpoints
+data/syzygy
+polyglot_opening_books/*.bin
+polyglot_opening_books/*.zip
+polyglot_opening_books/*.7z
+sft/make_data
+ui/node_modules
+ui/dist
+ui/runs
+ui/*.tsbuildinfo
+ui/vite.config.d.ts
+ui/vite.config.js
 
 *.log
 Thumbs.db

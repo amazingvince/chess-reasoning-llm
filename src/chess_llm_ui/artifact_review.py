@@ -72,4 +72,4 @@ def load_artifact_run(artifact_dir: str | Path, *, run_id: str | None = None) ->
 def _default_run_id(root: Path) -> str:
     resolved = str(root.resolve())
     digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
-    return f"{root.name}-{digest}"
+    return f"artifact-{digest}"

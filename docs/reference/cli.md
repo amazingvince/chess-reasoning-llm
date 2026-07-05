@@ -26,6 +26,7 @@ python -m pip install -e ".[data,train,eval]"
 | `chess-llm-run-eval-harness` | `chess_llm.evals.run_eval_harness` | Validate raw eval-split oracle consistency. |
 | `chess-llm-freeze-benchmark` | `chess_llm.evals.freeze_benchmark` | Convert eval splits into frozen benchmark examples. |
 | `chess-llm-run-benchmark` | `chess_llm.evals.run_benchmark` | Score prediction JSONL against a frozen benchmark. |
+| `chess-llm-compare-predictions` | `chess_llm.evals.compare_predictions` | Compare two prediction JSONL files on matched benchmark examples. |
 | `chess-llm-batch-judge` | `chess_llm.evals.batch_judge` | Export prompt, rollout, judgment, and manifest artifacts. |
 | `chess-llm-sft-refresh` | `chess_llm.autodata.sft_refresh` | Convert judged failures into targeted SFT refresh rows. |
 | `chess-llm-r0-report` | `chess_llm.training.r0_gate` | Report R0 gate diagnostics. |

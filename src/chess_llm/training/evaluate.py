@@ -2240,91 +2240,95 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     split_results: dict[str, dict[str, float]] = {}
     split_counts: dict[str, int] = {}
 
-    for split_name, examples in split_examples.items():
-        # Compute ACPL if engine available
-        acpl_scores: dict[str, float] | None = None
-        wpd_scores: dict[str, dict[str, object]] | None = None
-        if engine and split_name in acpl_splits:
-            eval_cache_path = args.output.with_suffix(".multipv.sqlite")
-            acpl_scores = compute_acpl(
-                engine,
+    try:
+        for split_name, examples in split_examples.items():
+            # Compute ACPL if engine available
+            acpl_scores: dict[str, float] | None = None
+            wpd_scores: dict[str, dict[str, object]] | None = None
+            if engine and split_name in acpl_splits:
+                eval_cache_path = args.output.with_suffix(".multipv.sqlite")
+                acpl_scores = compute_acpl(
+                    engine,
+                    examples,
+                    flat_preds,
+                    args.acpl_depth,
+                    cache_path=eval_cache_path,
+                    workers=args.acpl_workers,
+                    engine_factory=acpl_engine_factory,
+                )
+                wpd_predictions: dict[str, object] = dict(flat_preds)
+                if sampled_predictions:
+                    wpd_predictions = {}
+                    for ex in examples:
+                        per_prompt_preds: list[str] = []
+                        if ex.example_id in flat_preds:
+                            per_prompt_preds.append(flat_preds[ex.example_id])
+                        per_prompt_preds.extend(sampled_predictions.get(ex.example_id, []))
+                        if len(per_prompt_preds) == 1:
+                            wpd_predictions[ex.example_id] = per_prompt_preds[0]
+                        elif per_prompt_preds:
+                            wpd_predictions[ex.example_id] = per_prompt_preds
+                wpd_scores = compute_wpd(
+                    engine,
+                    examples,
+                    wpd_predictions,
+                    depth=args.acpl_depth,
+                    cache_path=eval_cache_path,
+                )
+
+            metrics = _score_split_with_protocol_predictions(
                 examples,
                 flat_preds,
-                args.acpl_depth,
-                cache_path=eval_cache_path,
-                workers=args.acpl_workers,
-                engine_factory=acpl_engine_factory,
-            )
-            wpd_predictions: dict[str, object] = dict(flat_preds)
-            if sampled_predictions:
-                wpd_predictions = {}
-                for ex in examples:
-                    per_prompt_preds: list[str] = []
-                    if ex.example_id in flat_preds:
-                        per_prompt_preds.append(flat_preds[ex.example_id])
-                    per_prompt_preds.extend(sampled_predictions.get(ex.example_id, []))
-                    if len(per_prompt_preds) == 1:
-                        wpd_predictions[ex.example_id] = per_prompt_preds[0]
-                    elif per_prompt_preds:
-                        wpd_predictions[ex.example_id] = per_prompt_preds
-            wpd_scores = compute_wpd(
-                engine,
-                examples,
-                wpd_predictions,
-                depth=args.acpl_depth,
-                cache_path=eval_cache_path,
+                flat_raw_preds,
+                acpl_scores,
+                wpd_scores,
             )
 
-        metrics = _score_split_with_protocol_predictions(
-            examples,
-            flat_preds,
-            flat_raw_preds,
-            acpl_scores,
-            wpd_scores,
-        )
+            # pass@k for puzzle solving includes greedy first, then sampled candidates.
+            puzzle_examples = [e for e in examples if e.task_type == "puzzle_solve"]
+            if puzzle_examples and args.pass_k > 1:
+                for k in (1, args.pass_k):
+                    hits = 0
+                    for ex in puzzle_examples:
+                        preds = list(predictions.get(ex.example_id, [""]))
+                        preds.extend(sampled_predictions.get(ex.example_id, []))
+                        hits += pass_at_k(preds[:k], ex.gold_answer)
+                    metrics[f"puzzle_pass_at_{k}"] = hits / len(puzzle_examples)
 
-        # pass@k for puzzle solving includes greedy first, then sampled candidates.
-        puzzle_examples = [e for e in examples if e.task_type == "puzzle_solve"]
-        if puzzle_examples and args.pass_k > 1:
-            for k in (1, args.pass_k):
-                hits = 0
-                for ex in puzzle_examples:
-                    preds = list(predictions.get(ex.example_id, [""]))
-                    preds.extend(sampled_predictions.get(ex.example_id, []))
-                    hits += pass_at_k(preds[:k], ex.gold_answer)
-                metrics[f"puzzle_pass_at_{k}"] = hits / len(puzzle_examples)
-
-        # Aggregate format/legal metrics for planning split
-        planning_preds = [
-            (ex, flat_raw_preds.get(ex.example_id, flat_preds.get(ex.example_id, "")))
-            for ex in examples
-            if ex.task_type in ("best_move", "puzzle_solve", "best_line_trace")
-        ]
-        if planning_preds:
-            fc_scores = [format_compliance(p) for _, p in planning_preds]
-            lm_raw_scores = [
-                legal_move_rate(
-                    p,
-                    ex.fen,
-                    chess960=_example_is_chess960(ex),
+            # Aggregate format/legal metrics for planning split
+            planning_preds = [
+                (
+                    ex,
+                    flat_raw_preds.get(ex.example_id, flat_preds.get(ex.example_id, "")),
                 )
-                for ex, p in planning_preds
+                for ex in examples
+                if ex.task_type in ("best_move", "puzzle_solve", "best_line_trace")
             ]
-            # A prediction with no move tag is not a legal move: count it as
-            # 0.0 instead of dropping it from the denominator, which would
-            # inflate the gate metric.
-            lm_scores = [0.0 if v is None else v for v in lm_raw_scores]
-            metrics["format_compliance"] = sum(fc_scores) / len(fc_scores)
-            metrics["legal_move_rate"] = sum(lm_scores) / len(lm_scores)
-            metrics["missing_move_tag_count"] = float(
-                sum(1 for v in lm_raw_scores if v is None)
-            )
+            if planning_preds:
+                fc_scores = [format_compliance(p) for _, p in planning_preds]
+                lm_raw_scores = [
+                    legal_move_rate(
+                        p,
+                        ex.fen,
+                        chess960=_example_is_chess960(ex),
+                    )
+                    for ex, p in planning_preds
+                ]
+                # A prediction with no move tag is not a legal move: count it as
+                # 0.0 instead of dropping it from the denominator, which would
+                # inflate the gate metric.
+                lm_scores = [0.0 if v is None else v for v in lm_raw_scores]
+                metrics["format_compliance"] = sum(fc_scores) / len(fc_scores)
+                metrics["legal_move_rate"] = sum(lm_scores) / len(lm_scores)
+                metrics["missing_move_tag_count"] = float(
+                    sum(1 for v in lm_raw_scores if v is None)
+                )
 
-        split_results[split_name] = metrics
-        split_counts[split_name] = len(examples)
-
-    if engine:
-        engine.quit()
+            split_results[split_name] = metrics
+            split_counts[split_name] = len(examples)
+    finally:
+        if engine:
+            engine.quit()
 
     # Print report
     print_report(version, split_results, split_counts, has_acpl)
@@ -2378,17 +2382,20 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     _finalize_evaluation_result_artifacts(args, result)
     logger.info("Saved evaluation run metadata to %s", result.eval_run_path)
 
-    _maybe_log_to_wandb(
-        args,
-        version=version,
-        split_results=split_results,
-        split_counts=split_counts,
-        has_acpl=has_acpl,
-        n_failures=n_failures,
-        results_path=results_path,
-        eval_run_path=result.eval_run_path,
-        prediction_analysis_path=prediction_analysis_path,
-    )
+    try:
+        _maybe_log_to_wandb(
+            args,
+            version=version,
+            split_results=split_results,
+            split_counts=split_counts,
+            has_acpl=has_acpl,
+            n_failures=n_failures,
+            results_path=results_path,
+            eval_run_path=result.eval_run_path,
+            prediction_analysis_path=prediction_analysis_path,
+        )
+    except Exception as exc:
+        logger.warning("W&B eval logging failed after results were saved: %s", exc)
 
     return result
 

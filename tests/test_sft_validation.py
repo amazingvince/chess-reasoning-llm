@@ -345,6 +345,21 @@ def test_package_validate_example_accepts_legal_tier7_row():
     assert errors == []
 
 
+def test_package_validate_example_accepts_history_best_move_only_row():
+    row = build_sft_row(
+        task="7.11_history_best_move",
+        tier=7,
+        fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        user_prompt="Moves so far: e2e4\nFEN: ...",
+        assistant_content="<move>e7e5</move>",
+        metadata={"target_move": "e7e5"},
+    )
+
+    passed, errors = validate_example(row)
+
+    assert passed is True, errors
+
+
 def test_package_validate_example_treats_chess960_id_metadata_as_chess960():
     row = build_sft_row(
         task="7.1_best_move_selection",
