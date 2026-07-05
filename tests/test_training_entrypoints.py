@@ -10,6 +10,8 @@ import sys
 import types
 import warnings
 
+import pytest
+
 
 def _expire_module(monkeypatch, module_name):
     """Force *module_name* to re-import during this test only.
@@ -1705,6 +1707,28 @@ def test_train_cli_accepts_schedule_phase_and_budget(monkeypatch):
     assert args.schedule_total_examples == 500000
 
 
+@pytest.mark.parametrize("phase", ["bc-probe-r0", "bc-probe-r10", "bc-probe-r25"])
+def test_train_cli_accepts_bc_probe_schedule_phases(monkeypatch, phase: str):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            phase,
+            "--schedule-total-examples",
+            "300000",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.phase == phase
+    assert args.schedule_total_examples == 300000
+
+
 def test_schedule_mode_rejects_incompatible_flags(monkeypatch, tmp_path: Path):
     from chess_llm.training import train
 
@@ -2098,7 +2122,11 @@ def test_promote_callback_to_front_moves_before_integrations():
     assert train._promote_callback_to_front(missing, sentinel) is False
 
 
-def test_find_best_historical_baseline_merges_all_phases_for_schedule(tmp_path: Path):
+@pytest.mark.parametrize("schedule_name", ["schedule", "bc-probe-r10"])
+def test_find_best_historical_baseline_merges_all_phases_for_schedule(
+    tmp_path: Path,
+    schedule_name: str,
+):
     import json
 
     from chess_llm.training.train import _find_best_historical_baseline
@@ -2114,7 +2142,7 @@ def test_find_best_historical_baseline_merges_all_phases_for_schedule(tmp_path: 
             json.dumps(results), encoding="utf-8"
         )
 
-    baseline_path = _find_best_historical_baseline(tmp_path, "schedule")
+    baseline_path = _find_best_historical_baseline(tmp_path, schedule_name)
 
     assert baseline_path is not None
     merged = json.loads(baseline_path.read_text(encoding="utf-8"))

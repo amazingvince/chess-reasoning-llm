@@ -6,6 +6,7 @@ Usage:
     chess-llm-train --phase b                        # Train Phase B from A checkpoint
     chess-llm-train --phase c                        # Train Phase C from B checkpoint
     chess-llm-train --phase schedule                 # One long run, time-varying tier mix
+    chess-llm-train --phase bc-probe-r10             # BC replay-ratio probe schedule
     chess-llm-train --phase a --eval-only            # Baseline eval only (no training)
     chess-llm-train --phase a --dry-run              # Print config + data summary, exit
     chess-llm-train --phase a --smoke-run            # Short end-to-end smoke test
@@ -73,10 +74,10 @@ class RunOverrides:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chess SFT training harness")
     parser.add_argument(
-        "--phase", required=True, choices=["a", "b", "c", "schedule"],
+        "--phase", required=True, choices=_training_phase_choices(),
         help=(
             "Training phase (a=Foundation, b=Understanding, c=Planning, "
-            "schedule=one long run over all tiers with a time-varying mix)"
+            "or a registered schedule such as schedule/bc-probe-r10)"
         ),
     )
     parser.add_argument(
@@ -182,7 +183,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule-total-examples", type=int, default=None,
         help=(
-            "Total training-example budget for --phase schedule "
+            "Total training-example budget for registered schedule phases "
             "(default: sum of tier train pools; further capped by "
             "--max-train-examples). Ignored for phases a/b/c."
         ),
@@ -471,6 +472,14 @@ def _augment_train_metrics_with_token_throughput(
     augmented["train_num_tokens"] = int(num_tokens) if num_tokens.is_integer() else num_tokens
     augmented["train_tokens_per_second"] = num_tokens / runtime
     return augmented
+
+
+def _training_phase_choices() -> list[str]:
+    """Return phase and schedule names accepted by the training CLI."""
+    from chess_llm.training.phases import PHASES
+    from chess_llm.training.schedule import SCHEDULES
+
+    return [*PHASES.keys(), *SCHEDULES.keys()]
 
 
 def main() -> int:
@@ -1323,18 +1332,18 @@ def _schedule_mode_config_error(args: argparse.Namespace) -> str | None:
     """Return a clear error for CLI flags that conflict with schedule mode."""
     if getattr(args, "require_phase_gate", False):
         return (
-            "--require-phase-gate is not supported with --phase schedule: "
+            "--require-phase-gate is not supported with registered schedule phases: "
             "gates are measurements in schedule mode, not hard requirements."
         )
     if getattr(args, "packing", "auto") == "on":
         return (
-            "--packing on is not supported with --phase schedule: packing "
+            "--packing on is not supported with registered schedule phases: packing "
             "reorders examples and would destroy the tier-mix schedule."
         )
     num_train_epochs = getattr(args, "num_train_epochs", None)
     if num_train_epochs is not None and float(num_train_epochs) != 1.0:
         return (
-            "--num-train-epochs must be 1 (or omitted) with --phase schedule: "
+            "--num-train-epochs must be 1 (or omitted) with registered schedule phases: "
             "the schedule is a single pass over the planned example budget."
         )
     return None
@@ -1655,7 +1664,7 @@ def _find_best_historical_baseline(output_root: Path, current_phase: str) -> Pat
     import json
 
     phase_order = ["a", "b", "c"]
-    if current_phase == "schedule":
+    if current_phase not in phase_order:
         # Schedule runs sit outside the a->b->c progression: merge every
         # completed phase result as an informational best-ever reference.
         prior_phases = phase_order

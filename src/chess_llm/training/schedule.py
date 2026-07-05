@@ -263,12 +263,67 @@ SCHEDULE_V1 = ScheduleConfig(
     weight_decay=0.01,
 )
 
+
+def _bc_move_choice_probe_schedule(
+    *,
+    name: str,
+    replay_fraction: float,
+) -> ScheduleConfig:
+    """Build a one-pass Tier 7 move-choice probe with Phase A/B replay."""
+    if not (0.0 <= replay_fraction < 1.0):
+        raise ValueError(f"replay_fraction must be in [0, 1), got {replay_fraction}")
+    tier7_fraction = 1.0 - replay_fraction
+    replay_tier_fraction = replay_fraction / 6.0
+    replay_weights = (
+        tuple((tier, replay_tier_fraction) for tier in range(1, 7))
+        if replay_fraction > 0.0
+        else ()
+    )
+    percent = int(round(replay_fraction * 100))
+    return ScheduleConfig(
+        name=name,
+        display_name=(
+            "BC move-choice probe: "
+            f"Tier 7 move-choice with {percent}% Phase A/B replay"
+        ),
+        segments=(
+            ScheduleSegment(
+                name="move_choice",
+                fraction_of_run=1.0,
+                tier_weights=(*replay_weights, (7, tier7_fraction)),
+            ),
+        ),
+        learning_rate=2e-6,
+        warmup_ratio=0.03,
+        weight_decay=0.01,
+    )
+
+
+BC_PROBE_R0 = _bc_move_choice_probe_schedule(
+    name="bc-probe-r0",
+    replay_fraction=0.0,
+)
+BC_PROBE_R10 = _bc_move_choice_probe_schedule(
+    name="bc-probe-r10",
+    replay_fraction=0.10,
+)
+BC_PROBE_R25 = _bc_move_choice_probe_schedule(
+    name="bc-probe-r25",
+    replay_fraction=0.25,
+)
+
 SCHEDULES: dict[str, ScheduleConfig] = {
     "schedule": SCHEDULE_V1,
+    "bc-probe-r0": BC_PROBE_R0,
+    "bc-probe-r10": BC_PROBE_R10,
+    "bc-probe-r25": BC_PROBE_R25,
 }
 
 
 __all__ = [
+    "BC_PROBE_R0",
+    "BC_PROBE_R10",
+    "BC_PROBE_R25",
     "DEFAULT_EFFECTIVE_BATCH",
     "SCHEDULE_V1",
     "SCHEDULES",

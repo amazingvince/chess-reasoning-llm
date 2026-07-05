@@ -11,6 +11,7 @@ dated review notes.
 - [Autodata SFT refresh](architecture/autodata_sft_refresh.md)
 - [Batch judge](architecture/batch_judge.md)
 - [Phase A real-run runbook](runbooks/phase_a_real_run.md)
+- [BC move-choice replay probes](runbooks/bc_move_choice_replay_probes.md)
 - [Eval and Stockfish tuning runbook](runbooks/eval_and_stockfish_tuning.md)
 - [Artifact schema v1](schemas/artifact_v1.md)
 - [Experiment log](experiments/experiment_log.md)

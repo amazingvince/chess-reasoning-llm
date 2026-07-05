@@ -59,6 +59,46 @@ def test_default_schedule_keeps_t12_replay_floor_after_first_segment():
         assert 0.20 <= replay <= 0.30, (segment.name, replay)
 
 
+@pytest.mark.parametrize(
+    ("name", "expected_replay_fraction", "expected_tier7_rows", "expected_replay_rows"),
+    [
+        ("bc-probe-r0", 0.00, 300_000, 0),
+        ("bc-probe-r10", 0.10, 270_000, 30_000),
+        ("bc-probe-r25", 0.25, 225_000, 75_000),
+    ],
+)
+def test_bc_move_choice_probe_schedules_register_replay_ratios(
+    name: str,
+    expected_replay_fraction: float,
+    expected_tier7_rows: int,
+    expected_replay_rows: int,
+):
+    schedule = SCHEDULES[name]
+
+    validate_schedule(schedule)
+
+    assert schedule.name == name
+    assert "BC move-choice" in schedule.display_name
+    assert len(schedule.segments) == 1
+    segment = schedule.segments[0]
+    assert segment.name == "move_choice"
+    assert schedule_tiers(schedule.segments) == (
+        [7] if expected_replay_fraction == 0.0 else [1, 2, 3, 4, 5, 6, 7]
+    )
+
+    total_weight = sum(weight for _, weight in segment.tier_weights)
+    replay_weight = sum(
+        weight for tier, weight in segment.tier_weights if tier in {1, 2, 3, 4, 5, 6}
+    )
+    assert replay_weight / total_weight == pytest.approx(expected_replay_fraction)
+
+    plan = plan_segments(schedule.segments, 300_000)[0]
+    tier7_rows = sum(rows for tier, rows in plan.tier_rows if tier == 7)
+    replay_rows = sum(rows for tier, rows in plan.tier_rows if tier != 7)
+    assert tier7_rows == expected_tier7_rows
+    assert replay_rows == expected_replay_rows
+
+
 def test_validate_schedule_rejects_fractions_not_summing_to_one():
     schedule = _schedule(
         _segment("s0", 0.5, [(1, 1.0)]),
