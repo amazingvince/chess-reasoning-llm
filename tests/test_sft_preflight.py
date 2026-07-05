@@ -1,27 +1,6 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
-
-
-def _clear_legacy_preflight_modules() -> None:
-    for module_name in (
-        "scripts.preflight_check",
-        "sft.make_data.scripts.preflight_check",
-    ):
-        sys.modules.pop(module_name, None)
-
-
-def test_package_preflight_imports_without_legacy_script_module():
-    _clear_legacy_preflight_modules()
-
-    module = importlib.import_module("chess_llm.sft.preflight")
-
-    assert module.check_syzygy
-    assert module.main
-    assert "scripts.preflight_check" not in sys.modules
-    assert "sft.make_data.scripts.preflight_check" not in sys.modules
 
 
 def test_package_preflight_syzygy_reports_probe_errors(monkeypatch, tmp_path: Path):

@@ -1,6 +1,5 @@
 import json
 import logging
-import sys
 from pathlib import Path
 
 import chess
@@ -18,43 +17,6 @@ def _game_fens(*ucis: str) -> list[str]:
         board.push_uci(uci)
         fens.append(board.fen())
     return fens
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if (
-            name.startswith("pool")
-            or name.startswith("validation")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-
-def test_package_eval_split_imports_without_legacy_modules(tmp_path):
-    _clear_legacy_modules()
-
-    from chess_llm.sft import eval_split
-
-    sources = {
-        "perception": [{"fen": f"pos_{i}"} for i in range(6)],
-        "rules": [{"fen": f"pos_{i}"} for i in range(6)],
-    }
-
-    splits = eval_split.generate_all_eval_splits(
-        sources,
-        seed=7,
-        split_sizes={"perception": 3, "rules": 3},
-    )
-
-    assert len(splits["perception"]) == 3
-    assert len(splits["rules"]) == 3
-    assert {row["fen"] for row in splits["perception"]}.isdisjoint(
-        row["fen"] for row in splits["rules"]
-    )
-    assert "pool.eval_split" not in sys.modules
-    assert "validation.decontamination" not in sys.modules
-    assert "config" not in sys.modules
 
 
 def test_package_eval_split_uses_canonical_keys_across_splits():
@@ -202,13 +164,13 @@ def test_save_eval_splits_persists_game_neighbors_and_extra_keys(tmp_path):
         splits,
         tmp_path,
         fen_pool=fen_pool,
-        extra_blocklist_keys={"std:legacy-key"},
+        extra_blocklist_keys={"std:extra-key"},
     )
     loaded = eval_split.load_blocklist(tmp_path / "blocklist.txt")
 
     assert variant_fen_key(game_fens[0]) in loaded
     assert variant_fen_key(game_fens[1]) in loaded
-    assert "std:legacy-key" in loaded
+    assert "std:extra-key" in loaded
 
 
 def test_rules_eval_split_stratifies_check_and_terminal_positions():

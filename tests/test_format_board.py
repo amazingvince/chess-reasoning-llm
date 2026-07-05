@@ -8,7 +8,7 @@ STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_E4_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
 
 
-def test_render_ascii_board_matches_legacy_training_diagram():
+def test_render_ascii_board_matches_training_diagram():
     board = chess.Board(STARTING_FEN)
 
     assert render_ascii_board(board) == "\n".join(

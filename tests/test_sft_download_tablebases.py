@@ -1,29 +1,8 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 import pytest
-
-
-def _clear_legacy_download_modules() -> None:
-    for module_name in (
-        "scripts.download_tablebases",
-        "sft.make_data.scripts.download_tablebases",
-    ):
-        sys.modules.pop(module_name, None)
-
-
-def test_package_download_tablebases_imports_without_legacy_modules():
-    _clear_legacy_download_modules()
-
-    module = importlib.import_module("chess_llm.sft.download_tablebases")
-
-    assert module.DEFAULT_BASE_URL
-    assert module.download_tablebases
-    assert module.download_file
-    assert "scripts.download_tablebases" not in sys.modules
 
 
 def test_resolve_source_dirs_uses_current_lichess_layout(monkeypatch):

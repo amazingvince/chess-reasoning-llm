@@ -25,7 +25,8 @@ from chess_llm.core.opening_books import (
 from chess_llm.formats.prompts import SYSTEM_PROMPT
 from chess_llm.inference import InferenceClient, InferenceRequest, InferenceResponse
 
-from chess_llm_ui.artifact_review import ArtifactLoadError, ArtifactRun, JoinedRollout, load_artifact_run
+from chess_llm_ui.artifact_review import ArtifactRun
+from chess_llm_ui.artifact_routes import register_artifact_routes
 from chess_llm_ui.config import BackendSettings
 from chess_llm_ui.llm import (
     DeterministicLegalMoveClient,
@@ -50,19 +51,10 @@ class RecoveryMoveRequest(BaseModel):
     action: str = Field(pattern="^(retry|retry_with_legal_moves|teacher|legal_stub)$")
 
 
-class LoadArtifactsRequest(BaseModel):
-    artifact_dir: str
-
-
 class AnalyzePositionRequest(BaseModel):
     fen: str
     book_id: str | None = None
     include_stockfish: bool = False
-    depth: int | None = Field(default=None, ge=1)
-
-
-class ScoreArtifactsRequest(BaseModel):
-    rollout_ids: list[str]
     depth: int | None = Field(default=None, ge=1)
 
 
@@ -138,6 +130,7 @@ def create_app(
     app.state.game_locks: dict[str, threading.RLock] = {}
     app.state.games_lock = threading.Lock()
     app.state.artifact_runs: dict[str, ArtifactRun] = {}
+    register_artifact_routes(app, resolved_settings)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -281,101 +274,6 @@ def create_app(
             _apply_llm_attempt(record, model_side, rollout, judgment)
             _append_live_artifacts(record, prompt, rollout, judgment)
             return _game_to_dict(record)
-
-    @app.post("/api/artifacts/load")
-    def load_artifacts(request_payload: LoadArtifactsRequest) -> dict:
-        try:
-            run = load_artifact_run(request_payload.artifact_dir)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ArtifactLoadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        app.state.artifact_runs[run.run_id] = run
-        return {
-            "run_id": run.run_id,
-            "artifact_dir": str(run.artifact_dir),
-            "count": len(run.items),
-        }
-
-    @app.get("/api/artifacts/{run_id}/rollouts")
-    def list_rollouts(run_id: str) -> dict:
-        run = _get_artifact_run(app, run_id)
-        return {"items": [item.to_dict() for item in run.items]}
-
-    @app.get("/api/artifacts/{run_id}/rollouts/{rollout_id}")
-    def get_rollout(run_id: str, rollout_id: str) -> dict:
-        run = _get_artifact_run(app, run_id)
-        for item in run.items:
-            if item.rollout.rollout_id == rollout_id:
-                return item.to_dict()
-        raise HTTPException(status_code=404, detail=f"unknown rollout_id: {rollout_id}")
-
-    @app.post("/api/artifacts/{run_id}/score")
-    def score_rollouts(run_id: str, request_payload: ScoreArtifactsRequest) -> dict:
-        if not request_payload.rollout_ids:
-            raise HTTPException(status_code=400, detail="rollout_ids must not be empty")
-        if len(request_payload.rollout_ids) > resolved_settings.tool_batch_limit:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "rollout_ids exceed configured batch limit "
-                    f"({resolved_settings.tool_batch_limit})"
-                ),
-            )
-
-        run = _get_artifact_run(app, run_id)
-        requested_ids = set(request_payload.rollout_ids)
-        scored_ids: set[str] = set()
-        errors: list[dict[str, str]] = []
-        updated_items: list[JoinedRollout] = []
-
-        for item in run.items:
-            if item.rollout.rollout_id not in requested_ids:
-                updated_items.append(item)
-                continue
-
-            if item.prompt is None:
-                updated_items.append(item)
-                continue
-
-            try:
-                judgment = app.state.tool_service.judge_rollout(
-                    item.prompt,
-                    item.rollout,
-                    metadata={
-                        "source": "ui_review",
-                        "run_id": run_id,
-                    },
-                    depth=request_payload.depth,
-                )
-            except Exception as exc:
-                updated_items.append(item)
-                errors.append({"rollout_id": item.rollout.rollout_id, "error": str(exc)})
-                continue
-
-            updated_items.append(
-                JoinedRollout(
-                    prompt=item.prompt,
-                    rollout=item.rollout,
-                    judgment=judgment,
-                )
-            )
-            scored_ids.add(item.rollout.rollout_id)
-
-        run.items = updated_items
-        skipped_count = len(requested_ids - scored_ids)
-        return {
-            "items": [
-                item.to_dict()
-                for item in run.items
-                if item.rollout.rollout_id in requested_ids
-            ],
-            "scored_count": len(scored_ids),
-            "skipped_count": skipped_count,
-            "error_count": len(errors),
-            "errors": errors,
-            "tool_status": app.state.tool_service.status(),
-        }
 
     return app
 
@@ -697,13 +595,6 @@ def _get_game_lock(app: FastAPI, game_id: str) -> threading.RLock:
         if game_id not in app.state.games:
             raise HTTPException(status_code=404, detail=f"unknown game_id: {game_id}")
         return app.state.game_locks.setdefault(game_id, threading.RLock())
-
-
-def _get_artifact_run(app: FastAPI, run_id: str) -> ArtifactRun:
-    run = app.state.artifact_runs.get(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
-    return run
 
 
 def _ensure_turn(record: GameRecord, side: str) -> None:

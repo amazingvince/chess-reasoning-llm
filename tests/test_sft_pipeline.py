@@ -33,19 +33,6 @@ def _valid_example(task: str, tier: int, idx: int = 0) -> dict:
     }
 
 
-def test_package_pipeline_imports_without_legacy_script_module():
-    sys.modules.pop("scripts.run_pipeline", None)
-    sys.modules.pop("sft.make_data.scripts.run_pipeline", None)
-
-    module = importlib.import_module("chess_llm.sft.pipeline")
-
-    assert module.run_tier
-    assert module.load_sources
-    assert module.main
-    assert "scripts.run_pipeline" not in sys.modules
-    assert "sft.make_data.scripts.run_pipeline" not in sys.modules
-
-
 def test_package_run_tier_regenerates_incomplete_existing_output(monkeypatch, tmp_path: Path):
     from chess_llm.sft.output import PipelineStats
     from chess_llm.sft import pipeline

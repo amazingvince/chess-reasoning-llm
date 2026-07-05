@@ -348,14 +348,14 @@ def test_posthoc_phase_launcher_supports_wandb_group() -> None:
 def test_training_docs_are_package_cli_first() -> None:
     text = _read(TRAINING_DIR / "README.md")
 
-    for legacy_command in [
+    for retired_command in [
         "python train.py",
         "python evaluate.py",
         "python run_curriculum.py",
         ".\\run-docker.ps1 python",
         ".\\sft\\training\\run-wsl.ps1 python",
     ]:
-        assert legacy_command not in text
+        assert retired_command not in text
 
     assert "docs/runbooks/phase_a_real_run.md" in text
     assert "--num-train-epochs 1" in text

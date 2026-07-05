@@ -1,4 +1,3 @@
-import sys
 from random import Random
 from pathlib import Path
 
@@ -8,25 +7,6 @@ from chess_llm.core.board import variant_fen_key
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 KRK_FEN = "8/8/8/4k3/8/8/8/4K2R w - - 0 1"
 PROMOTION_FEN = "8/P7/8/8/8/8/8/4K2k w - - 0 1"
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if name.startswith("pool") or name == "config" or name.startswith("config."):
-            sys.modules.pop(name, None)
-
-
-def test_package_fen_pool_imports_without_legacy_modules():
-    _clear_legacy_modules()
-
-    from chess_llm.sft.fen_pool import FENPool
-
-    pool = FENPool()
-    pool.add(STARTING_FEN, source="unit")
-
-    assert pool.get_tags(STARTING_FEN) == {"source": "unit"}
-    assert "pool.fen_pool" not in sys.modules
-    assert "config" not in sys.modules
 
 
 def test_package_fen_pool_dedups_by_canonical_fen_key():

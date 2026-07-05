@@ -1,5 +1,3 @@
-import importlib
-import sys
 from pathlib import Path
 
 import chess
@@ -8,30 +6,6 @@ import chess
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/8/8/8/8 w - - 0 1"
 REAL_STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 CHESS960_CASTLE_FEN = "bqrkrnnb/pppppppp/8/8/8/8/PPPPPPPP/BQRKRNNB w KQkq - 0 1"
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if (
-            name.startswith("validation")
-            or name.startswith("generators")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-
-def test_package_eval_harness_import_does_not_pull_legacy_modules():
-    _clear_legacy_modules()
-
-    from chess_llm.evals import eval_harness
-
-    importlib.reload(eval_harness)
-
-    assert "validation.eval_harness" not in sys.modules
-    assert "validation.benchmark" not in sys.modules
-    assert not any(name.startswith("generators.") for name in sys.modules)
-    assert "config" not in sys.modules
 
 
 def test_package_eval_harness_answers_and_invalid_fen_checks():

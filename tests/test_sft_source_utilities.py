@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 import chess
@@ -9,28 +7,6 @@ import pytest
 
 
 KRK_FEN = "8/8/8/4k3/8/8/8/4K2R w - - 0 1"
-
-
-def _clear_legacy_utility_modules() -> None:
-    for module_name in list(sys.modules):
-        if (
-            module_name == "pool.annotator"
-            or module_name == "sources.polyglot_books"
-            or module_name == "sources.syzygy_probing"
-            or module_name.startswith("sft.make_data.pool.annotator")
-            or module_name.startswith("sft.make_data.sources.polyglot_books")
-            or module_name.startswith("sft.make_data.sources.syzygy_probing")
-        ):
-            sys.modules.pop(module_name, None)
-
-
-def test_package_annotation_imports_without_legacy_modules():
-    _clear_legacy_utility_modules()
-
-    module = importlib.import_module("chess_llm.sft.annotation")
-
-    assert module.BatchAnnotator
-    assert "pool.annotator" not in sys.modules
 
 
 def test_close_streaming_dataset_closes_iterator_source_and_collects_garbage():

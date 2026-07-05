@@ -1,29 +1,3 @@
-import importlib
-import sys
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if (
-            name == "config"
-            or name.startswith("config.")
-            or name == "validation"
-            or name.startswith("validation.")
-        ):
-            sys.modules.pop(name, None)
-
-
-def test_package_completeness_imports_without_legacy_modules():
-    _clear_legacy_modules()
-
-    module = importlib.import_module("chess_llm.sft.completeness")
-
-    assert module.audit_output_completeness
-    assert module.expected_task_path
-    assert "config.settings" not in sys.modules
-    assert "validation.completeness" not in sys.modules
-
-
 def test_expected_task_path_uses_tier_subdirectory(tmp_path):
     from chess_llm.sft.completeness import expected_task_path
 

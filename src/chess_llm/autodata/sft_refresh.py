@@ -66,7 +66,7 @@ def build_sft_refresh(
     chess960: bool = False,
     blocklist_path: str | Path | None = None,
 ) -> SftRefreshResult:
-    """Convert judged rollout artifacts into legacy-compatible Tier 7 rows."""
+    """Convert judged rollout artifacts into Tier 7 SFT refresh rows."""
     prompts = _index_prompts(prompts_path)
     rollouts = _index_rollouts(rollouts_path)
     allowed_task_types = set(task_types) if task_types is not None else set(DEFAULT_MOVE_TASK_TYPES)
@@ -182,8 +182,8 @@ def build_sft_refresh(
     correction_path = tier7_dir / f"{MOVE_CORRECTION_TASK}.jsonl"
     manifest_path = output_root / "manifest.json"
 
-    _write_legacy_jsonl(format_path, format_rows)
-    _write_legacy_jsonl(correction_path, correction_rows)
+    _write_sft_jsonl(format_path, format_rows)
+    _write_sft_jsonl(correction_path, correction_rows)
 
     manifest = {
         "schema_version": "artifact.v1",
@@ -471,7 +471,7 @@ def _assistant_content(task: str, target_move: str) -> str:
     return f"<think>{thought}</think>\n<move>{target_move}</move>"
 
 
-def _write_legacy_jsonl(path: Path, rows: list[dict]) -> None:
+def _write_sft_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as fh:
         for row in rows:

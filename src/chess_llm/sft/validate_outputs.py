@@ -204,7 +204,7 @@ def _normalize_issue_paths(issues: dict[str, str]) -> dict[str, str]:
 
 
 def print_summary(result: ValidationRunResult) -> None:
-    """Print the legacy validation summary format."""
+    """Print the validation summary format."""
     print(f"\n{'=' * 60}")
     print("Validation Summary")
     print(f"{'=' * 60}")

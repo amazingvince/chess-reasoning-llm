@@ -50,7 +50,7 @@ are recorded before metrics are known.
 
 ## Notes
 
-- Path-based legacy commands under `sft/make_data/scripts` and
+- Path-based commands under `sft/make_data/scripts` and
   `sft/training/*.py` are retired.
 - `sft/training/run-wsl.ps1`, `run-docker.ps1`, and `run-eval-docker.ps1`
   remain supported launch helpers for package CLIs.

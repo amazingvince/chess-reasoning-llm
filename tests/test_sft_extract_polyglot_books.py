@@ -1,30 +1,8 @@
 from __future__ import annotations
 
-import importlib
 import sys
 import zipfile
 from pathlib import Path
-
-
-def _clear_legacy_extract_modules() -> None:
-    for module_name in (
-        "config.settings",
-        "scripts.extract_polyglot_books",
-        "sft.make_data.scripts.extract_polyglot_books",
-    ):
-        sys.modules.pop(module_name, None)
-
-
-def test_package_extract_polyglot_imports_without_legacy_modules():
-    _clear_legacy_extract_modules()
-
-    module = importlib.import_module("chess_llm.sft.extract_polyglot_books")
-
-    assert module.extract_zip
-    assert module.extract_7z
-    assert module.extract_polyglot_books
-    assert "config.settings" not in sys.modules
-    assert "scripts.extract_polyglot_books" not in sys.modules
 
 
 def test_extract_zip_flattens_bin_files_and_skips_non_bins(tmp_path: Path):

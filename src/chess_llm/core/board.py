@@ -27,7 +27,7 @@ def variant_fen_key(fen: str, chess960: bool = False) -> str:
     """Return a variant-aware FEN identity key for dedupe/blocklists.
 
     ``canonical_fen_key()`` deliberately returns only the normalized board
-    state. That is useful for display and backwards compatibility, but it can
+    state. That is useful for display and broad FEN grouping, but it can
     collide when the same four-field FEN is used under standard and Chess960
     rules. Data identity needs to keep those variants separate.
     """

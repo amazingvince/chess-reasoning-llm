@@ -1,6 +1,4 @@
-import importlib
 import json
-import sys
 from pathlib import Path
 from random import Random
 
@@ -32,50 +30,6 @@ def _example(
         metric_type=metric_type,
         metadata=metadata or {},
     )
-
-
-def test_package_benchmark_import_does_not_pull_legacy_modules():
-    for name in list(sys.modules):
-        if (
-            name.startswith("validation")
-            or name.startswith("generators")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-    importlib.reload(packaged)
-
-    assert "validation.benchmark" not in sys.modules
-    assert "validation.eval_harness" not in sys.modules
-    assert "generators.base" not in sys.modules
-    assert "config" not in sys.modules
-
-
-def test_package_freezes_benchmark_without_legacy_modules():
-    for name in list(sys.modules):
-        if (
-            name.startswith("validation")
-            or name.startswith("generators")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-    importlib.reload(packaged)
-
-    raw = {"fen": STARTING_FEN}
-    legal_gold = packaged.derive_gold_answer("legal_moves", raw, Random(42))
-    examples = packaged.freeze_split("rules", [raw], seed=42)
-    expected_moves = " ".join(sorted(m.uci() for m in chess.Board(STARTING_FEN).legal_moves))
-
-    assert legal_gold == f"Side to move: white.\nLegal moves: {expected_moves}"
-    assert examples[0].task_type == "legal_moves"
-    assert examples[0].metric_type == "uci_set_jaccard"
-    assert examples[0].gold_answer == legal_gold
-    assert "validation.benchmark" not in sys.modules
-    assert "validation.eval_harness" not in sys.modules
-    assert not any(name.startswith("generators.") for name in sys.modules)
 
 
 def test_package_freeze_rejects_illegal_best_move_gold():
@@ -167,7 +121,7 @@ def test_package_freeze_uses_explicit_no_legal_moves_for_stalemate():
     assert packaged.validate_oracle(examples) == []
 
 
-def test_package_terminal_legal_moves_scoring_accepts_none_and_legacy_phrasing():
+def test_package_terminal_legal_moves_scoring_accepts_current_none_phrasing():
     rng = Random(42)
     gold = packaged.derive_gold_answer("legal_moves", {"fen": STALEMATE_FEN}, rng)
 
@@ -181,7 +135,6 @@ def test_package_terminal_legal_moves_scoring_accepts_none_and_legacy_phrasing()
     assert packaged.score_prediction(
         example, "Side to move: black.\nLegal moves: none"
     )["primary"] == 1.0
-    assert packaged.score_prediction(example, "No legal moves available.")["primary"] == 1.0
     assert packaged.score_prediction(example, "Legal moves: e7e5")["primary"] == 0.0
     assert packaged.score_prediction(example, "")["primary"] == 0.0
 
@@ -991,7 +944,7 @@ def test_package_check_state_handles_negated_checkmate_mentions():
     assert packaged.check_state_accuracy("stalemate, not checkmate", "Checkmate.") == 0.0
 
 
-def test_package_check_detection_exact_metric_uses_semantic_labels_for_legacy_benchmarks():
+def test_package_check_detection_uses_semantic_labels_for_exact_metric_rows():
     example = _example(
         task_type="check_detection",
         gold_answer="Normal position -- no check, checkmate, or stalemate.",

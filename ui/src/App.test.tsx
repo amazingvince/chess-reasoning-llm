@@ -176,8 +176,8 @@ describe("App", () => {
     expect(await screen.findByText("No model reasoning for this move.")).toBeInTheDocument();
   });
 
-  it("uses the latest rollout when a selected legacy LLM move only carries ids", async () => {
-    const history = liveHistoryGame("legacy-history");
+  it("uses the latest rollout when a selected historical LLM move only carries ids", async () => {
+    const history = liveHistoryGame("historical-id-only-history");
     const latestRollout = history.moves[1].rollout;
     const latestJudgment = history.moves[1].judgment;
     history.moves = history.moves.slice(0, 2).map((move) => ({

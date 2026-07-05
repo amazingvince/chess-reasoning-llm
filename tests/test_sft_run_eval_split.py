@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import subprocess
@@ -14,27 +13,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
-
-
-def test_package_run_eval_split_imports_without_legacy_modules():
-    for name in list(sys.modules):
-        if (
-            name.startswith("scripts")
-            or name.startswith("pool")
-            or name.startswith("validation")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-    module = importlib.import_module("chess_llm.sft.run_eval_split")
-
-    assert module.main
-    assert module.freeze_existing_eval_splits
-    assert "scripts.run_eval_split" not in sys.modules
-    assert "pool.eval_split" not in sys.modules
-    assert "validation.benchmark" not in sys.modules
-    assert "config" not in sys.modules
 
 
 def test_freeze_existing_eval_splits_loads_jsonl_and_uses_non_strict_coverage(

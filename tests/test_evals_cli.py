@@ -1,5 +1,4 @@
 import json
-import sys
 from pathlib import Path
 
 import chess
@@ -15,31 +14,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if (
-            name.startswith("validation")
-            or name.startswith("scripts")
-            or name == "config"
-            or name.startswith("config.")
-        ):
-            sys.modules.pop(name, None)
-
-
-def test_package_eval_cli_modules_import_without_legacy_modules():
-    _clear_legacy_modules()
-
-    from chess_llm.evals import freeze_benchmark, run_benchmark, run_eval_harness
-
-    assert freeze_benchmark is not None
-    assert run_benchmark is not None
-    assert run_eval_harness is not None
-    assert "validation.benchmark" not in sys.modules
-    assert "validation.eval_harness" not in sys.modules
-    assert "scripts.run_benchmark" not in sys.modules
-    assert "config" not in sys.modules
 
 
 def test_freeze_benchmark_cli_writes_manifest_and_split(tmp_path):

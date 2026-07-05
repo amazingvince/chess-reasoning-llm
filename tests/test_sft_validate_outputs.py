@@ -18,40 +18,6 @@ def _starting_board_answer() -> str:
     return render_ascii_board(chess.Board(STARTING_FEN))
 
 
-def _clear_legacy_validate_outputs_modules() -> None:
-    for module_name in (
-        "config.settings",
-        "pool.eval_split",
-        "validation.validator",
-        "validation.decontamination",
-        "validation.completeness",
-        "scripts.validate_outputs",
-        "sft.make_data.scripts.validate_outputs",
-    ):
-        sys.modules.pop(module_name, None)
-
-
-def test_package_validate_outputs_imports_without_legacy_script_module():
-    _clear_legacy_validate_outputs_modules()
-
-    module = importlib.import_module("chess_llm.sft.validate_outputs")
-
-    assert module.main
-    assert module.validate_outputs
-    for legacy_name in (
-        "config.settings",
-        "pool.eval_split",
-        "validation.validator",
-        "validation.decontamination",
-        "validation.completeness",
-        "scripts.validate_outputs",
-        "sft.make_data.scripts.validate_outputs",
-    ):
-        assert legacy_name not in sys.modules
-    assert "scripts.validate_outputs" not in sys.modules
-    assert "sft.make_data.scripts.validate_outputs" not in sys.modules
-
-
 def test_package_validate_outputs_import_does_not_set_hf_home(monkeypatch):
     sys.modules.pop("chess_llm.sft.validate_outputs", None)
     monkeypatch.delenv("HF_HOME", raising=False)
@@ -388,7 +354,7 @@ def test_package_validate_outputs_main_accepts_tier_scope(monkeypatch, tmp_path:
     )
 
 
-def test_package_validate_outputs_main_prints_legacy_summary(
+def test_package_validate_outputs_main_prints_current_summary(
     monkeypatch,
     capsys,
     tmp_path: Path,

@@ -1,4 +1,4 @@
-"""Validation helpers for legacy-compatible SFT training rows."""
+"""Validation helpers for SFT training rows."""
 
 from __future__ import annotations
 
@@ -986,7 +986,7 @@ def _valid_tier7_move_answer_format(task: str, content: str) -> bool:
 
 
 def validate_example(example: object) -> tuple[bool, list[str]]:
-    """Run task-aware validation on one legacy-compatible SFT row."""
+    """Run task-aware validation on one SFT row."""
     if not isinstance(example, Mapping):
         return False, ["Example row must be a JSON object"]
 

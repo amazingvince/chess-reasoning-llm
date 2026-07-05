@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import importlib
 import json
-import sys
 from pathlib import Path
 
 
@@ -12,19 +10,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "\n".join(json.dumps(row) for row in rows) + "\n\n",
         encoding="utf-8",
     )
-
-
-def test_package_hub_upload_imports_without_legacy_script_or_hf_hub(monkeypatch):
-    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
-    sys.modules.pop("scripts.push_to_hub", None)
-    sys.modules.pop("sft.make_data.scripts.push_to_hub", None)
-
-    module = importlib.import_module("chess_llm.sft.hub_upload")
-
-    assert module.upload_training
-    assert module.upload_eval
-    assert "scripts.push_to_hub" not in sys.modules
-    assert "sft.make_data.scripts.push_to_hub" not in sys.modules
 
 
 def test_collect_training_file_stats_counts_rows_and_tiers(tmp_path: Path):

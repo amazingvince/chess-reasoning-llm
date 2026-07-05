@@ -1,6 +1,4 @@
-import importlib
 import json
-import sys
 
 import chess
 
@@ -9,19 +7,6 @@ from chess_llm.sft import build_sft_row
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-
-
-def _clear_legacy_modules() -> None:
-    for name in list(sys.modules):
-        if (
-            name == "config"
-            or name.startswith("config.")
-            or name == "validation"
-            or name.startswith("validation.")
-            or name == "output"
-            or name.startswith("output.")
-        ):
-            sys.modules.pop(name, None)
 
 
 def _row(task: str = "1.1_fen_to_board") -> dict:
@@ -37,17 +22,6 @@ def _row(task: str = "1.1_fen_to_board") -> dict:
         user_prompt="Render this board.",
         assistant_content=assistant_content,
     )
-
-
-def test_package_output_imports_without_legacy_modules():
-    _clear_legacy_modules()
-
-    module = importlib.import_module("chess_llm.sft.output")
-
-    assert module.JSONLWriter
-    assert module.PipelineStats
-    assert "validation.validator" not in sys.modules
-    assert "config.settings" not in sys.modules
 
 
 def test_jsonl_writer_validates_writes_and_discards_tmp_on_close(tmp_path):

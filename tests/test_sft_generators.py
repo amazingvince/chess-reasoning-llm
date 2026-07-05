@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from collections import Counter
 from pathlib import Path
 from random import Random
@@ -14,38 +12,6 @@ STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 def _user_prompt(row: dict) -> str:
     return row["messages"][1]["content"]
-
-
-def _clear_legacy_generator_modules() -> None:
-    for module_name in list(sys.modules):
-        if (
-            module_name == "config.templates"
-            or module_name.startswith("generators")
-            or module_name.startswith("sft.make_data.generators")
-        ):
-            sys.modules.pop(module_name, None)
-
-
-def test_package_templates_import_without_legacy_modules():
-    _clear_legacy_generator_modules()
-
-    templates = importlib.import_module("chess_llm.sft.templates")
-
-    assert "1.1_fen_to_board" in templates.TEMPLATES
-    assert templates.select_template("1.1_fen_to_board", Random(1))
-    assert "config.templates" not in sys.modules
-
-
-def test_package_generators_import_without_legacy_modules():
-    _clear_legacy_generator_modules()
-
-    tier1 = importlib.import_module("chess_llm.sft.generators.tier1_perception")
-    tier7 = importlib.import_module("chess_llm.sft.generators.tier7_planning")
-
-    assert tier1.FENToBoard.__module__ == "chess_llm.sft.generators.tier1_perception"
-    assert tier7.BestMoveSelection.__module__ == "chess_llm.sft.generators.tier7_planning"
-    assert "generators.base" not in sys.modules
-    assert "config.templates" not in sys.modules
 
 
 def test_package_piece_counting_board_piece_template_counts_requested_piece(monkeypatch):

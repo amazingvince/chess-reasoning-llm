@@ -11,7 +11,7 @@ from chess_llm.sft.examples import (
     SftExample,
     build_sft_messages,
     build_sft_row,
-    write_legacy_sft_jsonl,
+    write_sft_jsonl,
 )
 from chess_llm.sft.fen_pool import FENPool
 from chess_llm.sft.output import JSONLWriter, PipelineStats
@@ -67,5 +67,5 @@ __all__ = [
     "validate_state_tracking",
     "validate_template_complete",
     "validate_think_move_format",
-    "write_legacy_sft_jsonl",
+    "write_sft_jsonl",
 ]

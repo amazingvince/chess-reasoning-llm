@@ -30,7 +30,7 @@ Outputs:
 - `tier7/7.5_autodata_move_correction.jsonl`
 - `manifest.json`
 
-Each training row uses the legacy chat schema: `task`, `tier`, `fen`,
+Each training row uses the package SFT chat schema: `task`, `tier`, `fen`,
 `is_chess960`, `messages`, and `metadata`.
 
 ## Filters

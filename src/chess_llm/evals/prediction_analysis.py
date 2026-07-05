@@ -514,7 +514,7 @@ def _looks_like_square_edit_trace(lines: list[str]) -> bool:
     )
     rank_edits = sum(1 for line in lines if line.lower().startswith("rank "))
     result_fen = any(line.lower().startswith("result fen:") for line in lines)
-    legacy_trace = any(
+    loose_trace = any(
         line.lower().startswith(("lookup:", "squares:", "ranks:", "move "))
         for line in lines
     )
@@ -525,7 +525,7 @@ def _looks_like_square_edit_trace(lines: list[str]) -> bool:
     return (
         source_or_destination + rank_edits >= 2
         or result_fen and source_or_destination + rank_edits >= 1
-        or legacy_trace
+        or loose_trace
         or inline_trace and result_fen
     )
 

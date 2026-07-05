@@ -24,10 +24,8 @@ import sys
 from collections import defaultdict
 from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from uuid import uuid4
 
 from chess_llm.formats.prompts import SYSTEM_PROMPT
 from chess_llm.core.legality import (
@@ -41,17 +39,33 @@ from chess_llm.training.model_loading import (
 )
 from chess_llm.training.vllm_export import prepare_model_for_vllm
 from chess_llm.training.wandb_utils import wandb_config_error
+from chess_llm.training.eval_artifacts import (
+    evaluation_result as _evaluation_result,
+    finalize_evaluation_result_artifacts as _finalize_evaluation_result_artifacts,
+    write_evaluation_result_artifact as _write_evaluation_result_artifact,
+)
+from chess_llm.training.eval_config import (
+    DEFAULT_STOCKFISH_PATH,
+    EvaluationConfig,
+    EvaluationResult,
+)
 from chess_llm.training.eval_exit_codes import (
     EVAL_INFRA_FAILURE_EXIT_CODE,
     EVAL_METRIC_FAILURE_EXIT_CODE,
     EVAL_SUCCESS_EXIT_CODE,
 )
+from chess_llm.training.eval_scoring import (
+    score_evaluation_splits as _score_evaluation_splits,
+)
+from chess_llm.training.eval_wandb import (
+    build_wandb_payload as _build_wandb_payload,
+    maybe_log_to_wandb as _maybe_log_to_wandb,
+    wandb_preflight_error_code as _wandb_preflight_error_code,
+)
 
 import chess
 import chess.engine
 
-from chess_llm.artifacts.schemas import EvaluationRunArtifact
-from chess_llm.artifacts.eval_runs import finalize_evaluation_artifacts
 from chess_llm.evals.benchmark import (
     ACPL_INVALID_MOVE_PENALTY,
     BenchmarkExample,
@@ -64,9 +78,7 @@ from chess_llm.evals.benchmark import (
     centipawn_loss,
     extract_move,
     example_is_chess960,
-    format_compliance,
     legal_move_rate,
-    pass_at_k,
     normalize_prediction,
 )
 from chess_llm.evals.prediction_analysis import write_prediction_analysis_report
@@ -75,9 +87,6 @@ from chess_llm.external.multipv import SqliteMultipvCache, score_move_wpd
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
-
-
-DEFAULT_STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH") or shutil.which("stockfish") or "stockfish"
 
 
 @dataclass(frozen=True)
@@ -184,264 +193,6 @@ def _get_torch():
     import torch
 
     return torch
-
-
-@dataclass
-class EvaluationConfig:
-    """Programmatic configuration for one benchmark evaluation run."""
-
-    model: str
-    benchmark_dir: Path
-    output: Path
-    inference_backend: str = "transformers"
-    attn_implementation: str = "auto"
-    vllm_gpu_memory_utilization: float = 0.85
-    vllm_max_model_len: int | None = None
-    pass_k: int = 1
-    temperature: float | None = None
-    max_new_tokens: int = 512
-    min_planning_max_new_tokens: int = 256
-    batch_size: int = 16
-    max_examples_per_split: int | None = None
-    splits: tuple[str, ...] | None = None
-    full_benchmark: bool = False
-    run_ledger: Path | None = None
-    artifact_mirror_dir: Path | None = None
-    decision_rule: str | None = None
-    stockfish_path: str = DEFAULT_STOCKFISH_PATH
-    acpl_depth: int = 20
-    acpl_workers: int = 1
-    no_acpl: bool = False
-    full_acpl_report: bool = False
-    baseline: Path | None = None
-    phase: str | None = None
-    report_only: bool = False
-    soft_gate: bool = False
-    require_benchmark_manifest: bool = False
-    wandb_project: str = "chess-sft"
-    wandb_run_name: str | None = None
-    wandb_group: str | None = None
-    wandb_job_type: str = "benchmark-eval"
-    no_wandb: bool = False
-    allow_wandb_offline: bool = False
-
-    def __post_init__(self) -> None:
-        self.benchmark_dir = Path(self.benchmark_dir)
-        self.output = Path(self.output)
-        if self.run_ledger is not None:
-            self.run_ledger = Path(self.run_ledger)
-        if self.artifact_mirror_dir is not None:
-            self.artifact_mirror_dir = Path(self.artifact_mirror_dir)
-        if self.baseline is not None:
-            self.baseline = Path(self.baseline)
-
-    @classmethod
-    def from_namespace(cls, args: argparse.Namespace) -> "EvaluationConfig":
-        """Build an evaluation config from CLI-parsed arguments."""
-        return cls(
-            model=args.model,
-            benchmark_dir=args.benchmark_dir,
-            output=args.output,
-            inference_backend=args.inference_backend,
-            attn_implementation=args.attn_implementation,
-            vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-            vllm_max_model_len=args.vllm_max_model_len,
-            pass_k=args.pass_k,
-            temperature=args.temperature,
-            max_new_tokens=args.max_new_tokens,
-            min_planning_max_new_tokens=getattr(
-                args,
-                "min_planning_max_new_tokens",
-                256,
-            ),
-            batch_size=args.batch_size,
-            max_examples_per_split=args.max_examples_per_split,
-            splits=tuple(args.splits) if args.splits else None,
-            full_benchmark=args.full_benchmark,
-            run_ledger=getattr(args, "run_ledger", None),
-            artifact_mirror_dir=getattr(args, "artifact_mirror_dir", None),
-            decision_rule=getattr(args, "decision_rule", None),
-            stockfish_path=args.stockfish_path,
-            acpl_depth=args.acpl_depth,
-            acpl_workers=getattr(args, "acpl_workers", 1),
-            no_acpl=args.no_acpl,
-            full_acpl_report=args.full_acpl_report,
-            baseline=args.baseline,
-            phase=args.phase,
-            report_only=args.report_only,
-            soft_gate=args.soft_gate,
-            require_benchmark_manifest=getattr(
-                args,
-                "require_benchmark_manifest",
-                False,
-            ),
-            wandb_project=args.wandb_project,
-            wandb_run_name=args.wandb_run_name,
-            wandb_group=args.wandb_group,
-            wandb_job_type=args.wandb_job_type,
-            no_wandb=args.no_wandb,
-            allow_wandb_offline=args.allow_wandb_offline,
-        )
-
-
-@dataclass(frozen=True)
-class EvaluationResult:
-    """Structured result from one benchmark evaluation run."""
-
-    return_code: int
-    version: str
-    split_results: dict[str, dict[str, float]]
-    split_counts: dict[str, int]
-    has_acpl: bool
-    n_failures: int
-    predictions_path: Path
-    results_path: Path
-    eval_run_path: Path
-
-
-def _evaluation_result(
-    config: EvaluationConfig,
-    *,
-    return_code: int,
-    version: str = "unknown",
-    split_results: dict[str, dict[str, float]] | None = None,
-    split_counts: dict[str, int] | None = None,
-    has_acpl: bool = False,
-    n_failures: int = 0,
-) -> EvaluationResult:
-    return EvaluationResult(
-        return_code=return_code,
-        version=version,
-        split_results={} if split_results is None else split_results,
-        split_counts={} if split_counts is None else split_counts,
-        has_acpl=has_acpl,
-        n_failures=n_failures,
-        predictions_path=config.output,
-        results_path=config.output.with_suffix(".results.json"),
-        eval_run_path=config.output.with_suffix(".eval_run.json"),
-    )
-
-
-def _new_eval_run_id() -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"eval-{timestamp}-{uuid4().hex[:8]}"
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _evaluation_run_artifact(
-    config: EvaluationConfig,
-    result: EvaluationResult,
-    *,
-    primary_temperature: float,
-    sample_temperature: float,
-    metadata: dict[str, Any] | None = None,
-) -> EvaluationRunArtifact:
-    resolved_metadata = {
-        "eval_run_path": str(result.eval_run_path),
-        "wandb_project": config.wandb_project,
-        "wandb_run_name": config.wandb_run_name,
-        "wandb_group": config.wandb_group,
-        "wandb_job_type": config.wandb_job_type,
-        "wandb_enabled": not config.no_wandb,
-        "wandb_offline_allowed": config.allow_wandb_offline,
-        "require_benchmark_manifest": config.require_benchmark_manifest,
-        "run_ledger_path": str(config.run_ledger) if config.run_ledger else None,
-        "artifact_mirror_root": (
-            str(config.artifact_mirror_dir) if config.artifact_mirror_dir else None
-        ),
-        "decision_rule": config.decision_rule,
-    }
-    if metadata:
-        resolved_metadata.update(metadata)
-    return EvaluationRunArtifact(
-        run_id=_new_eval_run_id(),
-        created_at_utc=_utc_now_iso(),
-        model_id=config.model,
-        phase=config.phase,
-        benchmark_dir=str(config.benchmark_dir),
-        benchmark_manifest_path=str(config.benchmark_dir / "manifest.json"),
-        benchmark_version=result.version,
-        predictions_path=str(result.predictions_path),
-        results_path=str(result.results_path),
-        return_code=result.return_code,
-        split_counts=result.split_counts,
-        has_acpl=result.has_acpl,
-        n_failures=result.n_failures,
-        inference={
-            "backend": config.inference_backend,
-            "attn_implementation": config.attn_implementation,
-            "vllm_gpu_memory_utilization": config.vllm_gpu_memory_utilization,
-            "vllm_max_model_len": config.vllm_max_model_len,
-            "pass_k": config.pass_k,
-            "primary_temperature": primary_temperature,
-            "sample_temperature": sample_temperature,
-            "max_new_tokens": config.max_new_tokens,
-            "min_planning_max_new_tokens": config.min_planning_max_new_tokens,
-            "batch_size": config.batch_size,
-            "max_examples_per_split": config.max_examples_per_split,
-            "splits": list(config.splits) if config.splits is not None else None,
-            "effective_splits": sorted(result.split_counts),
-            "full_benchmark": config.full_benchmark,
-        },
-        scoring={
-            "stockfish_path": config.stockfish_path,
-            "acpl_depth": config.acpl_depth,
-            "acpl_workers": config.acpl_workers,
-            "no_acpl": config.no_acpl,
-            "full_acpl_report": config.full_acpl_report,
-        },
-        gate={
-            "baseline_path": str(config.baseline) if config.baseline else None,
-            "report_only": config.report_only,
-            "soft_gate": config.soft_gate,
-        },
-        metadata=resolved_metadata,
-    )
-
-
-def _write_evaluation_run_artifact(
-    path: Path,
-    artifact: EvaluationRunArtifact,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(artifact.to_dict(), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _write_evaluation_result_artifact(
-    config: EvaluationConfig,
-    result: EvaluationResult,
-    *,
-    primary_temperature: float = 0.0,
-    sample_temperature: float = 0.7,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    _write_evaluation_run_artifact(
-        result.eval_run_path,
-        _evaluation_run_artifact(
-            config,
-            result,
-            primary_temperature=primary_temperature,
-            sample_temperature=sample_temperature,
-            metadata=metadata,
-        ),
-    )
-
-
-def _finalize_evaluation_result_artifacts(
-    config: EvaluationConfig,
-    result: EvaluationResult,
-) -> None:
-    finalize_evaluation_artifacts(
-        result.eval_run_path,
-        ledger_path=config.run_ledger,
-        mirror_dir=config.artifact_mirror_dir,
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1863,129 +1614,6 @@ def print_report(
         )
 
 
-def _build_wandb_payload(
-    version: str,
-    split_results: dict[str, dict[str, float]],
-    split_counts: dict[str, int],
-    *,
-    n_failures: int,
-    has_acpl: bool,
-) -> dict[str, float | int | bool | str]:
-    """Flatten benchmark results into a single W&B log payload."""
-    payload: dict[str, float | int | bool | str] = {
-        "benchmark/version": version,
-        "phase_gate/failures": n_failures,
-        "phase_gate/passed": n_failures == 0,
-        "benchmark/has_acpl": has_acpl,
-    }
-    for split_name, count in split_counts.items():
-        payload[f"benchmark/{split_name}/count"] = count
-    for split_name, metrics in split_results.items():
-        for metric_name, value in metrics.items():
-            if isinstance(value, (int, float)):
-                payload[f"benchmark/{split_name}/{metric_name}"] = float(value)
-    return payload
-
-
-def _wandb_preflight_error_code(message: str) -> str:
-    """Classify W&B preflight failures for evaluation-run metadata."""
-    if "WANDB_MODE=offline" in message or "WANDB_MODE=dryrun" in message:
-        return "wandb_offline_disallowed"
-    if "WANDB_MODE/WANDB_DISABLED disables it" in message:
-        return "wandb_disabled"
-    return "wandb_auth_missing"
-
-
-def _maybe_log_to_wandb(
-    args: argparse.Namespace,
-    *,
-    version: str,
-    split_results: dict[str, dict[str, float]],
-    split_counts: dict[str, int],
-    has_acpl: bool,
-    n_failures: int,
-    results_path: Path,
-    eval_run_path: Path | None = None,
-    prediction_analysis_path: Path | None = None,
-) -> None:
-    """Log eval metrics and files to W&B when enabled."""
-    if args.no_wandb:
-        return
-
-    try:
-        import wandb
-    except ImportError:
-        logger.warning("wandb is not installed; skipping eval logging")
-        return
-
-    payload = _build_wandb_payload(
-        version,
-        split_results,
-        split_counts,
-        n_failures=n_failures,
-        has_acpl=has_acpl,
-    )
-    config = {
-        "model": args.model,
-        "benchmark_dir": str(args.benchmark_dir),
-        "phase": args.phase,
-        "inference_backend": args.inference_backend,
-        "attn_implementation": args.attn_implementation,
-        "pass_k": args.pass_k,
-        "temperature": args.temperature,
-        "max_new_tokens": args.max_new_tokens,
-        "batch_size": args.batch_size,
-        "max_examples_per_split": args.max_examples_per_split,
-        "stockfish_path": args.stockfish_path,
-        "acpl_depth": args.acpl_depth,
-        "acpl_enabled": not args.no_acpl,
-        "full_acpl_report": args.full_acpl_report,
-        "report_only": args.report_only,
-        "soft_gate": args.soft_gate,
-    }
-    init_kwargs = {
-        "project": args.wandb_project,
-        "job_type": args.wandb_job_type,
-        "config": config,
-        "reinit": True,
-    }
-    if args.wandb_run_name:
-        init_kwargs["name"] = args.wandb_run_name
-    if args.wandb_group:
-        init_kwargs["group"] = args.wandb_group
-
-    run = wandb.init(**init_kwargs)
-    if run is None:
-        logger.warning("wandb.init() returned no run; skipping eval logging")
-        return
-
-    try:
-        run.log(payload)
-        for key, value in payload.items():
-            run.summary[key] = value
-        run.summary["artifacts/predictions_path"] = str(args.output)
-        run.summary["artifacts/results_path"] = str(results_path)
-        if eval_run_path is not None:
-            run.summary["artifacts/eval_run_path"] = str(eval_run_path)
-        if prediction_analysis_path is not None:
-            run.summary["artifacts/prediction_analysis_path"] = str(prediction_analysis_path)
-
-        artifact_name = args.wandb_run_name or f"benchmark-eval-{args.phase or 'adhoc'}"
-        artifact = wandb.Artifact(artifact_name, type="benchmark-eval")
-        artifact.add_file(str(args.output), name=args.output.name)
-        artifact.add_file(str(results_path), name=results_path.name)
-        if eval_run_path is not None:
-            artifact.add_file(str(eval_run_path), name=eval_run_path.name)
-        if prediction_analysis_path is not None:
-            artifact.add_file(
-                str(prediction_analysis_path),
-                name=prediction_analysis_path.name,
-            )
-        run.log_artifact(artifact)
-    finally:
-        run.finish()
-
-
 def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     """Run benchmark evaluation and return structured metrics plus exit policy."""
     args = config
@@ -2212,123 +1840,26 @@ def run_evaluation(config: EvaluationConfig) -> EvaluationResult:
     for eid, vals in raw_predictions.items():
         flat_raw_preds[eid] = vals[0]
 
-    # Open Stockfish only for splits that need ACPL. By default, that is the
-    # Phase C planning gate, not every report split in every phase.
-    engine: chess.engine.SimpleEngine | None = None
-    has_acpl = False
-    if acpl_splits:
-        engine = _open_stockfish(args.stockfish_path)
-        has_acpl = engine is not None
-        if engine is not None:
-            logger.info("ACPL enabled for splits: %s", ", ".join(sorted(acpl_splits)))
-    else:
-        logger.info(
-            "ACPL disabled for this run. It is computed by default only for "
-            "Phase C planning eval; use --full-acpl-report for all splits."
-        )
-    acpl_engine_factory: Callable[[], chess.engine.SimpleEngine] | None = None
-    if engine is not None and args.acpl_workers > 1:
-        resolved_stockfish_path = _resolve_stockfish_path(args.stockfish_path)
-        if resolved_stockfish_path is not None:
-            acpl_engine_factory = (
-                lambda path=resolved_stockfish_path: chess.engine.SimpleEngine.popen_uci(
-                    path
-                )
-            )
-
-    # Score each split
-    split_results: dict[str, dict[str, float]] = {}
-    split_counts: dict[str, int] = {}
-
-    try:
-        for split_name, examples in split_examples.items():
-            # Compute ACPL if engine available
-            acpl_scores: dict[str, float] | None = None
-            wpd_scores: dict[str, dict[str, object]] | None = None
-            if engine and split_name in acpl_splits:
-                eval_cache_path = args.output.with_suffix(".multipv.sqlite")
-                acpl_scores = compute_acpl(
-                    engine,
-                    examples,
-                    flat_preds,
-                    args.acpl_depth,
-                    cache_path=eval_cache_path,
-                    workers=args.acpl_workers,
-                    engine_factory=acpl_engine_factory,
-                )
-                wpd_predictions: dict[str, object] = dict(flat_preds)
-                if sampled_predictions:
-                    wpd_predictions = {}
-                    for ex in examples:
-                        per_prompt_preds: list[str] = []
-                        if ex.example_id in flat_preds:
-                            per_prompt_preds.append(flat_preds[ex.example_id])
-                        per_prompt_preds.extend(sampled_predictions.get(ex.example_id, []))
-                        if len(per_prompt_preds) == 1:
-                            wpd_predictions[ex.example_id] = per_prompt_preds[0]
-                        elif per_prompt_preds:
-                            wpd_predictions[ex.example_id] = per_prompt_preds
-                wpd_scores = compute_wpd(
-                    engine,
-                    examples,
-                    wpd_predictions,
-                    depth=args.acpl_depth,
-                    cache_path=eval_cache_path,
-                )
-
-            metrics = _score_split_with_protocol_predictions(
-                examples,
-                flat_preds,
-                flat_raw_preds,
-                acpl_scores,
-                wpd_scores,
-            )
-
-            # pass@k for puzzle solving includes greedy first, then sampled candidates.
-            puzzle_examples = [e for e in examples if e.task_type == "puzzle_solve"]
-            if puzzle_examples and args.pass_k > 1:
-                for k in (1, args.pass_k):
-                    hits = 0
-                    for ex in puzzle_examples:
-                        preds = list(predictions.get(ex.example_id, [""]))
-                        preds.extend(sampled_predictions.get(ex.example_id, []))
-                        hits += pass_at_k(preds[:k], ex.gold_answer)
-                    metrics[f"puzzle_pass_at_{k}"] = hits / len(puzzle_examples)
-
-            # Aggregate format/legal metrics for planning split
-            planning_preds = [
-                (
-                    ex,
-                    flat_raw_preds.get(ex.example_id, flat_preds.get(ex.example_id, "")),
-                )
-                for ex in examples
-                if ex.task_type in ("best_move", "puzzle_solve", "best_line_trace")
-            ]
-            if planning_preds:
-                fc_scores = [format_compliance(p) for _, p in planning_preds]
-                lm_raw_scores = [
-                    legal_move_rate(
-                        p,
-                        ex.fen,
-                        chess960=_example_is_chess960(ex),
-                    )
-                    for ex, p in planning_preds
-                ]
-                # A prediction with no move tag is not a legal move: count it as
-                # 0.0 instead of dropping it from the denominator, which would
-                # inflate the gate metric.
-                lm_scores = [0.0 if v is None else v for v in lm_raw_scores]
-                metrics["format_compliance"] = sum(fc_scores) / len(fc_scores)
-                metrics["legal_move_rate"] = sum(lm_scores) / len(lm_scores)
-                metrics["missing_move_tag_count"] = float(
-                    sum(1 for v in lm_raw_scores if v is None)
-                )
-
-            split_results[split_name] = metrics
-            split_counts[split_name] = len(examples)
-    finally:
-        if engine:
-            engine.quit()
+    split_results, split_counts, has_acpl = _score_evaluation_splits(
+        split_examples=split_examples,
+        predictions=predictions,
+        sampled_predictions=sampled_predictions,
+        flat_preds=flat_preds,
+        flat_raw_preds=flat_raw_preds,
+        acpl_splits=acpl_splits,
+        output_path=args.output,
+        stockfish_path=args.stockfish_path,
+        acpl_depth=args.acpl_depth,
+        acpl_workers=args.acpl_workers,
+        pass_k=args.pass_k,
+        open_stockfish=_open_stockfish,
+        resolve_stockfish_path=_resolve_stockfish_path,
+        compute_acpl=compute_acpl,
+        compute_wpd=compute_wpd,
+        score_split_with_protocol_predictions=_score_split_with_protocol_predictions,
+        example_is_chess960=_example_is_chess960,
+        logger=logger,
+    )
 
     # Print report
     print_report(version, split_results, split_counts, has_acpl)

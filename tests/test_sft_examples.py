@@ -5,7 +5,7 @@ from chess_llm.sft import (
     SftExample,
     build_sft_messages,
     build_sft_row,
-    write_legacy_sft_jsonl,
+    write_sft_jsonl,
 )
 from chess_llm.sft.context import board_from_raw
 
@@ -26,7 +26,7 @@ def test_build_sft_messages_uses_standard_chat_roles():
     ]
 
 
-def test_build_sft_row_preserves_legacy_shape_and_copies_metadata():
+def test_build_sft_row_preserves_chat_shape_and_copies_metadata():
     metadata = {"source": "unit"}
     row = build_sft_row(
         task="7.1_best_move_selection",
@@ -51,7 +51,7 @@ def test_build_sft_row_preserves_legacy_shape_and_copies_metadata():
     ]
 
 
-def test_sft_example_round_trips_to_legacy_dict():
+def test_sft_example_round_trips_to_row_dict():
     example = SftExample(
         task="1.1_fen_to_board",
         tier=1,
@@ -73,7 +73,7 @@ def test_sft_example_round_trips_to_legacy_dict():
     )
 
 
-def test_write_legacy_sft_jsonl_writes_dict_rows(tmp_path):
+def test_write_sft_jsonl_writes_dict_rows(tmp_path):
     path = tmp_path / "rows.jsonl"
     row = build_sft_row(
         task="1.1_fen_to_board",
@@ -83,7 +83,7 @@ def test_write_legacy_sft_jsonl_writes_dict_rows(tmp_path):
         assistant_content="board",
     )
 
-    write_legacy_sft_jsonl(path, [row])
+    write_sft_jsonl(path, [row])
 
     assert json.loads(path.read_text(encoding="utf-8")) == row
 

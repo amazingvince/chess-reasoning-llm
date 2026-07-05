@@ -24,7 +24,7 @@ Available pieces:
 - `chess_llm.evals.batch_judge`: reads benchmark JSONL plus prediction JSONL
   and writes prompt, rollout, judgment, and manifest artifacts.
 - `chess_llm.autodata.sft_refresh`: converts judged single-move failures into
-  legacy-compatible Tier 7 SFT refresh rows.
+  Tier 7 SFT refresh rows.
 
 ## Intentionally Excluded
 

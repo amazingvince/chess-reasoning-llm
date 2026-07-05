@@ -1,4 +1,4 @@
-"""Helpers for legacy-compatible SFT chat rows."""
+"""Helpers for SFT chat rows."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def build_sft_row(
     metadata: Mapping[str, Any] | None = None,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> dict[str, Any]:
-    """Build the legacy JSONL row shape consumed by the trainer."""
+    """Build the JSONL row shape consumed by the trainer."""
     return {
         "task": task,
         "tier": int(tier),
@@ -52,7 +52,7 @@ def build_sft_row(
 
 @dataclass(frozen=True)
 class SftExample:
-    """A typed builder for one legacy-compatible SFT training row."""
+    """A typed builder for one SFT training row."""
 
     task: str
     tier: int
@@ -76,11 +76,11 @@ class SftExample:
         )
 
 
-def write_legacy_sft_jsonl(
+def write_sft_jsonl(
     path: str | Path,
     rows: Iterable[Mapping[str, Any] | SftExample],
 ) -> None:
-    """Write legacy SFT rows as JSONL, preserving order."""
+    """Write SFT rows as JSONL, preserving order."""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as fh:
