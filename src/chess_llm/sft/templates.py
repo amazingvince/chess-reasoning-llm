@@ -1,5 +1,5 @@
 """
-Prompt templates for all 57 SFT generator tasks.
+Prompt templates for SFT generator tasks.
 
 Each task has multiple prompt variants. Generators call
 select_template(task_id, rng) to pick one at random. Templates may use
@@ -226,6 +226,11 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'Answer format: return exactly five lines: "Verdict: correct|incorrect", '
         '"Attacked: yes|no", "Defended: yes|no", "Hanging: yes|no", and '
         '"Correction: <correct claim|none>".'
+    ),
+    "3.9_static_exchange_evaluation": (
+        'Answer format: return exactly four lines: "Move: <uci>", '
+        '"Target square: <square>", "Capture sequence: <uci>[, <uci>...]", '
+        'and "Net material for <white|black>: <signed-int> pawns".'
     ),
     "7.1_best_move_selection": _THINK_MOVE_ANSWER_CONTRACT,
     "best_move": _THINK_MOVE_ANSWER_CONTRACT,
@@ -565,6 +570,12 @@ TEMPLATES: dict[str, list[str]] = {
         "Position: {fen}\nVerify whether this statement is correct: {verification_claim}",
         "FEN: {fen}\nIs this claim right? {verification_claim}",
         "Board:\n{board}\nClaim to verify: {verification_claim}",
+    ],
+    "3.9_static_exchange_evaluation": [
+        "FEN: {fen}\nEvaluate the exchange after {capture_move}.",
+        "Position: {fen}\nIf {capture_move} is played, list the recapture sequence and net material.",
+        "Board:\n{board}\nSide to move: {side_to_move}\nAnalyze the capture {capture_move}.",
+        "FEN: {fen}\nCapture target: {target_square}\nWork out the static exchange for {capture_move}.",
     ],
 
     # ---- Tier 4: Evaluation ----

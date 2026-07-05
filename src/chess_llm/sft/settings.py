@@ -71,6 +71,7 @@ DEFAULT_VOLUMES: dict[str, int] = {
     "3.6_hanging_piece_status": 50_000,
     "3.7_hanging_piece_filter": 50_000,
     "3.8_hanging_piece_claim_verification": 50_000,
+    "3.9_static_exchange_evaluation": 40_000,
     "4.1_material_balance": 50_000,
     "4.2_position_evaluation": 60_000,
     "4.3_pawn_structure": 40_000,

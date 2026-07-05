@@ -1502,6 +1502,67 @@ def test_package_attacked_defended_registered_with_fixed_contract():
     assert TASK_DESCRIPTIONS["3.3_attacked_defended"]
 
 
+def test_package_static_exchange_evaluation_emits_fixed_sequence(monkeypatch):
+    from chess_llm.sft.generators.tier3_tactics import StaticExchangeEvaluation
+
+    class ChooseE4D5:
+        def choice(self, items):
+            for item in items:
+                if item.uci() == "e4d5":
+                    return item
+            return items[0]
+
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier3_tactics.select_template",
+        lambda _task_id, _rng: "FEN: {fen}\nEvaluate the exchange after {capture_move}.",
+    )
+
+    rows = list(
+        StaticExchangeEvaluation(
+            config={
+                "fen_pool": [
+                    "4k3/2n5/8/3p4/4P3/8/8/3R1K2 w - - 0 1"
+                ],
+                "volume_override": 1,
+            },
+            rng=ChooseE4D5(),
+        ).generate()
+    )
+
+    assert len(rows) == 1
+    assert "Evaluate the exchange after e4d5" in rows[0]["messages"][1]["content"]
+    assert rows[0]["messages"][2]["content"] == (
+        "Move: e4d5\n"
+        "Target square: d5\n"
+        "Capture sequence: e4d5, c7d5, d1d5\n"
+        "Net material for white: +3 pawns"
+    )
+    assert rows[0]["metadata"]["source"] == "static_exchange_evaluation"
+    assert rows[0]["metadata"]["capture_move"] == "e4d5"
+    assert rows[0]["metadata"]["target_square"] == "d5"
+    assert rows[0]["metadata"]["capture_sequence"] == ["e4d5", "c7d5", "d1d5"]
+    assert rows[0]["metadata"]["net_material_pawns"] == 3
+
+
+def test_package_static_exchange_evaluation_registered_with_fixed_contract():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier3_tactics import StaticExchangeEvaluation
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS
+
+    assert StaticExchangeEvaluation in pipeline.TIER_GENERATORS[3]
+    assert DEFAULT_VOLUMES["3.9_static_exchange_evaluation"] > 0
+    assert "Capture sequence:" in ANSWER_CONTRACTS[
+        "3.9_static_exchange_evaluation"
+    ]
+    assert TASK_IDENTITY_FIELDS["3.9_static_exchange_evaluation"] == (
+        "capture_move",
+    )
+    assert TASK_DESCRIPTIONS["3.9_static_exchange_evaluation"]
+
+
 def test_package_hanging_piece_status_teaches_attacked_defended_conjunction(monkeypatch):
     from chess_llm.sft.generators.tier3_tactics import HangingPieceStatus
 

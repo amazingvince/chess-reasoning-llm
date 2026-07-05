@@ -5,6 +5,7 @@
 3.3 Attacked/defended square analysis
 3.4 Tactical patterns (from Lichess puzzles by theme)
 3.5 Hanging pieces (undefended pieces under attack)
+3.9 Static exchange evaluation
 """
 
 from __future__ import annotations
@@ -94,6 +95,70 @@ def _format_piece_list(board: chess.Board, squares: list[int]) -> str:
     )
 
 
+def _capture_material_delta(
+    mover: chess.Color,
+    root_color: chess.Color,
+    captured_piece: chess.Piece,
+) -> int:
+    value = _PIECE_VALUES[captured_piece.piece_type]
+    return value if mover == root_color else -value
+
+
+def _least_valuable_recapture(
+    board: chess.Board,
+    target_square: int,
+) -> chess.Move | None:
+    recaptures = [
+        move
+        for move in board.legal_moves
+        if move.to_square == target_square
+        and board.is_capture(move)
+        and not board.is_en_passant(move)
+        and move.promotion is None
+    ]
+    if not recaptures:
+        return None
+
+    return min(
+        recaptures,
+        key=lambda move: (
+            _PIECE_VALUES[board.piece_type_at(move.from_square) or chess.KING],
+            move.uci(),
+        ),
+    )
+
+
+def _static_exchange_sequence(
+    board: chess.Board,
+    capture: chess.Move,
+) -> tuple[list[str], int]:
+    """Return an LVA recapture sequence and material delta for root side."""
+    exchange_board = board.copy(stack=False)
+    target_square = capture.to_square
+    root_color = exchange_board.turn
+    sequence: list[str] = []
+    net_material = 0
+    move = capture
+
+    while True:
+        captured_piece = exchange_board.piece_at(move.to_square)
+        if captured_piece is None:
+            break
+        net_material += _capture_material_delta(
+            exchange_board.turn,
+            root_color,
+            captured_piece,
+        )
+        sequence.append(move.uci())
+        exchange_board.push(move)
+
+        move = _least_valuable_recapture(exchange_board, target_square)
+        if move is None:
+            break
+
+    return sequence, net_material
+
+
 class AvailableCaptures(TaskGenerator):
     """Task 3.1: List all capture moves."""
 
@@ -125,6 +190,80 @@ class AvailableCaptures(TaskGenerator):
             else:
                 answer = " ".join(captures)
 
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class StaticExchangeEvaluation(TaskGenerator):
+    """Task 3.9: Evaluate one capture by least-valuable recapture sequence."""
+
+    def task_id(self) -> str:
+        return "3.9_static_exchange_evaluation"
+
+    def tier(self) -> int:
+        return 3
+
+    def generate(self) -> Iterator[dict]:
+        pool = self.config.get("fen_pool", [])
+        target = self.target_volume()
+        count = 0
+
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+
+            captures = [
+                move
+                for move in board.legal_moves
+                if board.is_capture(move)
+                and not board.is_en_passant(move)
+                and move.promotion is None
+            ]
+            if not captures:
+                continue
+
+            capture = self.rng.choice(captures)
+            sequence, net_material = _static_exchange_sequence(board, capture)
+            if not sequence:
+                continue
+
+            color_name = _color_name(board.turn)
+            target_square = chess.square_name(capture.to_square)
+            answer = "\n".join(
+                [
+                    f"Move: {capture.uci()}",
+                    f"Target square: {target_square}",
+                    f"Capture sequence: {', '.join(sequence)}",
+                    f"Net material for {color_name}: {net_material:+d} pawns",
+                ]
+            )
+
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source": "static_exchange_evaluation",
+                    "capture_move": capture.uci(),
+                    "target_square": target_square,
+                    "capture_sequence": sequence,
+                    "net_material_pawns": net_material,
+                    "net_material_for": color_name,
+                }
+            )
+            raw.update(
+                {
+                    "metadata": metadata,
+                    "capture_move": capture.uci(),
+                    "target_square": target_square,
+                }
+            )
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)

@@ -43,6 +43,7 @@ from chess_llm.sft.generators.tier3_tactics import (
     HangingPieceFilter,
     HangingPieceStatus,
     HangingPieces,
+    StaticExchangeEvaluation,
     TacticalPatterns,
     Threats,
 )
@@ -117,6 +118,7 @@ TIER_GENERATORS: dict[int, list[type[TaskGenerator]]] = {
         HangingPieceStatus,
         HangingPieceFilter,
         HangingPieceClaimVerification,
+        StaticExchangeEvaluation,
     ],
     4: [MaterialBalance, PositionEvaluation, PawnStructure],
     5: [OpeningIdentification, OpeningContinuation, OpeningPrinciples],
@@ -185,6 +187,7 @@ __all__ = [
     "SquareLookup",
     "SidePieceInventory",
     "SpecialRules",
+    "StaticExchangeEvaluation",
     "StateTracking",
     "StepVerification",
     "TIER_GENERATORS",

@@ -46,6 +46,7 @@ TASK_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
         "verification_claim",
         "corruption_kind",
     ),
+    "3.9_static_exchange_evaluation": ("capture_move",),
     "5.1_opening_identification": ("variant", "cycle"),
     "5.2_opening_continuation": ("variant", "cycle"),
     "5.3_opening_principles": ("variant", "cycle"),

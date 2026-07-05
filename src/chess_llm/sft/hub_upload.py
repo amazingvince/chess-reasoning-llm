@@ -65,6 +65,7 @@ TASK_DESCRIPTIONS = {
     "3.6_hanging_piece_status": "Classify whether one piece is attacked, defended, and hanging",
     "3.7_hanging_piece_filter": "Audit attacked pieces and filter defended decoys from hanging pieces",
     "3.8_hanging_piece_claim_verification": "Verify and correct hanging-piece claims",
+    "3.9_static_exchange_evaluation": "Work out capture recapture sequence and net material",
     "4.1_material_balance": "Count material and compute the balance",
     "4.2_position_evaluation": "Evaluate a position from engine-calibrated labels",
     "4.3_pawn_structure": "Analyze pawn structure",
