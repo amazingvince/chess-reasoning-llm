@@ -405,37 +405,3 @@ def test_row_level_contamination_catches_metadata_and_answer_fens(tmp_path):
     assert audit_output_files(output_dir, blocklist) == {
         str(train_path): [blocked, blocked]
     }
-
-
-def test_legacy_decontamination_wrapper_delegates_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.sft import decontamination as package_decontamination
-    from validation import decontamination as legacy_decontamination
-
-    assert (
-        legacy_decontamination.audit_output_files
-        is package_decontamination.audit_output_files
-    )
-    assert (
-        legacy_decontamination.check_no_contamination
-        is package_decontamination.check_no_contamination
-    )
-
-
-def test_legacy_eval_split_wrapper_preserves_monkeypatchable_sizes(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.sft import eval_split as package_eval_split
-    from pool import eval_split as legacy_eval_split
-
-    monkeypatch.setattr(legacy_eval_split, "EVAL_SPLIT_SIZES", {"perception": 2})
-    sources = {"perception": [{"fen": f"pos_{i}"} for i in range(10)]}
-
-    splits = legacy_eval_split.generate_all_eval_splits(sources, seed=42)
-
-    assert len(splits["perception"]) == 2
-    assert legacy_eval_split.build_blocklist is package_eval_split.build_blocklist
-    assert legacy_eval_split.partition_eco_codes is package_eval_split.partition_eco_codes

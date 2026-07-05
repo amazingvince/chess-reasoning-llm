@@ -12,7 +12,10 @@ from datasets import Dataset, concatenate_datasets
 
 from chess_llm.core.board import variant_fen_key
 from chess_llm.sft.context import raw_fen_identity_key
-from chess_llm.training.data.loader import load_tier_data
+from chess_llm.training.data.loader import (
+    TrainingDataTransformConfig,
+    load_tier_data,
+)
 from chess_llm.training.schedule import (
     ScheduleConfig,
     SegmentPlan,
@@ -248,6 +251,7 @@ def build_phase_dataset(
     eval_fraction: float = 0.02,
     seed: int = 42,
     task_upsample: Mapping[str, int] | None = None,
+    data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> tuple[Dataset, Dataset]:
     """Build train/eval datasets for one curriculum phase."""
     train_parts: list[Dataset] = []
@@ -258,7 +262,11 @@ def build_phase_dataset(
     loaded_tiers: list[tuple[_TierMixLike, Dataset, list[str]]] = []
     tier_rows: list[tuple[int, list[str], list[str]]] = []
     for tier_mix in phase.tier_mix:
-        ds = load_tier_data(tier_mix.tier, data_root)
+        ds = load_tier_data(
+            tier_mix.tier,
+            data_root,
+            transform_config=data_transform_config,
+        )
         if eval_fraction <= 0.0:
             loaded_tiers.append((tier_mix, ds, []))
             continue
@@ -313,7 +321,7 @@ def build_phase_dataset(
             tier=tier_mix.tier,
         )
 
-        if tier_mix.upsample > 1:
+        if tier_mix.upsample > 1 and len(tier_train) > 0:
             original_len = len(tier_train)
             tier_train = concatenate_datasets([tier_train] * tier_mix.upsample)
             logger.info(
@@ -324,10 +332,15 @@ def build_phase_dataset(
                 len(tier_train),
             )
 
-        train_parts.append(tier_train)
+        if len(tier_train) > 0:
+            train_parts.append(tier_train)
         if len(tier_eval) > 0:
             eval_parts.append(tier_eval)
 
+    if not train_parts:
+        raise ValueError(
+            f"Phase {phase.name!r} has no training examples after data transforms."
+        )
     train_ds = concatenate_datasets(train_parts).shuffle(seed=seed)
     eval_ds = concatenate_datasets(eval_parts) if eval_parts else train_ds.select([])
 
@@ -361,6 +374,7 @@ def summarize_phase_data(
     phase: _PhaseLike,
     data_root: Path,
     task_upsample: Mapping[str, int] | None = None,
+    data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> dict[str, int]:
     """Compute expected example counts per tier without building train/eval splits."""
     summary: dict[str, int] = {}
@@ -368,7 +382,11 @@ def summarize_phase_data(
     task_upsample = _normalize_task_upsample(task_upsample)
 
     for tier_mix in phase.tier_mix:
-        ds = load_tier_data(tier_mix.tier, data_root)
+        ds = load_tier_data(
+            tier_mix.tier,
+            data_root,
+            transform_config=data_transform_config,
+        )
         raw_count = len(ds)
 
         sampled = _sampled_count(raw_count, tier_mix.fraction)
@@ -435,6 +453,7 @@ def build_schedule_dataset(
     seed: int = 42,
     task_upsample: Mapping[str, int] | None = None,
     total_examples: int | None = None,
+    data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> tuple[Dataset, Dataset, list[SegmentPlan]]:
     """Build one sequential train dataset following the schedule's segments.
 
@@ -453,7 +472,11 @@ def build_schedule_dataset(
     loaded_tiers: list[tuple[int, Dataset, list[str]]] = []
     tier_rows_for_state: list[tuple[int, list[str], list[str]]] = []
     for tier in tiers_needed:
-        ds = load_tier_data(tier, data_root)
+        ds = load_tier_data(
+            tier,
+            data_root,
+            transform_config=data_transform_config,
+        )
         if eval_fraction <= 0.0:
             loaded_tiers.append((tier, ds, []))
             continue
@@ -542,7 +565,12 @@ def build_schedule_dataset(
             dict(plan.tier_rows),
         )
 
-    all_train = concatenate_datasets([pool for _, pool in train_pools])
+    nonempty_train_pools = [pool for _, pool in train_pools if len(pool) > 0]
+    if not nonempty_train_pools:
+        raise ValueError(
+            f"Schedule {schedule.name!r} has no training examples after data transforms."
+        )
+    all_train = concatenate_datasets(nonempty_train_pools)
     # Segment-ordered selection; no final shuffle — the order IS the schedule.
     train_ds = all_train.select(order)
     eval_ds = (
@@ -569,13 +597,18 @@ def summarize_schedule_data(
     data_root: Path,
     task_upsample: Mapping[str, int] | None = None,
     total_examples: int | None = None,
+    data_transform_config: TrainingDataTransformConfig | None = None,
 ) -> dict[str, Any]:
     """Dry-run summary: per-segment per-tier row counts plus boundary steps."""
     task_upsample = _normalize_task_upsample(task_upsample)
 
     pool_sizes: dict[int, int] = {}
     for tier in schedule_tiers(schedule.segments):
-        ds = load_tier_data(tier, data_root)
+        ds = load_tier_data(
+            tier,
+            data_root,
+            transform_config=data_transform_config,
+        )
         task_extra = _estimated_task_upsample_extra(ds, task_upsample, fraction=1.0)
         pool_sizes[tier] = len(ds) + task_extra
 

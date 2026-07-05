@@ -499,6 +499,33 @@ def load_prompt_tokenizer(model_path: str) -> AutoTokenizer:
     return tokenizer
 
 
+_FLASH_ATTENTION_EVAL_BACKENDS = {
+    "auto",
+    "flash_attention_2",
+    "flash_attention_3",
+    "flash_attention_4",
+    "hf_flash_attention_2",
+    "kernels-community/flash-attn2",
+    "kernels-community/flash-attn3",
+    "kernels-community/flash-attn4",
+    "kernels-community/vllm-flash-attn3",
+}
+
+
+def _eval_torch_dtype(attn_implementation: str | None, torch_module) -> object:
+    """Choose an eval load dtype compatible with flash-attention kernels."""
+    cuda = getattr(torch_module, "cuda", None)
+    is_available = getattr(cuda, "is_available", None) if cuda is not None else None
+    if not callable(is_available) or not is_available():
+        return "auto"
+
+    requested = attn_implementation or "auto"
+    base_backend = requested.split("@", 1)[0]
+    if base_backend in _FLASH_ATTENTION_EVAL_BACKENDS:
+        return torch_module.bfloat16
+    return "auto"
+
+
 def load_model_and_tokenizer(
     model_path: str,
     *,
@@ -510,7 +537,7 @@ def load_model_and_tokenizer(
 
     model_kwargs: dict = {
         "trust_remote_code": True,
-        "torch_dtype": "auto",
+        "torch_dtype": _eval_torch_dtype(attn_implementation, torch),
     }
 
     # ``device_map='auto'`` is much slower than a plain CUDA load when the
@@ -541,6 +568,7 @@ def load_model_and_tokenizer(
 
 
 _SYSTEM_PROMPT: str | None = None
+_TRACE_PROTOCOL_TASKS = frozenset({"best_move", "puzzle_solve", "best_line_trace"})
 
 
 def _get_system_prompt() -> str:
@@ -556,13 +584,11 @@ def format_prompt(example: BenchmarkExample, tokenizer: AutoTokenizer) -> str:
     user_content = example.prompt
     template_kwargs: dict[str, object] = {}
 
-    # Thinking-mode chat templates (Qwen3 and friends) default to burning the
-    # whole decode budget on benchmark questions. Always request
-    # ``enable_thinking=False``: sniffing the checkpoint name misses local
-    # checkpoint directories, and templates that reject the kwarg are handled
-    # by the TypeError fallback below. Do not add a textual /no_think
-    # directive because small SFT checkpoints can learn to echo it.
-    template_kwargs["enable_thinking"] = False
+    # Thinking-mode chat templates (Qwen3 and friends) can prefill the
+    # assistant response with <think>. Use that only for Phase C planning tasks
+    # whose metrics require a <think>/<move> response; keep it disabled
+    # elsewhere to avoid burning the decode budget on ordinary benchmark tasks.
+    template_kwargs["enable_thinking"] = _uses_trace_protocol(example)
 
     messages = [
         {"role": "system", "content": _get_system_prompt()},
@@ -583,6 +609,38 @@ def format_prompt(example: BenchmarkExample, tokenizer: AutoTokenizer) -> str:
             add_generation_prompt=True,
             **template_kwargs,
         )
+
+
+def format_prompt_with_assistant_prefill(
+    example: BenchmarkExample,
+    tokenizer: AutoTokenizer,
+) -> tuple[str, str]:
+    """Return the chat prompt plus any assistant prefill needed for raw scoring."""
+    prompt = format_prompt(example, tokenizer)
+    return prompt, _assistant_prefill_for_scoring(example, prompt)
+
+
+def _uses_trace_protocol(example: BenchmarkExample) -> bool:
+    return example.split == "planning" and example.task_type in _TRACE_PROTOCOL_TASKS
+
+
+def _assistant_prefill_for_scoring(
+    example: BenchmarkExample,
+    prompt: str,
+) -> str:
+    if not _uses_trace_protocol(example):
+        return ""
+    if prompt.endswith("<think>\n"):
+        return "<think>\n"
+    if prompt.endswith("<think>\n\n</think>\n\n"):
+        return "<think>\n\n</think>\n\n"
+    return ""
+
+
+def _stitch_assistant_prefill(prefill: str, completion: str) -> str:
+    if not prefill or completion.startswith("<think>"):
+        return completion
+    return prefill + completion
 
 
 def _seed_generation(seed: int) -> None:
@@ -620,7 +678,9 @@ def generate_predictions_transformers(
     predictions: dict[str, list[str]] = defaultdict(list)
 
     # Build prompts
-    prompts = [format_prompt(ex, tokenizer) for ex in examples]
+    prompt_parts = [format_prompt_with_assistant_prefill(ex, tokenizer) for ex in examples]
+    prompts = [prompt for prompt, _prefill in prompt_parts]
+    assistant_prefills = [prefill for _prompt, prefill in prompt_parts]
 
     gen_kwargs: dict = {
         "max_new_tokens": max_new_tokens,
@@ -655,6 +715,7 @@ def generate_predictions_transformers(
         batch_end = min(batch_start + effective_batch_size, len(prompts))
         batch_prompts = prompts[batch_start:batch_end]
         batch_examples = examples[batch_start:batch_end]
+        batch_prefills = assistant_prefills[batch_start:batch_end]
 
         inputs = tokenizer(
             batch_prompts,
@@ -676,6 +737,7 @@ def generate_predictions_transformers(
             for output in outputs[output_start:output_end]:
                 new_tokens = output[input_len:]
                 text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+                text = _stitch_assistant_prefill(batch_prefills[i], text)
                 predictions[ex.example_id].append(text)
 
     return dict(predictions)
@@ -746,7 +808,11 @@ class VllmPredictionGenerator:
                 "would generate identical greedy samples; pass a temperature "
                 "> 0 (e.g. 0.7) for pass@k sampling."
             )
-        prompts = [format_prompt(ex, self.tokenizer) for ex in examples]
+        prompt_parts = [
+            format_prompt_with_assistant_prefill(ex, self.tokenizer) for ex in examples
+        ]
+        prompts = [prompt for prompt, _prefill in prompt_parts]
+        assistant_prefills = [prefill for _prompt, prefill in prompt_parts]
         sampling_kwargs: dict = {
             "n": num_samples,
             "temperature": temperature,
@@ -758,9 +824,10 @@ class VllmPredictionGenerator:
 
         outputs = self.llm.generate(prompts, self.sampling_params_cls(**sampling_kwargs))
         predictions: dict[str, list[str]] = {}
-        for ex, output in zip(examples, outputs):
+        for ex, output, prefill in zip(examples, outputs, assistant_prefills, strict=False):
             predictions[ex.example_id] = [
-                candidate.text for candidate in output.outputs
+                _stitch_assistant_prefill(prefill, candidate.text)
+                for candidate in output.outputs
             ]
         return predictions
 

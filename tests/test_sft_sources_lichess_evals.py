@@ -60,6 +60,21 @@ def test_parse_lichess_eval_row_marks_mate_as_white_perspective():
     assert result["eval_perspective"] == "white"
 
 
+def test_parse_lichess_eval_row_rejects_parseable_but_invalid_fen():
+    result = parse_lichess_eval_row(
+        {
+            "fen": "7K/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/q6k b - -",
+            "line": "a1a2",
+            "depth": 30,
+            "knodes": 123,
+            "cp": 100,
+            "mate": None,
+        }
+    )
+
+    assert result is None
+
+
 def test_stream_evals_uses_injected_loader_and_actual_hf_schema(tmp_path):
     rows = [
         {
@@ -303,6 +318,30 @@ def test_stream_evals_cached_order_is_seed_stable_shuffle_not_depth_ranked(tmp_p
     assert sorted(depths) == list(range(21, 31))
     assert depths != sorted(depths, reverse=True)
     assert [row["fen"] for row in first] == [row["fen"] for row in second]
+
+
+def test_stream_evals_skips_invalid_cached_fens(tmp_path):
+    invalid_fen = "7K/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/q6k b - -"
+    db_path = tmp_path / "evals.db"
+    conn = _init_dedup_db(db_path)
+    _flush_batch(
+        conn,
+        [
+            (invalid_fen, "a1a2", "a1a2", 30, 100, 100, None),
+            (BLACK_TO_MOVE_FEN, "e7e5", "e7e5 g1f3", 30, 100, 20, None),
+        ],
+    )
+    conn.close()
+
+    result = list(
+        stream_evals(
+            min_depth=20,
+            dedup_db_path=db_path,
+            dataset_loader=lambda *_args, **_kwargs: (),
+        )
+    )
+
+    assert [row["fen"] for row in result] == [BLACK_TO_MOVE_FEN]
 
 
 def test_stream_evals_flushes_batches_and_survives_mid_stream_failure(

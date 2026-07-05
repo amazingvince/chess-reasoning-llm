@@ -17,8 +17,7 @@ DEFAULT_BASE_URL = "https://tablebase.lichess.ovh/tables/standard/"
 DEFAULT_TIMEOUT_SECONDS = 60
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 SYZYGY_PATH = SETTINGS.syzygy_path
 

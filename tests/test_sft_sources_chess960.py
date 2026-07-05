@@ -79,14 +79,3 @@ def test_package_chess960_generate_all_covers_960_ids():
     assert len(generated) == 960
     assert [pos_id for _, pos_id in generated] == list(range(960))
     assert all(board.chess960 for board, _ in generated)
-
-
-def test_legacy_chess960_wrapper_delegates_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.sft.sources import chess960 as package_chess960
-    from sources import chess960 as legacy_chess960
-
-    assert legacy_chess960.sample_chess960_positions is package_chess960.sample_chess960_positions
-    assert legacy_chess960.generate_random is package_chess960.generate_random

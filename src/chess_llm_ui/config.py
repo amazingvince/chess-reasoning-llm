@@ -37,7 +37,7 @@ class BackendSettings:
             book_root=Path(
                 os.getenv(
                     "CHESS_UI_BOOK_ROOT",
-                    root / "sft" / "make_data" / "polyglot_opening_books",
+                    root / "polyglot_opening_books",
                 )
             ),
             llm_base_url=os.getenv("CHESS_UI_LLM_BASE_URL"),

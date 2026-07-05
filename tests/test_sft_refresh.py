@@ -1,6 +1,5 @@
 import json
 import logging
-import sys
 from pathlib import Path
 
 import pytest
@@ -150,9 +149,7 @@ def test_parse_failure_creates_format_repair_row_that_passes_tier7_validation(tm
     assert rows[0]["metadata"]["source_prompt_id"] == "planning_00000"
     assert rows[0]["metadata"]["target_source"] == "gold_answer"
 
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-    from validation.validator import validate_example
+    from chess_llm.sft.validation import validate_example
 
     passed, errors = validate_example(rows[0])
     assert passed, errors

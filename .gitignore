@@ -12,11 +12,14 @@ logs/
 # Local environment files
 .env
 
-# Extracted polyglot books (regenerable via scripts/extract_polyglot_books.py)
-sft/make_data/polyglot_opening_books/*.bin
+# Extracted polyglot books (regenerable via chess-llm-extract-polyglot-books)
+polyglot_opening_books/*.bin
 
-# Syzygy tablebase data (940MB, downloaded via scripts/download_tablebases.py)
-sft/make_data/data/
+# Syzygy tablebase data (940MB, downloaded via chess-llm-download-tablebases)
+data/syzygy/
+
+# Retired pre-package SFT data tree; tracked shim files are deleted.
+sft/make_data/
 
 # Output data (generated, not source)
 chess_sft_data/

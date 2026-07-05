@@ -91,16 +91,3 @@ def test_audit_output_completeness_can_scope_to_selected_tasks(tmp_path):
     )
 
     assert issues == {}
-
-
-def test_legacy_completeness_wrapper_uses_monkeypatchable_volumes(monkeypatch, tmp_path):
-    legacy = importlib.import_module("sft.make_data.validation.completeness")
-    package = importlib.import_module("chess_llm.sft.completeness")
-
-    monkeypatch.setattr(legacy, "VOLUMES", {"1.1_fen_to_board": 1})
-    path = tmp_path / "tier1" / "1.1_fen_to_board.jsonl"
-    path.parent.mkdir()
-    path.write_text('{"row": 1}\n', encoding="utf-8")
-
-    assert legacy.expected_task_path is package.expected_task_path
-    assert legacy.audit_output_completeness(tmp_path) == {}

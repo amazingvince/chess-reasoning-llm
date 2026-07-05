@@ -59,14 +59,3 @@ def test_package_preflight_main_returns_failure_when_any_check_fails(monkeypatch
     output = capsys.readouterr().out
     assert "[PASS] Good: ok" in output
     assert "[FAIL] Bad: broken" in output
-
-
-def test_legacy_preflight_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.preflight")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_preflight_modules()
-
-    legacy_module = importlib.import_module("scripts.preflight_check")
-
-    assert legacy_module is package_module

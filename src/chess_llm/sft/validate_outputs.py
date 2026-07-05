@@ -19,8 +19,7 @@ from chess_llm.sft.validation import validate_example
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
 TIER_OUTPUT_DIR = SETTINGS.tier_output_dir

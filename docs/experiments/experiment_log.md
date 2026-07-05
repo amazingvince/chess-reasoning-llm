@@ -22,9 +22,10 @@ The working curriculum idea is:
 
 ### Data Generation State
 
-The package settings currently define 38 SFT tasks and 2.48M target examples
-across all tiers. Phase A is tiers 1-2 and currently totals 1.73M target rows
-before any task upsampling.
+As of the 2026-07-04 docs cleanup, package settings define 52 SFT tasks and
+3.15M target examples across all tiers. Phase A is tiers 1-2 and totals 2.30M
+target rows before task upsampling. Earlier entries below may mention the
+pre-expansion 38-task, 2.48M-row plan.
 
 Recent Phase A changes focused on explicit FEN and square mechanics because
 early eval showed that the model learned answer format faster than it learned
@@ -45,9 +46,9 @@ Current Phase A task targets:
 
 | Tier | Tasks | Target Rows |
 | --- | ---: | ---: |
-| Tier 1 perception/state | 14 | 1,320,000 |
-| Tier 2 rules | 6 | 410,000 |
-| Phase A total | 20 | 1,730,000 |
+| Tier 1 perception/state/material mechanics | 19 | 1,560,000 |
+| Tier 2 rules/legal-move decomposition | 12 | 740,000 |
+| Phase A total | 31 | 2,300,000 |
 
 ### Small Phase A Shakedown
 
@@ -118,7 +119,9 @@ idea (`1.5`, `1.9`, and `1.10` at 4x):
 | --- | ---: | ---: | ---: | ---: |
 | 5K per Phase A task | 100K | 145K | 46.5M | about 1 hour |
 | 25K per Phase A task | 500K | 725K | 232M | about 5 hours |
-| Full Phase A targets | 1.73M | 2.63M | 840M | about 18-20 hours |
+| Historical full Phase A target before task expansion | 1.73M | 2.63M | 840M | about 18-20 hours |
+
+This sizing table predates the current 2.30M-row Phase A target.
 
 ### Kernel And Attention Findings
 
@@ -570,3 +573,63 @@ Decision:
 - Keep trainer eval disabled and run vLLM sidecar eval on the second GPU; the
   normal `phase_a/best` path is now acceptable because eval prepares the wrapper
   export automatically.
+
+### Phase C Big Curriculum H100 Run - 2026-07-05
+
+Run identity:
+
+- Original root:
+  `/workspace/chess_sft_checkpoints/phase-c-bigcurriculum1-from-moveonly2-h100-fa3-20260705T152121Z`
+- Recovery root:
+  `/root/chess_sft_checkpoints/phase-c-bigcurriculum1-stage3-resume-from-stage2-20260705T164055Z`
+- Final model:
+  `/root/chess_sft_checkpoints/phase-c-bigcurriculum1-stage3-resume-from-stage2-20260705T164055Z/final_best`
+- Local artifacts:
+  `artifacts/evals/phase-c-bigcurriculum1-stage3-resume-20260705/`
+- Remote eval JSONL mirror:
+  `artifacts/evals/remote_jsonl/`
+- JSONL mirror manifest:
+  `artifacts/evals/remote_jsonl_manifest.json`
+- JSONL mirror status: 39 remote eval JSONL files present locally, 0 failures
+  as of `2026-07-05T17:43:58Z`.
+- Detailed note:
+  `docs/experiments/runs/2026-07-05_phase_c_contractfix.md`
+
+Training summary:
+
+- Started from `moveonly2`.
+- Stage 1: 800 steps.
+- Stage 2: 900 steps, completed but failed while saving `best` because
+  `/workspace` filled.
+- Stage 3: resumed from `stage2/phase_c/checkpoint-900` under `/root`, 700
+  steps, completed.
+- Final eval completed with 500 examples per split, pass@8, and Stockfish
+  depth 12 ACPL/WPD.
+
+Final metrics:
+
+| metric | value |
+| --- | ---: |
+| planning overall | 22.44% |
+| best_move | 12.00% |
+| puzzle_solve pass@1 | 23.21% |
+| puzzle_solve pass@8 | 34.29% |
+| candidate_ratings | 76.67% |
+| legal_move_rate | 86.84% |
+| WPD, depth 12 | 45.74% |
+| ACPL, depth 12 | 1642.9 cp |
+| perception overall | 99.4% |
+| rules overall | 81.0% |
+| tactics overall | 47.2% |
+| evaluation overall | 83.6% |
+| openings overall | 52.9% |
+| endgames overall | 70.4% |
+
+Decision:
+
+- Do not promote as the new Phase C planning-quality champion.
+- Compared with `moveonly2`, this run improves best-move exactness, legal move
+  rate, candidate ratings, and broad replay retention, but regresses planning
+  overall, puzzle solve, WPD, and ACPL.
+- Keep `moveonly2` as the planning-quality reference; keep this run as a
+  curriculum/replay data point.

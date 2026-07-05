@@ -166,14 +166,3 @@ def test_upload_eval_fails_instead_of_publishing_zero_benchmark_files(tmp_path: 
     )
 
     assert exit_code == 1
-
-
-def test_legacy_push_to_hub_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.hub_upload")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    sys.modules.pop("scripts.push_to_hub", None)
-
-    legacy_module = importlib.import_module("scripts.push_to_hub")
-
-    assert legacy_module is package_module

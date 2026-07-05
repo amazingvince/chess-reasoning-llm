@@ -207,16 +207,3 @@ def test_open_stockfish_passes_limit_strength_elo_from_config(tmp_path):
             "UCI_Elo": 1320,
         }
     ]
-
-
-def test_legacy_stockfish_wrapper_delegates_to_package(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    sys.modules.pop("sources.stockfish_engine", None)
-
-    legacy = importlib.import_module("sources.stockfish_engine")
-    package = importlib.import_module("chess_llm.external.stockfish")
-
-    assert issubclass(legacy.StockfishWrapper, package.StockfishWrapper)
-    wrapper = legacy.StockfishWrapper()
-    assert wrapper.path

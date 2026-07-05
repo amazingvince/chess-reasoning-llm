@@ -171,14 +171,3 @@ def test_extract_7z_does_not_pass_traversal_targets_to_extractor(tmp_path: Path)
     assert calls[0]["kwargs"]["targets"] == ["safe/book.bin"]
     assert not (tmp_path.parent / "escape.bin").exists()
     assert not (tmp_path / "abs.bin").exists()
-
-
-def test_legacy_extract_polyglot_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.extract_polyglot_books")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_extract_modules()
-
-    legacy_module = importlib.import_module("scripts.extract_polyglot_books")
-
-    assert legacy_module is package_module

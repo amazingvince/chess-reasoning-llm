@@ -38,6 +38,8 @@ _CACHE_SHUFFLE_SEED = 0
 def normalize_pv_line(fen: str, line: str, *, chess960: bool = False) -> str:
     """Normalize a principal variation into canonical UCI moves."""
     board = chess.Board(fen, chess960=chess960)
+    if not board.is_valid():
+        raise ValueError(f"invalid FEN: {fen}")
     normalized: list[str] = []
     for token in line.split():
         move = board.parse_uci(token)

@@ -176,6 +176,30 @@ def test_package_phase_gate_excludes_new_diagnostic_metric_names_from_floor_chec
     assert "rules/legal_moves_by_piece_set_f1" not in output
 
 
+def test_package_phase_gate_keeps_opening_exact_telemetry_out_of_floor_checks():
+    results = {
+        "perception": {"board_print": 0.95, "state_tracking": 0.85},
+        "rules": {"legal_moves": 0.90, "legality_check": 0.95},
+        "evaluation": {"material_balance": 0.99},
+        "tactics": {"capture_id": 0.60},
+        "openings": {
+            "opening_name": 0.61,
+            "opening_name_exact_match": 0.0,
+            "opening_name_eco_exact": 0.0,
+            "opening_name_eco_decade": 0.61,
+            "opening_name_name_family": 0.53,
+            "opening_continuation": 0.60,
+        },
+        "endgames": {"endgame_wdl": 0.90, "endgame_best_move": 0.60},
+    }
+
+    failures, output = _capture_gate(results, phase="b")
+
+    assert failures == 0
+    assert "openings/opening_name_exact_match" not in output
+    assert "openings/opening_name_eco_exact" not in output
+
+
 def test_package_phase_gate_excludes_new_diagnostic_metric_names_from_regression_checks():
     results = {
         "perception": {
@@ -276,21 +300,3 @@ def test_package_phase_gate_reports_count_metrics_as_informational_in_regression
     ) in output
     assert "[FAIL] rules/missing_move_count" not in output
     assert "[PASS] All metrics within 5% of best-historical baseline" in output
-
-
-def test_legacy_phase_gate_reexports_package_function():
-    import importlib.util
-    from pathlib import Path
-
-    phase_gate_path = (
-        Path(__file__).resolve().parents[1] / "sft" / "training" / "phase_gate.py"
-    )
-    spec = importlib.util.spec_from_file_location("legacy_phase_gate", phase_gate_path)
-    assert spec is not None
-    assert spec.loader is not None
-    legacy = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(legacy)
-
-    from chess_llm.training.phase_gate import check_phase_criteria
-
-    assert legacy.check_phase_criteria is check_phase_criteria

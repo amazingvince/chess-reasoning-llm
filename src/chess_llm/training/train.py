@@ -128,6 +128,37 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--task-include",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Keep only examples from this task before training sanitization. "
+            "Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
+        "--task-exclude",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Drop examples from this task before training sanitization. "
+            "Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
+        "--move-only-task",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Rewrite this task's assistant target to a compact "
+            "<think>...</think><move>...</move> move-only answer. "
+            "Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
         "--schedule-total-examples", type=int, default=None,
         help=(
             "Total training-example budget for --phase schedule "
@@ -165,6 +196,12 @@ def parse_args() -> argparse.Namespace:
         type=_positive_float,
         default=None,
         help="Override trainer num_train_epochs; use 1 for a one-pass generated-data run",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=_positive_float,
+        default=None,
+        help="Override the phase learning rate for controlled continuation probes",
     )
     parser.add_argument(
         "--trainer-eval-steps",
@@ -386,6 +423,7 @@ def main() -> int:
     task_upsample = _parse_task_upsample_overrides(
         getattr(args, "task_upsample", [])
     )
+    data_transform_config = _build_data_transform_config(args)
 
     from chess_llm.training.data.mixer import build_phase_dataset, summarize_phase_data
     from chess_llm.training.phases import PHASES, resolve_checkpoint
@@ -438,12 +476,19 @@ def main() -> int:
     # --- Dry run ---
     if args.dry_run:
         if is_schedule:
-            return _schedule_dry_run(phase, args, overrides, task_upsample)
+            return _schedule_dry_run(
+                phase,
+                args,
+                overrides,
+                task_upsample,
+                data_transform_config,
+            )
         logger.info("--- DRY RUN: data summary ---")
         summary = summarize_phase_data(
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            **_data_transform_kwargs(data_transform_config),
         )
         for key, count in sorted(summary.items()):
             logger.info("  %-12s %8d", key, count)
@@ -451,6 +496,7 @@ def main() -> int:
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            **_data_transform_kwargs(data_transform_config),
         )
         train_split_count = len(train_ds)
         eval_split_count = len(eval_ds)
@@ -487,7 +533,11 @@ def main() -> int:
                 eval_split_count,
                 effective_trainer_eval_count,
             )
-        logger.info("Learning rate: %s", phase.learning_rate)
+        learning_rate_override = getattr(args, "learning_rate", None)
+        effective_learning_rate = (
+            learning_rate_override if learning_rate_override is not None else phase.learning_rate
+        )
+        logger.info("Learning rate: %s", effective_learning_rate)
         effective_epochs = overrides.num_train_epochs or phase.epochs
         logger.info("Epochs: %s", _format_epoch_count(effective_epochs))
         from chess_llm.training.training_args import resolve_packing_settings
@@ -637,6 +687,7 @@ def main() -> int:
                 overrides,
                 task_upsample,
                 output_dir,
+                data_transform_config=data_transform_config,
             )
         )
     else:
@@ -644,6 +695,7 @@ def main() -> int:
             phase,
             args.data_root,
             task_upsample=task_upsample,
+            **_data_transform_kwargs(data_transform_config),
         )
         train_ds = _limit_dataset(train_ds, overrides.max_train_examples, seed=42)
     eval_ds = _limit_dataset(eval_ds, overrides.max_eval_examples, seed=42)
@@ -717,6 +769,7 @@ def main() -> int:
         logging_steps=overrides.logging_steps,
         trainer_eval=trainer_eval_enabled,
         attn_implementation=selected_attn,
+        learning_rate=getattr(args, "learning_rate", None),
         sequential_dataset=is_schedule,
     )
     if is_schedule:
@@ -1107,6 +1160,26 @@ def _parse_task_upsample_overrides(values: list[str] | None) -> dict[str, int]:
     return result
 
 
+def _build_data_transform_config(args: argparse.Namespace):
+    """Build row-level training-data transform controls from CLI args."""
+    from chess_llm.training.data.loader import TrainingDataTransformConfig
+
+    return TrainingDataTransformConfig(
+        task_include=getattr(args, "task_include", []),
+        task_exclude=getattr(args, "task_exclude", []),
+        move_only_tasks=getattr(args, "move_only_task", []),
+    )
+
+
+def _data_transform_kwargs(data_transform_config) -> dict[str, Any]:
+    """Return mixer kwargs only when data transforms are active."""
+    if data_transform_config is None:
+        return {}
+    if getattr(data_transform_config, "is_default", False):
+        return {}
+    return {"data_transform_config": data_transform_config}
+
+
 def _schedule_mode_config_error(args: argparse.Namespace) -> str | None:
     """Return a clear error for CLI flags that conflict with schedule mode."""
     if getattr(args, "require_phase_gate", False):
@@ -1147,6 +1220,8 @@ def _build_schedule_training_data(
     overrides: RunOverrides,
     task_upsample: dict[str, int],
     output_dir: Path,
+    *,
+    data_transform_config=None,
 ):
     """Build the schedule train/eval datasets and persist the segment plan.
 
@@ -1166,6 +1241,7 @@ def _build_schedule_training_data(
         args.data_root,
         task_upsample=task_upsample,
         total_examples=total_examples,
+        **_data_transform_kwargs(data_transform_config),
     )
     boundaries = boundary_steps(plans)
     _write_schedule_plan(
@@ -1222,6 +1298,7 @@ def _schedule_dry_run(
     args: argparse.Namespace,
     overrides: RunOverrides,
     task_upsample: dict[str, int],
+    data_transform_config,
 ) -> int:
     """Print the schedule data plan, boundaries, and warmup, then exit."""
     import math
@@ -1238,6 +1315,7 @@ def _schedule_dry_run(
         args.data_root,
         task_upsample=task_upsample,
         total_examples=total_examples,
+        **_data_transform_kwargs(data_transform_config),
     )
     logger.info("Total example budget: %d", summary["total_examples"])
     for key, count in sorted(summary["tier_pool_sizes"].items()):
@@ -1277,7 +1355,10 @@ def _schedule_dry_run(
     )
     logger.info("Estimated optimizer steps: %d (effective batch 32)", total_steps)
     logger.info("Warmup steps: %d (ratio %g)", warmup_steps, schedule.warmup_ratio)
-    logger.info("Learning rate: %s", schedule.learning_rate)
+    effective_learning_rate = (
+        args.learning_rate if getattr(args, "learning_rate", None) is not None else schedule.learning_rate
+    )
+    logger.info("Learning rate: %s", effective_learning_rate)
     return 0
 
 

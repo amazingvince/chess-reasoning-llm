@@ -24,6 +24,10 @@ from chess_llm.core.legality import (
     random_illegal_move_with_reason,
 )
 from chess_llm.core.rays import SLIDER_RAY_DIRECTIONS, format_ray_walk_answer
+from chess_llm.core.hanging import (
+    hanging_piece_claim_verification_score,
+    select_hanging_claim_case,
+)
 from chess_llm.core.board import is_legal_move
 from chess_llm.formats.answers import (
     extract_move as _extract_move_from_answer_text,
@@ -79,6 +83,12 @@ _LEGAL_MOVES_BY_PIECE_LINE_RE = re.compile(
     r"(.*?)\s*$",
     re.IGNORECASE,
 )
+_HANGING_PIECE_RE = re.compile(
+    r"\b(white|black)\s+"
+    r"(queen|rook|bishop|knight|pawn)\s+"
+    r"on\s+([a-h][1-8])\b",
+    re.IGNORECASE,
+)
 _ANY_MOVE_TAG_RE = re.compile(r"<move\b[^>]*>.*?</move>", re.DOTALL | re.IGNORECASE)
 _NEGATION_RE: re.Pattern[str] | None = None
 _FEN_RE = re.compile(
@@ -110,6 +120,7 @@ DIAGNOSTIC_TASK_TYPES = frozenset({
     "ray_walk",
     "legal_filter_trace",
     "multi_state_tracking",
+    "hanging_piece_claim_verification",
     "step_verification",
 })
 FULL_FEN_STATE_PROMPT_TASK_TYPES = frozenset({
@@ -163,7 +174,13 @@ SPLIT_TASK_TYPES: dict[str, list[str]] = {
         "ray_walk",
         "legal_filter_trace",
     ],
-    "tactics": ["capture_id", "hanging_pieces", "threats", "tactical_patterns"],
+    "tactics": [
+        "capture_id",
+        "hanging_pieces",
+        "threats",
+        "tactical_patterns",
+        "hanging_piece_claim_verification",
+    ],
     "evaluation": ["material_balance", "eval_bucket", "pawn_structure"],
     "openings": ["opening_name", "opening_continuation"],
     "endgames": ["endgame_classification", "endgame_wdl", "endgame_best_move"],
@@ -231,6 +248,13 @@ CANONICAL_PROMPTS: dict[str, str] = {
         "FEN: {fen}\nTrace to verify:\n{verification_trace}\n"
         "Find the broken line, or say the trace is sound."
     ),
+    "hanging_piece_claim_verification": (
+        "FEN: {fen}\nClaim to verify: {verification_claim}\n\n"
+        "Answer format: return exactly five lines: "
+        "\"Verdict: correct|incorrect\", \"Attacked: yes|no\", "
+        "\"Defended: yes|no\", \"Hanging: yes|no\", and "
+        "\"Correction: <correct claim|none>\"."
+    ),
     "legal_moves_960": "FEN: {fen}\nList all legal moves.",
     "check_detection_960": "FEN: {fen}\nDetect the game state: check, checkmate, stalemate, or none.",
     "castling_rules_960": "FEN: {fen}\nWhat castling options are available?",
@@ -274,6 +298,7 @@ TASK_METRIC_TYPE: dict[str, str] = {
     "hanging_pieces": "exact_match",
     "threats": "threat_f1",
     "tactical_patterns": "exact_match",
+    "hanging_piece_claim_verification": "hanging_piece_claim_verification",
     "material_balance": "exact_match",
     "eval_bucket": "eval_bucket",
     "pawn_structure": "exact_match",
@@ -307,11 +332,18 @@ _META_KEYS = frozenset({
     "multipv_k", "pv", "pv_line", "pv_len", "best_line_trace",
     "verification_trace", "verification_verdict", "faulty_line",
     "error_type", "correction", "source_task", "corruption_kind",
+    "verification_claim", "query_square", "query_piece", "query_color",
+    "claimed_hanging", "hanging_status",
 })
 
 _NO_MOVE_RE = re.compile(
     r"\b(?:no|none|zero)\b.*\b(?:legal\s+)?(?:moves?|captures?)\b"
     r"|(?:legal\s+)?(?:moves?|captures?)(?:\s+available)?\s*:\s*(?:none|no)\b",
+    re.IGNORECASE,
+)
+_OPENING_ECO_RE = re.compile(r"\bECO\s*:\s*([A-E]\d{2})\b", re.IGNORECASE)
+_OPENING_PREFIX_RE = re.compile(
+    r"^(?:the\s+opening\s+is|opening\s*:|answer\s*:)\s*",
     re.IGNORECASE,
 )
 
@@ -370,6 +402,65 @@ def _canonical_start_fen_for_prompt(fen: str, *, chess960: bool = False) -> str:
 def exact_match(prediction: str, gold: str) -> float:
     """1.0 if normalized prediction == normalized gold, else 0.0."""
     return 1.0 if prediction.strip().lower() == gold.strip().lower() else 0.0
+
+
+def _opening_eco_code(text: str) -> str:
+    match = _OPENING_ECO_RE.search(text or "")
+    return match.group(1).upper() if match else ""
+
+
+def _opening_name_text(text: str) -> str:
+    cleaned = _OPENING_ECO_RE.sub(" ", text or "")
+    cleaned = re.sub(r"\(\s*\)", " ", cleaned)
+    cleaned = cleaned.strip(" \t\r\n.:;-")
+    cleaned = _OPENING_PREFIX_RE.sub("", cleaned).strip(" \t\r\n.:;-")
+    return " ".join(cleaned.lower().split())
+
+
+def _opening_family(text: str) -> str:
+    name = _opening_name_text(text)
+    if not name:
+        return ""
+    return re.split(r"[:;,]", name, maxsplit=1)[0].strip()
+
+
+def opening_name_scores(prediction: str, gold: str) -> dict[str, float]:
+    """Score opening names by stable family/ECO signal, with exact telemetry."""
+    pred_eco = _opening_eco_code(prediction)
+    gold_eco = _opening_eco_code(gold)
+    pred_family = _opening_family(prediction)
+    gold_family = _opening_family(gold)
+    exact = exact_match(prediction, gold)
+    eco_exact = 1.0 if pred_eco and gold_eco and pred_eco == gold_eco else 0.0
+    eco_decade = (
+        1.0
+        if pred_eco and gold_eco and pred_eco[:2] == gold_eco[:2]
+        else 0.0
+    )
+    name_family = (
+        1.0
+        if pred_family and gold_family and pred_family == gold_family
+        else 0.0
+    )
+    primary = max(exact, eco_decade, name_family)
+    return {
+        "primary": primary,
+        "exact_match": exact,
+        "eco_exact": eco_exact,
+        "eco_decade": eco_decade,
+        "name_family": name_family,
+    }
+
+
+def tactical_pattern_scores(prediction: str, gold: str) -> dict[str, float]:
+    """Score tactical pattern tasks by the requested best move."""
+    gold_move = extract_move(gold) or gold.strip()
+    best_move_match = move_extraction_match(prediction, gold_move) if gold_move else 0.0
+    return {
+        "primary": best_move_match,
+        "best_move_match": best_move_match,
+        "exact_match": exact_match(prediction, gold),
+    }
 
 
 _MATERIAL_PIECE_NAMES = ("king", "queen", "rook", "bishop", "knight", "pawn")
@@ -1061,6 +1152,37 @@ def threat_f1(prediction: str, gold: str) -> float:
     return 2.0 * precision * recall / (precision + recall)
 
 
+def _hanging_piece_set(text: str) -> set[tuple[str, str, str]]:
+    parsed = text or ""
+    if "Hanging pieces:" in parsed:
+        parsed = parsed.rsplit("Hanging pieces:", 1)[1]
+    elif "hanging pieces:" in parsed.lower():
+        index = parsed.lower().rfind("hanging pieces:")
+        parsed = parsed[index + len("hanging pieces:") :]
+    elif "no hanging pieces" in parsed.lower():
+        return set()
+    return {
+        (color.lower(), piece.lower(), square.lower())
+        for color, piece, square in _HANGING_PIECE_RE.findall(parsed)
+    }
+
+
+def hanging_pieces_set_f1(prediction: str, gold: str) -> float:
+    """F1 score for hanging-piece list predictions."""
+    pred_set = _hanging_piece_set(prediction)
+    gold_set = _hanging_piece_set(gold)
+    if not pred_set and not gold_set:
+        return 1.0
+    if not pred_set or not gold_set:
+        return 0.0
+    true_positive = len(pred_set & gold_set)
+    precision = true_positive / len(pred_set)
+    recall = true_positive / len(gold_set)
+    if precision + recall == 0.0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
+
+
 def _parse_threat_set(text: str) -> set[str]:
     parsed = text.strip().lower()
     if "no immediate threats" in parsed or "no " in parsed and "threat" in parsed:
@@ -1318,7 +1440,11 @@ def score_prediction(
     elif example.task_type == "step_verification":
         metric = "step_verification"
 
-    if metric == "move_extraction":
+    if example.task_type == "opening_name":
+        scores.update(opening_name_scores(prediction, gold))
+    elif example.task_type == "tactical_patterns":
+        scores.update(tactical_pattern_scores(prediction, gold))
+    elif metric == "move_extraction":
         scores["primary"] = move_extraction_match(prediction, gold)
     elif metric == "move_choice":
         meta = example.metadata
@@ -1387,8 +1513,13 @@ def score_prediction(
         scores.update(best_line_trace_score(raw_prediction, gold))
     elif metric == "step_verification":
         scores.update(step_verification_score(prediction, gold))
+    elif metric == "hanging_piece_claim_verification":
+        scores.update(hanging_piece_claim_verification_score(prediction, gold))
     else:
         scores["primary"] = exact_match(prediction, gold)
+
+    if example.task_type == "hanging_pieces":
+        scores["set_f1"] = hanging_pieces_set_f1(prediction, gold)
 
     if example.task_type in ("best_move", "puzzle_solve", "best_line_trace"):
         scores["format_compliance"] = format_compliance(raw_prediction)
@@ -1845,6 +1976,32 @@ def _derive_hanging_pieces(fen: str, chess960: bool = False) -> str:
     if hanging:
         return f"Hanging pieces: {', '.join(hanging)}."
     return "No hanging pieces — all attacked pieces are defended."
+
+
+def _derive_hanging_piece_claim_verification(
+    fen: str,
+    rng: Random,
+    chess960: bool = False,
+) -> dict[str, object]:
+    board = _board_from_fen(fen, chess960=chess960)
+    case = select_hanging_claim_case(board, rng.randrange(10_000))
+    if case is None:
+        return {}
+    return {
+        "answer": case.answer,
+        "verification_claim": case.verification_claim,
+        "corruption_kind": case.corruption_kind,
+        "query_square": case.query_square,
+        "query_piece": case.query_piece,
+        "query_color": case.query_color,
+        "attacked": case.attacked,
+        "defended": case.defended,
+        "hanging": case.hanging,
+        "claimed_hanging": case.claimed_hanging,
+        "verification_verdict": case.verdict,
+        "hanging_status": case.hanging_status,
+        "correction": case.correction,
+    }
 
 
 def _derive_threats(fen: str, chess960: bool = False) -> tuple[str, str]:
@@ -3010,6 +3167,18 @@ def _derive_gold_answer_inner(
         return answer
     if task_type == "hanging_pieces":
         return _derive_hanging_pieces(fen, chess960=is_960)
+    if task_type == "hanging_piece_claim_verification":
+        claim = _derive_hanging_piece_claim_verification(
+            fen,
+            rng,
+            chess960=is_960,
+        )
+        if not claim:
+            return ""
+        for key, value in claim.items():
+            if key != "answer":
+                raw[f"_{key}"] = value
+        return str(claim["answer"])
     if task_type == "threats":
         answer, color_name = _derive_threats(fen, chess960=is_960)
         raw["_threats_color"] = color_name
@@ -3132,6 +3301,11 @@ def _render_prompt(task_type: str, raw: dict) -> str:
         ctx.setdefault("candidate_moves", candidate_moves)
     if task_type == "step_verification":
         ctx.setdefault("verification_trace", raw.get("verification_trace", ""))
+    if task_type == "hanging_piece_claim_verification":
+        ctx.setdefault(
+            "verification_claim",
+            raw.get("_verification_claim") or raw.get("verification_claim", ""),
+        )
 
     try:
         prompt = template.format(**ctx)
@@ -3254,6 +3428,22 @@ def freeze_split(
                 metadata["source_square"] = raw.get("_ray_walk_square", "")
             elif task_type == "multi_state_tracking":
                 metadata["moves"] = raw.get("_multi_state_tracking_moves", "")
+            elif task_type == "hanging_piece_claim_verification":
+                metadata["verification_claim"] = raw.get("_verification_claim", "")
+                metadata["corruption_kind"] = raw.get("_corruption_kind", "")
+                metadata["query_square"] = raw.get("_query_square", "")
+                metadata["query_piece"] = raw.get("_query_piece", "")
+                metadata["query_color"] = raw.get("_query_color", "")
+                metadata["attacked"] = raw.get("_attacked", False)
+                metadata["defended"] = raw.get("_defended", False)
+                metadata["hanging"] = raw.get("_hanging", False)
+                metadata["claimed_hanging"] = raw.get("_claimed_hanging", False)
+                metadata["verification_verdict"] = raw.get(
+                    "_verification_verdict",
+                    "",
+                )
+                metadata["hanging_status"] = raw.get("_hanging_status", "")
+                metadata["correction"] = raw.get("_correction", "")
         if task_type == "legality_check":
             metadata["move"] = raw.get("_legality_check_move", "")
             metadata["legality_reason_label"] = raw.get("_legality_check_reason_label", "")

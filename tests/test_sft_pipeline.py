@@ -132,6 +132,106 @@ def test_package_run_tier_extends_valid_output_without_reusing_examples(
     assert manifest["target_count"] == 3
     assert manifest["appended_count"] == 2
     assert manifest["skipped_duplicate_count"] >= 1
+    assert manifest["generation_mode"] == "extended_existing"
+    assert manifest["freshness_policy"] == "append_unseen_examples"
+    assert manifest["extension_candidate_count"] >= 3
+    assert manifest["extension_candidate_budget"] >= 4
+
+
+def test_package_run_tier_extension_searches_past_duplicate_prefix(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.output import PipelineStats
+
+    def example(identity: str, idx: int) -> dict:
+        row = _valid_example("9.5_fake_sparse_append", 9, idx)
+        row["metadata"] = {"example_identity": identity}
+        return row
+
+    class SparseFreshGenerator:
+        def __init__(self, config=None, *args, **kwargs):
+            self.config = config or {}
+
+        def task_id(self) -> str:
+            return "9.5_fake_sparse_append"
+
+        def target_volume(self) -> int:
+            return int(self.config.get("volume_override", 0))
+
+        def generate(self):
+            for idx in range(self.target_volume()):
+                if idx < 5:
+                    yield example("fake-0", idx)
+                else:
+                    yield example(f"fake-{idx - 4}", idx)
+
+    tier_dir = tmp_path / "tier9"
+    tier_dir.mkdir()
+    output_path = tier_dir / "9.5_fake_sparse_append.jsonl"
+    output_path.write_text(json.dumps(example("fake-0", 0)) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path)
+    monkeypatch.setitem(pipeline.TIER_GENERATORS, 9, [SparseFreshGenerator])
+
+    pipeline.run_tier(9, {}, frozenset(), PipelineStats(), volume_override=3)
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["metadata"]["example_identity"] for row in rows] == [
+        "fake-0",
+        "fake-1",
+        "fake-2",
+    ]
+    manifest = json.loads(
+        (tier_dir / "9.5_fake_sparse_append.manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["generation_mode"] == "extended_existing"
+    assert manifest["extension_candidate_budget"] > 4
+    assert manifest["extension_candidate_count"] == 7
+    assert manifest["skipped_duplicate_count"] == 5
+
+
+def test_package_run_tier_extension_underfill_reports_duplicate_supply_problem(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.output import PipelineStats
+
+    def duplicate_example(idx: int) -> dict:
+        row = _valid_example("9.6_fake_exhausted_append", 9, idx)
+        row["metadata"] = {"example_identity": "fake-0"}
+        return row
+
+    class DuplicateOnlyGenerator:
+        def __init__(self, config=None, *args, **kwargs):
+            self.config = config or {}
+
+        def task_id(self) -> str:
+            return "9.6_fake_exhausted_append"
+
+        def target_volume(self) -> int:
+            return int(self.config.get("volume_override", 0))
+
+        def generate(self):
+            for idx in range(self.target_volume()):
+                yield duplicate_example(idx)
+
+    tier_dir = tmp_path / "tier9"
+    tier_dir.mkdir()
+    output_path = tier_dir / "9.6_fake_exhausted_append.jsonl"
+    output_path.write_text(json.dumps(duplicate_example(0)) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path)
+    monkeypatch.setitem(pipeline.TIER_GENERATORS, 9, [DuplicateOnlyGenerator])
+
+    with pytest.raises(RuntimeError, match="underfilled while extending.*duplicate"):
+        pipeline.run_tier(9, {}, frozenset(), PipelineStats(), volume_override=2)
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [duplicate_example(0)]
+    assert not (tier_dir / "9.6_fake_exhausted_append.jsonl.tmp").exists()
 
 
 def test_pipeline_stats_for_volume_override_reports_effective_targets():
@@ -263,15 +363,58 @@ def test_package_pipeline_fen_pool_export_preserves_chess960_identity():
     ]
 
 
-def test_legacy_run_pipeline_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.pipeline")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    sys.modules.pop("scripts.run_pipeline", None)
+def test_eval_split_sources_include_multipv_planning_tasks():
+    candidate_rows = []
+    for index, fen in enumerate(
+        [
+            STARTING_FEN,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1",
+            "8/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 0 1",
+        ]
+    ):
+        candidate_rows.append(
+            {
+                "fen": fen,
+                "candidate_ratings": [
+                    {"uci": "e2e4", "cp": 42 + index},
+                    {"uci": "d2d4", "cp": 15},
+                    {"uci": "g1f3", "cp": 5},
+                    {"uci": "c2c4", "cp": -20},
+                    {"uci": "b1c3", "cp": -80},
+                ],
+            }
+        )
 
-    legacy_module = importlib.import_module("scripts.run_pipeline")
+    prepared = build_eval_split_sources(
+        {
+            "fen_pool": [],
+            "openings": [],
+            "position_evals": [],
+            "puzzles": [
+                {
+                    "fen": STARTING_FEN,
+                    "puzzle_id": "duplicate-source",
+                    "solution_first_move": "e2e4",
+                }
+            ],
+            "best_move_evals": [{"fen": STARTING_FEN, "best_move": "e2e4"}],
+            "candidate_rating_evals": candidate_rows,
+            "endgame_positions": [],
+            "mate_rows": [],
+        }
+    )
 
-    assert legacy_module is package_module
+    planning_rows = prepared.sources["planning"]
+    assert [row["task_type"] for row in planning_rows[:3]] == [
+        "candidate_ratings",
+        "best_line_trace",
+        "step_verification",
+    ]
+    assert planning_rows[1]["best_line_trace"] is True
+    verifier = planning_rows[2]
+    assert "1. Candidate" in verifier["verification_trace"]
+    assert verifier["expected_answer"].startswith("Verdict:")
+    assert verifier["metadata"]["source_task"] == "7.8_candidate_ratings"
 
 
 def test_pipeline_import_does_not_set_hf_home(monkeypatch):
@@ -508,15 +651,39 @@ def test_pipeline_eval_only_respects_tier_scope(monkeypatch, tmp_path: Path):
         lambda *_args, **_kwargs: ReadyReport(),
     )
 
-    def fake_run_eval_splits(_config, *, volume_override=None, tiers=None):
+    def fake_run_eval_splits(
+        _config,
+        *,
+        volume_override=None,
+        tiers=None,
+        reuse_eval_splits=False,
+    ):
         captured["volume_override"] = volume_override
         captured["tiers"] = tiers
+        captured["reuse_eval_splits"] = reuse_eval_splits
         return frozenset()
 
     monkeypatch.setattr(pipeline, "run_eval_splits", fake_run_eval_splits)
 
-    assert pipeline.main(["--eval-only", "--tier", "1", "2", "--volume", "200"]) == 0
-    assert captured == {"volume_override": 200, "tiers": [1, 2]}
+    assert (
+        pipeline.main(
+            [
+                "--eval-only",
+                "--tier",
+                "1",
+                "2",
+                "--volume",
+                "200",
+                "--reuse-eval-splits",
+            ]
+        )
+        == 0
+    )
+    assert captured == {
+        "volume_override": 200,
+        "tiers": [1, 2],
+        "reuse_eval_splits": True,
+    }
 
 
 def test_load_sources_restricts_lichess_game_files_for_volume_runs(
@@ -742,6 +909,44 @@ def test_run_eval_splits_refuses_manifest_change_when_outputs_exist(
             volume_override=20,
             tiers=[1],
         )
+
+
+def test_run_eval_splits_can_reuse_existing_blocklist_when_manifest_changes(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+
+    monkeypatch.setattr(pipeline, "EVAL_SPLITS_DIR", tmp_path / "eval_splits")
+    monkeypatch.setattr(pipeline, "BENCHMARK_DIR", tmp_path / "benchmark")
+    monkeypatch.setattr(pipeline, "TIER_OUTPUT_DIR", tmp_path / "output")
+    pipeline.EVAL_SPLITS_DIR.mkdir()
+    (pipeline.EVAL_SPLITS_DIR / "blocklist.txt").write_text("old-fen\n", encoding="utf-8")
+    output_dir = pipeline.TIER_OUTPUT_DIR / "tier3"
+    output_dir.mkdir(parents=True)
+    (output_dir / "3.1_available_captures.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def fail_generate(*_args, **_kwargs):
+        raise AssertionError("eval split generation should not run")
+
+    monkeypatch.setattr(pipeline, "generate_all_eval_splits", fail_generate)
+
+    blocklist = pipeline.run_eval_splits(
+        {
+            "fen_pool": [{"fen": STARTING_FEN, "is_chess960": False}],
+            "openings": [],
+            "position_evals": [],
+            "puzzles": [],
+            "best_move_evals": [],
+            "endgame_positions": [],
+            "mate_rows": [],
+        },
+        volume_override=50,
+        tiers=[3],
+        reuse_eval_splits=True,
+    )
+
+    assert blocklist == frozenset({"std:old-fen"})
 
 
 def test_run_eval_splits_reuses_existing_blocklist_when_manifest_matches(
@@ -1105,6 +1310,104 @@ def test_load_sources_normalizes_polyglot_weights_per_book(
     assert merged["e2e4"] == pytest.approx(0.75 + 0.4)
     assert merged["d2d4"] == pytest.approx(0.25 + 0.6)
     assert config["book_moves"][STARTING_FEN][0][0] == "e2e4"
+
+
+def test_load_sources_derives_book_moves_from_opening_prefixes_without_polyglot(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from chess_llm.sft import pipeline
+
+    prefix = ["e2e4", "e7e5", "g1f3", "b8c6"]
+    board = chess.Board()
+    for uci in prefix:
+        board.push(chess.Move.from_uci(uci))
+    prefix_fen = board.fen()
+
+    spanish = list(prefix)
+    board.push(chess.Move.from_uci("f1b5"))
+    spanish_fen = board.fen()
+
+    italian_board = chess.Board()
+    for uci in prefix + ["f1c4"]:
+        italian_board.push(chess.Move.from_uci(uci))
+    italian_fen = italian_board.fen()
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(
+        pipeline,
+        "load_openings",
+        lambda max_openings=None: [
+            {
+                "fen": prefix_fen,
+                "eco": "C44",
+                "name": "King Pawn Game",
+                "uci_moves": prefix,
+            },
+            {
+                "fen": spanish_fen,
+                "eco": "C60",
+                "name": "Ruy Lopez",
+                "uci_moves": spanish + ["f1b5"],
+            },
+            {
+                "fen": italian_fen,
+                "eco": "C50",
+                "name": "Italian Game",
+                "uci_moves": prefix + ["f1c4"],
+            },
+        ],
+    )
+
+    config = pipeline.load_sources(volume_override=1)
+
+    derived = dict(config["book_moves"][prefix_fen])
+    assert derived == {"f1b5": 1.0, "f1c4": 1.0}
+
+
+def test_load_sources_caps_syzygy_sampling_for_large_volume_overrides(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from contextlib import contextmanager
+
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.sources import syzygy_probing
+
+    syzygy_dir = tmp_path / "syzygy"
+    syzygy_dir.mkdir()
+    calls: list[tuple[str, int]] = []
+
+    @contextmanager
+    def fake_open_tablebase(_path: str):
+        yield object()
+
+    def fake_sample_endgame_positions(_tb, material: str, n: int, _rng):
+        calls.append((material, n))
+        yield {
+            "fen": "8/8/8/8/8/8/6K1/6kQ w - - 0 1",
+            "wdl": 2,
+            "dtz": 1,
+            "material": material,
+        }
+
+    monkeypatch.setattr(pipeline, "stream_games", lambda **_kwargs: [])
+    _empty_source_fakes(monkeypatch, pipeline, tmp_path)
+    monkeypatch.setattr(pipeline, "SYZYGY_PATH", str(syzygy_dir))
+    monkeypatch.setattr(syzygy_probing, "MATERIAL_CONFIGS", ["KQK", "KRK"])
+    monkeypatch.setattr(syzygy_probing, "open_tablebase", fake_open_tablebase)
+    monkeypatch.setattr(
+        syzygy_probing,
+        "sample_endgame_positions",
+        fake_sample_endgame_positions,
+    )
+    monkeypatch.setattr(syzygy_probing, "best_dtz_move", lambda _tb, _board: "h1h8")
+
+    config = pipeline.load_sources(volume_override=25_000)
+
+    assert calls == [("KQK", 5_000), ("KRK", 5_000)]
+    assert len(config["endgame_positions"]) == 2
 
 
 def test_load_sources_shuffles_depth_ordered_evals(monkeypatch, tmp_path: Path):

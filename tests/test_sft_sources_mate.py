@@ -164,23 +164,6 @@ def test_load_mate_zero_limit_does_not_download():
         raise AssertionError("downloader should not be called")
 
     assert list(load_mate(max_rows=0, downloader=fail_downloader)) == []
-
-
-def test_legacy_mate_wrapper_delegates_to_package(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    for module_name in ["sources.mate_dataset", "huggingface_hub"]:
-        sys.modules.pop(module_name, None)
-
-    legacy = importlib.import_module("sources.mate_dataset")
-    package = importlib.import_module("chess_llm.sft.sources.mate")
-
-    assert legacy.load_mate is package.load_mate
-    assert legacy._process_row is package.process_mate_row
-    assert legacy._validate_uci is package.validate_uci
-    assert "huggingface_hub" not in sys.modules
-
-
 def test_package_mate_loader_does_not_eagerly_import_huggingface_hub(monkeypatch):
     for module_name in [
         "chess_llm.sft.sources.mate",

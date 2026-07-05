@@ -130,6 +130,48 @@ def test_package_build_phase_dataset_upsamples_selected_task_train_only(tmp_path
     assert summary["total"] == 5
 
 
+def test_build_phase_dataset_applies_task_include_and_skips_empty_tiers(tmp_path):
+    from chess_llm.training.data.loader import TrainingDataTransformConfig
+    from chess_llm.training.data.mixer import build_phase_dataset, summarize_phase_data
+    from chess_llm.training.phases import TierMix
+
+    _append_jsonl(
+        tmp_path / "tier1" / "rows.jsonl",
+        _row(1, _pawn_fen(0), "t1", task="1.1_fen_to_board"),
+    )
+    _append_jsonl(
+        tmp_path / "tier7" / "rows.jsonl",
+        _row(7, _pawn_fen(1), "best", task="7.1_best_move_selection"),
+    )
+    _append_jsonl(
+        tmp_path / "tier7" / "rows.jsonl",
+        _row(7, _pawn_fen(2), "candidate", task="7.8_candidate_ratings"),
+    )
+    phase = _phase(TierMix(tier=1), TierMix(tier=7))
+    transform = TrainingDataTransformConfig(
+        task_include=frozenset({"7.1_best_move_selection"}),
+    )
+
+    train_ds, eval_ds = build_phase_dataset(
+        phase,
+        tmp_path,
+        eval_fraction=0.0,
+        seed=5,
+        data_transform_config=transform,
+    )
+    summary = summarize_phase_data(
+        phase,
+        tmp_path,
+        data_transform_config=transform,
+    )
+
+    assert len(eval_ds) == 0
+    assert train_ds["task"] == ["7.1_best_move_selection"]
+    assert summary["tier_1"] == 0
+    assert summary["tier_7"] == 1
+    assert summary["total"] == 1
+
+
 def test_eval_fen_keys_persist_across_phase_builds(tmp_path):
     from chess_llm.training.data.mixer import build_phase_dataset
     from chess_llm.training.phases import TierMix

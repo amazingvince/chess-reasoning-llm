@@ -379,18 +379,3 @@ def test_prediction_analysis_result_fen_family_is_not_state_tracking_bleed():
     assert is_prediction_format_bleed("state_tracking", family) is False
     assert prediction_format_family(STARTING_FEN) == "fen"
     assert prediction_format_family("b2b4/8/8/8/7k/8/8/K7 w - - 0 1") == "fen"
-
-
-def test_legacy_eval_scripts_delegate_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.evals import freeze_benchmark, run_benchmark, run_eval_harness
-    from scripts import freeze_benchmark as legacy_freeze
-    from scripts import run_benchmark as legacy_benchmark
-    from scripts import run_eval_harness as legacy_harness
-
-    assert legacy_freeze.main is freeze_benchmark.main
-    assert legacy_harness.main is run_eval_harness.main
-    assert legacy_benchmark.main is run_benchmark.main
-    assert legacy_benchmark.compute_acpl is run_benchmark.compute_acpl

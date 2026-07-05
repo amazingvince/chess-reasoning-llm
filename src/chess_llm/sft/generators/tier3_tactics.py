@@ -14,6 +14,7 @@ from typing import Iterator
 
 import chess
 
+from chess_llm.core.hanging import select_hanging_claim_case
 from chess_llm.sft.context import board_from_raw
 from chess_llm.sft.generators.base import TaskGenerator
 from chess_llm.sft.templates import select_template
@@ -345,4 +346,244 @@ class HangingPieces(TaskGenerator):
             tpl = select_template(self.task_id(), self.rng)
             user_text = self.render_template(raw, tpl)
             yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class HangingPieceStatus(TaskGenerator):
+    """Task 3.6: Decide whether one concrete piece is attacked, defended, and hanging."""
+
+    def task_id(self) -> str:
+        return "3.6_hanging_piece_status"
+
+    def tier(self) -> int:
+        return 3
+
+    def generate(self) -> Iterator[dict]:
+        pool = self.config.get("fen_pool", [])
+        target = self.target_volume()
+        count = 0
+        bucket_order = ("hanging", "attacked_defended", "safe")
+
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+
+            candidates: dict[str, list[tuple[int, chess.Piece, bool, bool]]] = {
+                "hanging": [],
+                "attacked_defended": [],
+                "safe": [],
+            }
+            for sq in chess.SQUARES:
+                piece = board.piece_at(sq)
+                if piece is None or piece.piece_type == chess.KING:
+                    continue
+                attacked = board.is_attacked_by(not piece.color, sq)
+                defended = board.is_attacked_by(piece.color, sq)
+                if attacked and not defended:
+                    bucket = "hanging"
+                elif attacked and defended:
+                    bucket = "attacked_defended"
+                else:
+                    bucket = "safe"
+                candidates[bucket].append((sq, piece, attacked, defended))
+
+            desired_bucket = bucket_order[count % len(bucket_order)]
+            selected = candidates.get(desired_bucket) or next(
+                (values for bucket in bucket_order if (values := candidates[bucket])),
+                [],
+            )
+            if not selected:
+                continue
+
+            sq, piece, attacked, defended = selected[0]
+            square_name = chess.square_name(sq)
+            color_name = "white" if piece.color == chess.WHITE else "black"
+            piece_name = _PIECE_NAMES[piece.piece_type]
+            piece_description = f"{color_name} {piece_name} on {square_name}"
+            hanging = attacked and not defended
+            status = (
+                "hanging"
+                if hanging
+                else "attacked_defended"
+                if attacked and defended
+                else "safe"
+            )
+            answer = "\n".join(
+                [
+                    f"Piece: {piece_description}",
+                    f"Attacked: {'yes' if attacked else 'no'}",
+                    f"Defended: {'yes' if defended else 'no'}",
+                    f"Hanging: {'yes' if hanging else 'no'}",
+                ]
+            )
+
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "query_square": square_name,
+                    "query_piece": piece_name,
+                    "query_color": color_name,
+                    "hanging_status": status,
+                    "attacked": attacked,
+                    "defended": defended,
+                    "hanging": hanging,
+                }
+            )
+            raw.update(
+                {
+                    "metadata": metadata,
+                    "query_square": square_name,
+                    "square": square_name,
+                    "piece": piece_name,
+                    "piece_description": piece_description,
+                }
+            )
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class HangingPieceFilter(TaskGenerator):
+    """Task 3.7: Audit attacked pieces before listing true hanging pieces."""
+
+    def task_id(self) -> str:
+        return "3.7_hanging_piece_filter"
+
+    def tier(self) -> int:
+        return 3
+
+    def generate(self) -> Iterator[dict]:
+        pool = self.config.get("fen_pool", [])
+        target = self.target_volume()
+        count = 0
+
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+
+            audit_lines: list[str] = []
+            hanging: list[str] = []
+            attacked_defended_count = 0
+            for sq in chess.SQUARES:
+                piece = board.piece_at(sq)
+                if piece is None or piece.piece_type == chess.KING:
+                    continue
+                attacked = board.is_attacked_by(not piece.color, sq)
+                if not attacked:
+                    continue
+                defended = board.is_attacked_by(piece.color, sq)
+                is_hanging = not defended
+                color_name = "white" if piece.color == chess.WHITE else "black"
+                description = (
+                    f"{color_name} {_PIECE_NAMES[piece.piece_type]} on {chess.square_name(sq)}"
+                )
+                audit_lines.append(
+                    f"Attacked {description}: Defended: {'yes' if defended else 'no'}; "
+                    f"Hanging: {'yes' if is_hanging else 'no'}"
+                )
+                if is_hanging:
+                    hanging.append(description)
+                else:
+                    attacked_defended_count += 1
+
+            if not audit_lines:
+                audit_lines.append("Attacked pieces: none")
+            if hanging:
+                final_line = f"Hanging pieces: {', '.join(hanging)}."
+            else:
+                final_line = "No hanging pieces — all attacked pieces are defended."
+            answer = "\n".join([*audit_lines, final_line])
+
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "attacked_piece_count": len(audit_lines)
+                    if audit_lines != ["Attacked pieces: none"]
+                    else 0,
+                    "hanging_count": len(hanging),
+                    "attacked_defended_count": attacked_defended_count,
+                }
+            )
+            raw["metadata"] = metadata
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(raw, template_text=user_text, assistant_content=answer)
+            count += 1
+
+
+class HangingPieceClaimVerification(TaskGenerator):
+    """Task 3.8: Verify whether one hanging-piece claim is correct."""
+
+    def task_id(self) -> str:
+        return "3.8_hanging_piece_claim_verification"
+
+    def tier(self) -> int:
+        return 3
+
+    def generate(self) -> Iterator[dict]:
+        pool = self.config.get("fen_pool", [])
+        target = self.target_volume()
+        count = 0
+
+        for entry in pool:
+            if count >= target:
+                return
+            raw = self.source_row(entry)
+            if self.is_blocked(raw):
+                continue
+            board = board_from_raw(raw)
+            if board is None:
+                continue
+            case = select_hanging_claim_case(board, count)
+            if case is None:
+                continue
+
+            metadata = dict(raw.get("metadata", {}))
+            metadata.update(
+                {
+                    "source": "hanging_piece_claim_verification",
+                    "verification_claim": case.verification_claim,
+                    "corruption_kind": case.corruption_kind,
+                    "query_square": case.query_square,
+                    "query_piece": case.query_piece,
+                    "query_color": case.query_color,
+                    "attacked": case.attacked,
+                    "defended": case.defended,
+                    "hanging": case.hanging,
+                    "claimed_hanging": case.claimed_hanging,
+                    "verification_verdict": case.verdict,
+                    "hanging_status": case.hanging_status,
+                    "correction": case.correction,
+                }
+            )
+            raw.update(
+                {
+                    "metadata": metadata,
+                    "verification_claim": case.verification_claim,
+                    "corruption_kind": case.corruption_kind,
+                    "query_square": case.query_square,
+                    "query_piece": case.query_piece,
+                    "query_color": case.query_color,
+                }
+            )
+            tpl = select_template(self.task_id(), self.rng)
+            user_text = self.render_template(raw, tpl)
+            yield self.format_example(
+                raw,
+                template_text=user_text,
+                assistant_content=case.answer,
+            )
             count += 1

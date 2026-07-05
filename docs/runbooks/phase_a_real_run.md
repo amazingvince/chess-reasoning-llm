@@ -18,10 +18,10 @@ Current target volumes:
 
 | Scope | Tasks | Target Rows |
 | --- | ---: | ---: |
-| Tier 1 perception/state/material mechanics | 18 | 1,520,000 |
-| Tier 2 rules/legal-move decomposition | 10 | 650,000 |
-| Phase A total | 28 | 2,170,000 |
-| All tiers | 38 | 2,480,000 |
+| Tier 1 perception/state/material mechanics | 19 | 1,560,000 |
+| Tier 2 rules/legal-move decomposition | 12 | 740,000 |
+| Phase A total | 31 | 2,300,000 |
+| All tiers | 52 | 3,150,000 |
 
 ## Launch Principles
 
@@ -55,8 +55,8 @@ The 2026-06-30 25k-per-task rehearsal completed one pass successfully on SDPA:
 - Final vLLM sidecar eval: 92.6% perception overall, 68.0% rules overall.
 - State tracking reached 91.4%; legal move generation remained low at 26.1%.
 
-Decision: do not scale the unchanged 2026-06-30 recipe directly to the old
-1.73M-row Phase A target. Add targeted material-count and legal-move
+Decision from that dated run: do not scale the unchanged 2026-06-30 recipe
+directly. Add targeted material-count and legal-move
 decomposition first, then run a smaller focused rehearsal and compare against
 the 25k baseline.
 
@@ -115,6 +115,32 @@ Use a ladder instead of jumping straight to the full target:
 
 `--volume` is a uniform per-selected-task override for smoke and rehearsals.
 Omit it to use the per-task targets from `src/chess_llm/sft/settings.py`.
+
+## Expanding Existing Data Roots
+
+Prefer expanding valid task files in place over deleting and regenerating them.
+When a later run asks for a larger target volume, `chess-llm-make-data` scans
+the existing JSONL, keeps valid rows, and appends examples whose
+`metadata.example_identity` has not already appeared in that task file.
+
+This matters for real data quality:
+
+- Non-opening tasks should get fresh positions whenever the source pool can
+  provide them.
+- Existing valid outputs are not recreated just to increase volume.
+- Duplicate candidate rows are skipped during extension and recorded in each
+  `*.manifest.json`.
+- If a task cannot fill after searching the extension candidate budget, treat
+  that as a source-supply problem: add more source rows, increase the source
+  scan budget, or adjust the task generator.
+- Openings are the main exception. Book/opening coverage is finite, so reuse
+  and slower expansion are expected there.
+
+Each task manifest records `generation_mode`, `freshness_policy`,
+`extension_candidate_count`, `extension_candidate_budget`, and
+`skipped_duplicate_count`. For a healthy expansion run, non-opening task
+manifests should usually show `generation_mode: "extended_existing"` and
+`freshness_policy: "append_unseen_examples"` for tasks that grew.
 
 ## Generate Data
 

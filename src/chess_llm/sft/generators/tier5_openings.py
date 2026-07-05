@@ -257,53 +257,61 @@ class OpeningIdentification(TaskGenerator):
         openings = self.config.get("openings", [])
         target = self.target_volume()
         count = 0
+        cycle = 0
 
-        for opening in openings:
-            if count >= target:
-                return
-            fen = opening["fen"]
-            if self.is_blocked(opening):
-                continue
-            is_960 = raw_is_chess960(opening)
-
-            name = opening.get("name", "Unknown")
-            eco = opening.get("eco", "")
-            eco_volume = opening.get("eco_volume", "")
-            if not eco_volume and eco:
-                eco_volume = eco[0]
-            uci_moves = opening.get("uci_moves", [])
-            moves_str = " ".join(uci_moves) if uci_moves else ""
-
-            for variant_tag, tpl_key, builder in self._VARIANTS:
+        while count < target:
+            emitted_this_cycle = 0
+            for opening in openings:
                 if count >= target:
                     return
-                answer = builder(
-                    name=name, eco=eco, eco_volume=eco_volume,
-                    moves_str=moves_str,
-                )
-                if answer is None:
+                fen = opening["fen"]
+                if self.is_blocked(opening):
                     continue
+                is_960 = raw_is_chess960(opening)
 
-                metadata = {
-                    "source": "lichess_openings",
-                    "eco": eco,
-                    "variant": variant_tag,
-                }
-                _copy_chess960_metadata(opening, metadata)
-                raw = {
-                    "fen": fen,
-                    "moves": moves_str,
-                    "name": name,
-                    "eco": eco,
-                    "is_chess960": is_960,
-                    "metadata": metadata,
-                }
-                tpl = select_template(tpl_key, self.rng)
-                user_text = self.render_template(raw, tpl)
-                yield self.format_example(
-                    raw, template_text=user_text, assistant_content=answer,
-                )
-                count += 1
+                name = opening.get("name", "Unknown")
+                eco = opening.get("eco", "")
+                eco_volume = opening.get("eco_volume", "")
+                if not eco_volume and eco:
+                    eco_volume = eco[0]
+                uci_moves = opening.get("uci_moves", [])
+                moves_str = " ".join(uci_moves) if uci_moves else ""
+
+                for variant_tag, tpl_key, builder in self._VARIANTS:
+                    if count >= target:
+                        return
+                    answer = builder(
+                        name=name, eco=eco, eco_volume=eco_volume,
+                        moves_str=moves_str,
+                    )
+                    if answer is None:
+                        continue
+
+                    metadata = {
+                        "source": "lichess_openings",
+                        "eco": eco,
+                        "variant": variant_tag,
+                        "cycle": cycle,
+                    }
+                    _copy_chess960_metadata(opening, metadata)
+                    raw = {
+                        "fen": fen,
+                        "moves": moves_str,
+                        "name": name,
+                        "eco": eco,
+                        "is_chess960": is_960,
+                        "metadata": metadata,
+                    }
+                    tpl = select_template(tpl_key, self.rng)
+                    user_text = self.render_template(raw, tpl)
+                    yield self.format_example(
+                        raw, template_text=user_text, assistant_content=answer,
+                    )
+                    count += 1
+                    emitted_this_cycle += 1
+            if emitted_this_cycle == 0:
+                return
+            cycle += 1
 
 
 # ── 5.2 Opening Continuation ──────────────────────────────────────
@@ -378,44 +386,52 @@ class OpeningContinuation(TaskGenerator):
         book_moves = self.config.get("book_moves", {})
         target = self.target_volume()
         count = 0
+        cycle = 0
 
-        for opening in openings:
-            if count >= target:
-                return
-            fen = opening["fen"]
-            if self.is_blocked(opening):
-                continue
-            is_960 = raw_is_chess960(opening)
-
-            name = opening.get("name", "Unknown")
-            moves = book_moves.get(fen, [])
-            if not moves:
-                continue
-
-            for variant_tag, tpl_key, builder in self._VARIANTS:
+        while count < target:
+            emitted_this_cycle = 0
+            for opening in openings:
                 if count >= target:
                     return
-                answer = builder(moves=moves, name=name)
-                if answer is None:
+                fen = opening["fen"]
+                if self.is_blocked(opening):
+                    continue
+                is_960 = raw_is_chess960(opening)
+
+                name = opening.get("name", "Unknown")
+                moves = book_moves.get(fen, [])
+                if not moves:
                     continue
 
-                metadata = {
-                    "source": "polyglot_books",
-                    "variant": variant_tag,
-                }
-                _copy_chess960_metadata(opening, metadata)
-                raw = {
-                    "fen": fen,
-                    "name": name,
-                    "is_chess960": is_960,
-                    "metadata": metadata,
-                }
-                tpl = select_template(tpl_key, self.rng)
-                user_text = self.render_template(raw, tpl)
-                yield self.format_example(
-                    raw, template_text=user_text, assistant_content=answer,
-                )
-                count += 1
+                for variant_tag, tpl_key, builder in self._VARIANTS:
+                    if count >= target:
+                        return
+                    answer = builder(moves=moves, name=name)
+                    if answer is None:
+                        continue
+
+                    metadata = {
+                        "source": "polyglot_books",
+                        "variant": variant_tag,
+                        "cycle": cycle,
+                    }
+                    _copy_chess960_metadata(opening, metadata)
+                    raw = {
+                        "fen": fen,
+                        "name": name,
+                        "is_chess960": is_960,
+                        "metadata": metadata,
+                    }
+                    tpl = select_template(tpl_key, self.rng)
+                    user_text = self.render_template(raw, tpl)
+                    yield self.format_example(
+                        raw, template_text=user_text, assistant_content=answer,
+                    )
+                    count += 1
+                    emitted_this_cycle += 1
+            if emitted_this_cycle == 0:
+                return
+            cycle += 1
 
 
 # ── 5.3 Opening Principles ────────────────────────────────────────
@@ -514,50 +530,58 @@ class OpeningPrinciples(TaskGenerator):
         openings = self.config.get("openings", [])
         target = self.target_volume()
         count = 0
+        cycle = 0
 
-        for opening in openings:
-            if count >= target:
-                return
-            fen = opening["fen"]
-            if self.is_blocked(opening):
-                continue
-            is_960 = raw_is_chess960(opening)
-
-            name = opening.get("name", "Unknown")
-            eco = opening.get("eco", "")
-            eco_volume = opening.get("eco_volume", "")
-            if not eco_volume and eco:
-                eco_volume = eco[0]
-
-            character = _OPENING_CHARACTER.get(eco_volume, "")
-            board = board_from_raw(opening)
-            if board is None:
-                continue
-
-            for variant_tag, tpl_key, builder in self._VARIANTS:
+        while count < target:
+            emitted_this_cycle = 0
+            for opening in openings:
                 if count >= target:
                     return
-                answer = builder(
-                    name=name, character=character, board=board,
-                )
-                if answer is None:
+                fen = opening["fen"]
+                if self.is_blocked(opening):
+                    continue
+                is_960 = raw_is_chess960(opening)
+
+                name = opening.get("name", "Unknown")
+                eco = opening.get("eco", "")
+                eco_volume = opening.get("eco_volume", "")
+                if not eco_volume and eco:
+                    eco_volume = eco[0]
+
+                character = _OPENING_CHARACTER.get(eco_volume, "")
+                board = board_from_raw(opening)
+                if board is None:
                     continue
 
-                metadata = {
-                    "source": "lichess_openings",
-                    "eco": eco,
-                    "variant": variant_tag,
-                }
-                _copy_chess960_metadata(opening, metadata)
-                raw = {
-                    "fen": fen,
-                    "name": name,
-                    "is_chess960": is_960,
-                    "metadata": metadata,
-                }
-                tpl = select_template(tpl_key, self.rng)
-                user_text = self.render_template(raw, tpl)
-                yield self.format_example(
-                    raw, template_text=user_text, assistant_content=answer,
-                )
-                count += 1
+                for variant_tag, tpl_key, builder in self._VARIANTS:
+                    if count >= target:
+                        return
+                    answer = builder(
+                        name=name, character=character, board=board,
+                    )
+                    if answer is None:
+                        continue
+
+                    metadata = {
+                        "source": "lichess_openings",
+                        "eco": eco,
+                        "variant": variant_tag,
+                        "cycle": cycle,
+                    }
+                    _copy_chess960_metadata(opening, metadata)
+                    raw = {
+                        "fen": fen,
+                        "name": name,
+                        "is_chess960": is_960,
+                        "metadata": metadata,
+                    }
+                    tpl = select_template(tpl_key, self.rng)
+                    user_text = self.render_template(raw, tpl)
+                    yield self.format_example(
+                        raw, template_text=user_text, assistant_content=answer,
+                    )
+                    count += 1
+                    emitted_this_cycle += 1
+            if emitted_this_cycle == 0:
+                return
+            cycle += 1

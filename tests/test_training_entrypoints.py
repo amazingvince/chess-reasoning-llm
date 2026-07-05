@@ -229,6 +229,36 @@ def test_train_cli_parses_task_upsample_overrides(monkeypatch):
     }
 
 
+def test_train_cli_accepts_data_transform_overrides(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "c",
+            "--task-include",
+            "7.1_best_move_selection",
+            "--task-exclude",
+            "7.8_candidate_ratings",
+            "--move-only-task",
+            "7.1_best_move_selection",
+        ],
+    )
+
+    args = train.parse_args()
+    config = train._build_data_transform_config(args)
+
+    assert args.task_include == ["7.1_best_move_selection"]
+    assert args.task_exclude == ["7.8_candidate_ratings"]
+    assert args.move_only_task == ["7.1_best_move_selection"]
+    assert config.task_include == frozenset({"7.1_best_move_selection"})
+    assert config.task_exclude == frozenset({"7.8_candidate_ratings"})
+    assert config.move_only_tasks == frozenset({"7.1_best_move_selection"})
+
+
 def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     from chess_llm.training import train
 
@@ -247,6 +277,26 @@ def test_train_cli_accepts_num_train_epochs_override(monkeypatch):
     args = train.parse_args()
 
     assert args.num_train_epochs == 1.0
+
+
+def test_train_cli_accepts_learning_rate_override(monkeypatch):
+    from chess_llm.training import train
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chess-llm-train",
+            "--phase",
+            "a",
+            "--learning-rate",
+            "2e-6",
+        ],
+    )
+
+    args = train.parse_args()
+
+    assert args.learning_rate == 2e-6
 
 
 def test_train_cli_accepts_packing_and_max_length_overrides(monkeypatch):
@@ -785,6 +835,59 @@ def test_package_curriculum_train_command_forwards_task_upsample(tmp_path: Path)
     assert "--no-acpl" in cmd
 
 
+def test_package_curriculum_train_command_forwards_data_transform_flags(tmp_path: Path):
+    from chess_llm.training.run_curriculum import _build_train_phase_cmd
+
+    args = Namespace(
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "checkpoints",
+        benchmark_dir=tmp_path / "benchmark",
+        inference_backend="transformers",
+        attn_implementation="auto",
+        eval_batch_size=16,
+        eval_max_new_tokens=192,
+        eval_acpl_depth=20,
+        stockfish_path=None,
+        smoke_run=False,
+        max_train_examples=None,
+        task_upsample=[],
+        task_include=["7.1_best_move_selection", "7.2_puzzle_solving"],
+        task_exclude=["7.8_candidate_ratings"],
+        move_only_task=["7.1_best_move_selection"],
+        max_eval_examples=None,
+        max_benchmark_examples_per_split=100,
+        max_steps=None,
+        learning_rate=None,
+        trainer_eval_steps=None,
+        trainer_save_steps=None,
+        skip_trainer_eval=True,
+        gradient_checkpointing=False,
+        enable_liger_fused_linear_ce=False,
+        require_phase_gate=False,
+        no_acpl=True,
+        full_acpl_report=False,
+        no_wandb=True,
+        allow_wandb_offline=False,
+        wandb_project="chess-sft",
+    )
+
+    cmd = _build_train_phase_cmd(
+        "c",
+        args,
+        curriculum_id="curriculum-test",
+        wandb_group=None,
+    )
+
+    assert cmd.count("--task-include") == 2
+    assert "7.2_puzzle_solving" in cmd
+    assert ["--task-exclude", "7.8_candidate_ratings"] == cmd[
+        cmd.index("--task-exclude"): cmd.index("--task-exclude") + 2
+    ]
+    assert ["--move-only-task", "7.1_best_move_selection"] == cmd[
+        cmd.index("--move-only-task"): cmd.index("--move-only-task") + 2
+    ]
+
+
 def test_package_curriculum_train_command_forwards_wandb_offline_allowance(tmp_path: Path):
     from chess_llm.training.run_curriculum import _build_train_phase_cmd
 
@@ -926,40 +1029,6 @@ def test_training_cli_warning_filters_expected_liger_token_accuracy_warning():
     assert [str(warning.message) for warning in captured] == ["unrelated warning"]
 
 
-def test_legacy_training_wrappers_alias_package_modules(monkeypatch):
-    legacy_dir = Path(__file__).resolve().parents[1] / "sft" / "training"
-    monkeypatch.syspath_prepend(str(legacy_dir))
-
-    for module_name in ["evaluate", "run_curriculum", "train"]:
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
-
-    legacy_train = importlib.import_module("train")
-    legacy_evaluate = importlib.import_module("evaluate")
-    legacy_curriculum = importlib.import_module("run_curriculum")
-
-    assert legacy_train is importlib.import_module("chess_llm.training.train")
-    assert legacy_evaluate is importlib.import_module("chess_llm.training.evaluate")
-    assert legacy_curriculum is importlib.import_module("chess_llm.training.run_curriculum")
-
-
-def test_legacy_training_args_wrapper_aliases_package_module(monkeypatch):
-    legacy_dir = Path(__file__).resolve().parents[1] / "sft" / "training"
-    monkeypatch.syspath_prepend(str(legacy_dir))
-
-    class FakeSFTConfig:
-        pass
-
-    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
-    for module_name in ["config", "config.training_args"]:
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
-    _expire_training_args(monkeypatch)
-
-    legacy = importlib.import_module("config.training_args")
-    package = importlib.import_module("chess_llm.training.training_args")
-
-    assert legacy is package
-
-
 def test_qwen35_uses_qwen_safe_liger_config(monkeypatch, tmp_path: Path):
     class FakeSFTConfig:
         def __init__(
@@ -1030,6 +1099,30 @@ def test_qwen35_uses_qwen_safe_liger_config(monkeypatch, tmp_path: Path):
     assert cfg.kwargs["include_num_input_tokens_seen"] is True
     assert cfg.kwargs["packing"] is False
     assert cfg.kwargs["padding_free"] is False
+
+
+def test_build_sft_config_accepts_learning_rate_override(monkeypatch, tmp_path: Path):
+    class FakeSFTConfig:
+        def __init__(
+            self,
+            output_dir=None,
+            run_name=None,
+            assistant_only_loss=None,
+            num_train_epochs=None,
+            learning_rate=None,
+        ):
+            self.kwargs = dict(locals())
+            self.kwargs.pop("self")
+
+    monkeypatch.setitem(sys.modules, "trl", types.SimpleNamespace(SFTConfig=FakeSFTConfig))
+    _expire_training_args(monkeypatch)
+
+    from chess_llm.training.phases import PHASE_B
+    from chess_llm.training.training_args import build_sft_config
+
+    cfg = build_sft_config(PHASE_B, tmp_path, learning_rate=2e-6)
+
+    assert cfg.kwargs["learning_rate"] == 2e-6
 
 
 def test_build_sft_config_uses_flash_attention_packing_when_available(

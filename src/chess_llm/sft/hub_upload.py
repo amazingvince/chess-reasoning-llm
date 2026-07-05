@@ -17,8 +17,7 @@ from chess_llm.sft.settings import SftDataSettings
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
 DEFAULT_ORG = "Chess-Nut-Engine"
@@ -63,6 +62,9 @@ TASK_DESCRIPTIONS = {
     "3.3_attacked_defended": "Determine attacked or defended squares",
     "3.4_tactical_patterns": "Recognize tactical motifs",
     "3.5_hanging_pieces": "Find undefended pieces that can be captured",
+    "3.6_hanging_piece_status": "Classify whether one piece is attacked, defended, and hanging",
+    "3.7_hanging_piece_filter": "Audit attacked pieces and filter defended decoys from hanging pieces",
+    "3.8_hanging_piece_claim_verification": "Verify and correct hanging-piece claims",
     "4.1_material_balance": "Count material and compute the balance",
     "4.2_position_evaluation": "Evaluate a position from engine-calibrated labels",
     "4.3_pawn_structure": "Analyze pawn structure",

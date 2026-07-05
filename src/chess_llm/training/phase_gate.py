@@ -27,6 +27,11 @@ DIAGNOSTIC_METRICS = frozenset({
     "material_piece_counts",
     "material_value_totals",
     "material_balance_trace",
+    "opening_name_exact_match",
+    "opening_name_eco_exact",
+    "opening_name_eco_decade",
+    "opening_name_name_family",
+    "tactical_patterns_exact_match",
     "legality_check_legality_reason_accuracy",
     "side_piece_inventory",
     "piece_legal_moves",
@@ -39,6 +44,7 @@ DIAGNOSTIC_METRICS = frozenset({
     "legal_filter_trace",
     "legal_filter_trace_final_jaccard",
     "ray_walk",
+    "hanging_piece_claim_verification",
     "multi_state_tracking",
 })
 

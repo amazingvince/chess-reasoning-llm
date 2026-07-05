@@ -188,7 +188,8 @@ def test_wsl_launcher_runs_from_repo_root() -> None:
     assert "--exclude '.tmp/'" in text
     assert "--exclude 'chess_sft_data/'" in text
     assert "--exclude 'chess_sft_checkpoints/'" in text
-    assert "--exclude 'sft/make_data/output/'" in text
+    assert "--exclude 'data/syzygy/'" in text
+    assert "--exclude 'polyglot_opening_books/*.bin'" in text
     assert "--exclude 'ui/node_modules/'" in text
     assert "--exclude 'ui/runs/'" in text
     assert "--exclude 'ui/dist/'" in text
@@ -411,7 +412,7 @@ def test_training_docs_explain_wsl_wandb_and_persistent_artifact_paths() -> None
     assert "do not point it at the `output/` directory itself" in text
 
 
-def test_legacy_training_test_runner_is_retired() -> None:
+def test_training_test_runner_stays_at_repo_root() -> None:
     assert not (TRAINING_DIR / "pyproject.toml").exists()
     assert not (TRAINING_DIR / "tests").exists()
     assert "sft/training/tests" not in _read(REPO_ROOT / "README.md")

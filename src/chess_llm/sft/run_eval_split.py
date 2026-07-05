@@ -29,8 +29,7 @@ logger = logging.getLogger(__name__)
 EVAL_SPLIT_MANIFEST_NAME = "manifest.json"
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
 EVAL_SPLITS_DIR = SETTINGS.eval_splits_dir

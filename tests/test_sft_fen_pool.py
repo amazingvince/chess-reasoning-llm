@@ -235,13 +235,3 @@ def test_package_fen_pool_sampling_stays_reproducible():
     second = pool.sample(2, rng=Random(42))
 
     assert [row["fen"] for row in first] == [row["fen"] for row in second]
-
-
-def test_legacy_fen_pool_wrapper_delegates_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.sft.fen_pool import FENPool as PackageFENPool
-    from pool.fen_pool import FENPool as LegacyFENPool
-
-    assert LegacyFENPool is PackageFENPool

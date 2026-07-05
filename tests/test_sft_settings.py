@@ -14,7 +14,7 @@ from chess_llm.sft.settings import (
 
 def test_sft_data_settings_from_env_does_not_mutate_environment(monkeypatch):
     monkeypatch.delenv("HF_HOME", raising=False)
-    project_root = Path("C:/repo/sft/make_data")
+    project_root = Path("C:/repo")
 
     settings = SftDataSettings.from_env(
         project_root,
@@ -35,7 +35,7 @@ def test_sft_data_settings_from_env_does_not_mutate_environment(monkeypatch):
 
 def test_apply_hf_cache_env_preserves_existing_hf_home(monkeypatch):
     monkeypatch.setenv("HF_HOME", "Z:/existing")
-    settings = SftDataSettings.from_env(Path("C:/repo/sft/make_data"), env={})
+    settings = SftDataSettings.from_env(Path("C:/repo"), env={})
 
     apply_hf_cache_env(settings)
 
@@ -44,7 +44,7 @@ def test_apply_hf_cache_env_preserves_existing_hf_home(monkeypatch):
 
 def test_apply_hf_cache_env_sets_default_when_missing(monkeypatch):
     monkeypatch.delenv("HF_HOME", raising=False)
-    settings = SftDataSettings.from_env(Path("C:/repo/sft/make_data"), env={})
+    settings = SftDataSettings.from_env(Path("C:/repo"), env={})
 
     apply_hf_cache_env(settings)
 

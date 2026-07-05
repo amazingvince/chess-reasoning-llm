@@ -29,8 +29,7 @@ from chess_llm.sft.settings import SftDataSettings
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 DEFAULT_BLOCKLIST_PATH = (
     SftDataSettings.from_env(_SETTINGS_ROOT).eval_splits_dir / "blocklist.txt"
 )

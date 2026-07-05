@@ -56,6 +56,36 @@ def parse_args() -> argparse.Namespace:
             "max-train cap. Repeat for multiple tasks."
         ),
     )
+    parser.add_argument(
+        "--task-include",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Keep only examples from this task before each phase's training "
+            "sanitization. Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
+        "--task-exclude",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Drop examples from this task before each phase's training "
+            "sanitization. Repeat for multiple tasks."
+        ),
+    )
+    parser.add_argument(
+        "--move-only-task",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "Rewrite this task's assistant target to a compact move-only "
+            "answer before training. Repeat for multiple tasks."
+        ),
+    )
     parser.add_argument("--max-eval-examples", type=int, default=None, help="Limit trainer eval examples per phase")
     parser.add_argument(
         "--max-benchmark-examples-per-split",
@@ -64,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         help="Limit benchmark examples per split for both pre/post eval",
     )
     parser.add_argument("--max-steps", type=int, default=None, help="Override trainer max_steps for every phase")
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Override the phase learning rate for every phase",
+    )
     parser.add_argument(
         "--trainer-eval-steps",
         type=int,
@@ -172,12 +208,20 @@ def _append_common_train_args(cmd: list[str], args: argparse.Namespace, *, run_n
         cmd.extend(["--max-train-examples", str(args.max_train_examples)])
     for upsample_override in args.task_upsample:
         cmd.extend(["--task-upsample", upsample_override])
+    for task in getattr(args, "task_include", []):
+        cmd.extend(["--task-include", task])
+    for task in getattr(args, "task_exclude", []):
+        cmd.extend(["--task-exclude", task])
+    for task in getattr(args, "move_only_task", []):
+        cmd.extend(["--move-only-task", task])
     if args.max_eval_examples is not None:
         cmd.extend(["--max-eval-examples", str(args.max_eval_examples)])
     if args.max_benchmark_examples_per_split is not None:
         cmd.extend(["--max-benchmark-examples-per-split", str(args.max_benchmark_examples_per_split)])
     if args.max_steps is not None:
         cmd.extend(["--max-steps", str(args.max_steps)])
+    if getattr(args, "learning_rate", None) is not None:
+        cmd.extend(["--learning-rate", str(args.learning_rate)])
     if args.trainer_eval_steps is not None:
         cmd.extend(["--trainer-eval-steps", str(args.trainer_eval_steps)])
     if args.trainer_save_steps is not None:

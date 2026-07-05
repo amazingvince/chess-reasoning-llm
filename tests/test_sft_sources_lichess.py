@@ -453,32 +453,6 @@ def test_preprocess_puzzle_rejects_invalid_later_solution_move():
     )
 
     assert result is None
-
-
-def test_legacy_games_and_puzzles_wrappers_delegate_to_package(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    for module_name in [
-        "sources.lichess_games",
-        "sources.lichess_puzzles",
-        "datasets",
-    ]:
-        sys.modules.pop(module_name, None)
-
-    legacy_games = importlib.import_module("sources.lichess_games")
-    legacy_puzzles = importlib.import_module("sources.lichess_puzzles")
-    package_games = importlib.import_module("chess_llm.sft.sources.lichess_games")
-    package_puzzles = importlib.import_module("chess_llm.sft.sources.lichess_puzzles")
-
-    assert legacy_games.stream_games is package_games.stream_games
-    assert legacy_games.extract_positions is package_games.extract_game_positions
-    assert legacy_games._game_phase is package_games.game_phase
-    assert legacy_games._material_balance is package_games.material_balance
-    assert legacy_puzzles.load_puzzles is package_puzzles.load_puzzles
-    assert legacy_puzzles._preprocess_puzzle is package_puzzles.preprocess_puzzle
-    assert "datasets" not in sys.modules
-
-
 def test_package_lichess_sources_do_not_eagerly_import_datasets(monkeypatch):
     for module_name in [
         "chess_llm.sft.sources",

@@ -1280,7 +1280,7 @@ def test_package_tier5_variant_identities_are_distinct():
         "5.2_opening_continuation",
         "5.3_opening_principles",
     ):
-        assert TASK_IDENTITY_FIELDS[task_id] == ("variant",)
+        assert TASK_IDENTITY_FIELDS[task_id] == ("variant", "cycle")
 
     opening = {
         "fen": STARTING_FEN,
@@ -1298,6 +1298,65 @@ def test_package_tier5_variant_identities_are_distinct():
 
     assert len(rows) == 5
     assert len(identities) == 5
+
+
+def test_package_tier5_opening_identification_cycles_small_sources_to_target():
+    from chess_llm.sft.generators.tier5_openings import OpeningIdentification
+
+    opening = {
+        "fen": STARTING_FEN,
+        "name": "Test Opening",
+        "eco": "C20",
+        "uci_moves": ["e2e4"],
+    }
+    gen = OpeningIdentification(
+        config={"openings": [opening], "volume_override": 6},
+        rng=Random(0),
+    )
+
+    rows = list(gen.generate())
+
+    assert len(rows) == 6
+    assert [row["metadata"]["cycle"] for row in rows] == [0, 0, 0, 0, 0, 1]
+    assert len({row["metadata"]["example_identity"] for row in rows}) == 6
+
+
+def test_package_tier5_continuation_and_principles_cycle_to_target():
+    from chess_llm.sft.generators.tier5_openings import (
+        OpeningContinuation,
+        OpeningPrinciples,
+    )
+
+    opening = {
+        "fen": STARTING_FEN,
+        "name": "Test Opening",
+        "eco": "C20",
+        "uci_moves": ["e2e4"],
+    }
+
+    continuation_rows = list(
+        OpeningContinuation(
+            config={
+                "openings": [opening],
+                "book_moves": {STARTING_FEN: [("e2e4", 2), ("d2d4", 1)]},
+                "volume_override": 5,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+    principles_rows = list(
+        OpeningPrinciples(
+            config={"openings": [opening], "volume_override": 6},
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(continuation_rows) == 5
+    assert [row["metadata"]["cycle"] for row in continuation_rows] == [0, 0, 0, 0, 1]
+    assert len({row["metadata"]["example_identity"] for row in continuation_rows}) == 5
+    assert len(principles_rows) == 6
+    assert [row["metadata"]["cycle"] for row in principles_rows] == [0, 0, 0, 0, 0, 1]
+    assert len({row["metadata"]["example_identity"] for row in principles_rows}) == 6
 
 
 def test_package_cp_to_bucket_implements_shared_contract():
@@ -1389,6 +1448,187 @@ def test_package_tactical_patterns_filter_and_humanize_themes():
     assert rows[1]["messages"][2]["content"] == (
         "The tactic is tactical. Best move: d2d4"
     )
+
+
+def test_package_hanging_piece_status_teaches_attacked_defended_conjunction(monkeypatch):
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceStatus
+
+    tpl = (
+        "FEN: {fen}\nFor the {piece_description}, decide whether it is "
+        "attacked, defended, and hanging."
+    )
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier3_tactics.select_template",
+        lambda _task_id, _rng: tpl,
+    )
+    rows = list(
+        HangingPieceStatus(
+            config={
+                "fen_pool": [
+                    {"fen": "4k3/8/8/8/4r3/8/4Q3/K7 w - - 0 1"},
+                    {"fen": "4k3/8/8/8/4r3/8/4Q3/4K3 w - - 0 1"},
+                    {"fen": STARTING_FEN},
+                ],
+                "volume_override": 3,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 3
+    answers = [row["messages"][2]["content"] for row in rows]
+    assert answers[0] == (
+        "Piece: white queen on e2\n"
+        "Attacked: yes\n"
+        "Defended: no\n"
+        "Hanging: yes"
+    )
+    assert answers[1] == (
+        "Piece: white queen on e2\n"
+        "Attacked: yes\n"
+        "Defended: yes\n"
+        "Hanging: no"
+    )
+    assert answers[2].endswith("Hanging: no")
+    assert "For the white queen on e2" in rows[0]["messages"][1]["content"]
+    assert rows[0]["metadata"]["query_square"] == "e2"
+    assert rows[0]["metadata"]["hanging_status"] == "hanging"
+
+
+def test_package_hanging_piece_status_registered_for_tier3_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceStatus
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert HangingPieceStatus in pipeline.TIER_GENERATORS[3]
+    assert DEFAULT_VOLUMES["3.6_hanging_piece_status"] > 0
+    assert TEMPLATES["3.6_hanging_piece_status"]
+    assert "Attacked:" in ANSWER_CONTRACTS["3.6_hanging_piece_status"]
+    assert TASK_IDENTITY_FIELDS["3.6_hanging_piece_status"] == ("query_square",)
+    assert TASK_DESCRIPTIONS["3.6_hanging_piece_status"]
+
+
+def test_package_hanging_piece_filter_audits_attacked_pieces(monkeypatch):
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceFilter
+
+    tpl = "FEN: {fen}\nAudit attacked pieces, then list hanging pieces."
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier3_tactics.select_template",
+        lambda _task_id, _rng: tpl,
+    )
+    rows = list(
+        HangingPieceFilter(
+            config={
+                "fen_pool": [
+                    "4r3/P1p5/8/1P6/2R1P1p1/4K1kp/8/8 w - - 1 55",
+                    "6k1/8/5n2/8/4r3/8/4Q3/4R1K1 w - - 0 1",
+                ],
+                "volume_override": 2,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["messages"][2]["content"] == (
+        "Attacked white pawn on e4: Defended: yes; Hanging: no\n"
+        "Attacked black pawn on c7: Defended: no; Hanging: yes\n"
+        "Hanging pieces: black pawn on c7."
+    )
+    assert rows[1]["messages"][2]["content"] == (
+        "Attacked white queen on e2: Defended: yes; Hanging: no\n"
+        "Attacked black rook on e4: Defended: yes; Hanging: no\n"
+        "No hanging pieces \u2014 all attacked pieces are defended."
+    )
+    assert rows[0]["metadata"]["attacked_piece_count"] == 2
+    assert rows[0]["metadata"]["hanging_count"] == 1
+    assert rows[0]["metadata"]["attacked_defended_count"] == 1
+
+
+def test_package_hanging_piece_filter_registered_for_tier3_generation():
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceFilter
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+
+    assert HangingPieceFilter in pipeline.TIER_GENERATORS[3]
+    assert DEFAULT_VOLUMES["3.7_hanging_piece_filter"] > 0
+    assert TEMPLATES["3.7_hanging_piece_filter"]
+    assert "Defended:" in ANSWER_CONTRACTS["3.7_hanging_piece_filter"]
+    assert TASK_DESCRIPTIONS["3.7_hanging_piece_filter"]
+
+
+def test_package_hanging_piece_claim_verification_balances_claim_types(monkeypatch):
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceClaimVerification
+
+    tpl = "FEN: {fen}\nClaim to verify: {verification_claim}"
+    monkeypatch.setattr(
+        "chess_llm.sft.generators.tier3_tactics.select_template",
+        lambda _task_id, _rng: tpl,
+    )
+    rows = list(
+        HangingPieceClaimVerification(
+            config={
+                "fen_pool": [
+                    "4k3/8/8/8/4r3/8/4Q3/K7 w - - 0 1",
+                    "4k3/8/8/8/4r3/8/4Q3/4K3 w - - 0 1",
+                    "4k3/8/8/8/4r3/8/4Q3/K7 w - - 0 1",
+                ],
+                "volume_override": 3,
+            },
+            rng=Random(0),
+        ).generate()
+    )
+
+    assert len(rows) == 3
+    assert "Claim to verify: white queen on e2 is hanging." in rows[0]["messages"][1]["content"]
+    assert rows[0]["messages"][2]["content"] == (
+        "Verdict: correct\n"
+        "Attacked: yes\n"
+        "Defended: no\n"
+        "Hanging: yes\n"
+        "Correction: none"
+    )
+    assert rows[1]["metadata"]["corruption_kind"] == "defended_decoy_claim"
+    assert rows[1]["messages"][2]["content"] == (
+        "Verdict: incorrect\n"
+        "Attacked: yes\n"
+        "Defended: yes\n"
+        "Hanging: no\n"
+        "Correction: white queen on e2 is not hanging."
+    )
+    assert rows[2]["metadata"]["corruption_kind"] == "missed_hanging_claim"
+    assert rows[2]["messages"][2]["content"].startswith("Verdict: incorrect")
+
+
+def test_package_hanging_piece_claim_verification_registered_for_tier3_generation():
+    from chess_llm.evals.benchmark import DIAGNOSTIC_TASK_TYPES, TASK_METRIC_TYPE
+    from chess_llm.sft import pipeline
+    from chess_llm.sft.generators.tier3_tactics import HangingPieceClaimVerification
+    from chess_llm.sft.hub_upload import TASK_DESCRIPTIONS
+    from chess_llm.sft.identity import TASK_IDENTITY_FIELDS
+    from chess_llm.sft.settings import DEFAULT_VOLUMES
+    from chess_llm.sft.templates import ANSWER_CONTRACTS, TEMPLATES
+    from chess_llm.training.phase_gate import DIAGNOSTIC_METRICS
+
+    assert HangingPieceClaimVerification in pipeline.TIER_GENERATORS[3]
+    assert DEFAULT_VOLUMES["3.8_hanging_piece_claim_verification"] > 0
+    assert TEMPLATES["3.8_hanging_piece_claim_verification"]
+    assert "Verdict:" in ANSWER_CONTRACTS["3.8_hanging_piece_claim_verification"]
+    assert TASK_IDENTITY_FIELDS["3.8_hanging_piece_claim_verification"] == (
+        "verification_claim",
+        "corruption_kind",
+    )
+    assert TASK_DESCRIPTIONS["3.8_hanging_piece_claim_verification"]
+    assert TASK_METRIC_TYPE["hanging_piece_claim_verification"] == (
+        "hanging_piece_claim_verification"
+    )
+    assert "hanging_piece_claim_verification" in DIAGNOSTIC_TASK_TYPES
+    assert "hanging_piece_claim_verification" in DIAGNOSTIC_METRICS
 
 
 def test_package_mate_trace_claims_check_only_when_true():
@@ -2529,14 +2769,3 @@ def test_pipeline_registry_uses_package_generators():
     assert pipeline.TIER_GENERATORS[7][0].__module__.startswith(
         "chess_llm.sft.generators."
     )
-
-
-def test_legacy_generator_imports_alias_package_modules(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_generator_modules()
-
-    package_tier1 = importlib.import_module("chess_llm.sft.generators.tier1_perception")
-    legacy_tier1 = importlib.import_module("generators.tier1_perception")
-
-    assert legacy_tier1 is package_tier1

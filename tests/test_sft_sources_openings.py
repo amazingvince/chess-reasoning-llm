@@ -90,28 +90,3 @@ def test_load_openings_uses_injected_dataset_loader_and_counts_valid_rows():
 
     assert calls == [("Lichess/chess-openings", "train")]
     assert [row["name"] for row in loaded] == ["Amar", "Anderssen"]
-
-
-def test_legacy_openings_wrapper_delegates_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.sft.sources import lichess_openings as package_openings
-    from sources import lichess_openings as legacy_openings
-
-    assert legacy_openings.load_openings is package_openings.load_openings
-    assert legacy_openings.parse_opening_row is package_openings.parse_opening_row
-
-
-def test_legacy_openings_wrapper_does_not_eagerly_import_datasets(monkeypatch):
-    import importlib
-
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-    sys.modules.pop("sources.lichess_openings", None)
-    sys.modules.pop("datasets", None)
-
-    module = importlib.import_module("sources.lichess_openings")
-
-    assert module.load_openings
-    assert "datasets" not in sys.modules

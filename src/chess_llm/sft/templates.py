@@ -13,6 +13,12 @@ from __future__ import annotations
 from random import Random
 
 
+_THINK_MOVE_ANSWER_CONTRACT = (
+    'Answer format: return exactly "<think>...</think><move><uci></move>", '
+    "where <uci> is the final lowercase UCI move; no extra text."
+)
+
+
 ANSWER_CONTRACTS: dict[str, str] = {
     "1.2_board_to_fen": (
         "Answer format: return exactly one complete six-field FEN, "
@@ -200,6 +206,26 @@ ANSWER_CONTRACTS: dict[str, str] = {
         'one line per side-to-move piece with "pseudo-legal ... | rejected ... '
         '| legal ..." fields, and "All legal moves:".'
     ),
+    "3.6_hanging_piece_status": (
+        'Answer format: return exactly four lines: "Piece: <color> <piece> on <square>", '
+        '"Attacked: yes|no", "Defended: yes|no", and "Hanging: yes|no".'
+    ),
+    "3.7_hanging_piece_filter": (
+        'Answer format: return one line per attacked non-king piece as '
+        '"Attacked <color> <piece> on <square>: Defended: yes|no; Hanging: yes|no", '
+        'or "Attacked pieces: none" if no pieces are attacked, then a final '
+        '"Hanging pieces: ..." or "No hanging pieces ..." line.'
+    ),
+    "3.8_hanging_piece_claim_verification": (
+        'Answer format: return exactly five lines: "Verdict: correct|incorrect", '
+        '"Attacked: yes|no", "Defended: yes|no", "Hanging: yes|no", and '
+        '"Correction: <correct claim|none>".'
+    ),
+    "7.1_best_move_selection": _THINK_MOVE_ANSWER_CONTRACT,
+    "best_move": _THINK_MOVE_ANSWER_CONTRACT,
+    "7.2_puzzle_solving": _THINK_MOVE_ANSWER_CONTRACT,
+    "puzzle_solve": _THINK_MOVE_ANSWER_CONTRACT,
+    "7.3_move_consequence": _THINK_MOVE_ANSWER_CONTRACT,
     "7.8_candidate_ratings": (
         'Answer format: return exactly five lines "Candidate <uci>: <cp|M#>; '
         'Bucket: <label>" followed by exactly one line "Best: <uci>".'
@@ -506,6 +532,29 @@ TEMPLATES: dict[str, list[str]] = {
         "FEN: {fen}\nWhich pieces are unprotected and under attack?",
         "Board:\n{board}\nAre there any hanging pieces?",
         "Board:\n{board}\nWhich pieces are unprotected and under attack?",
+    ],
+    "3.6_hanging_piece_status": [
+        "FEN: {fen}\nFor the {piece_description}, decide whether it is attacked, defended, and hanging.",
+        "In position {fen}, is the {piece_description} attacked, defended, and hanging?",
+        "FEN: {fen}\nAudit the {piece_description}: attacked, defended, and hanging?",
+        "Given FEN: {fen}\nClassify the {piece_description} as attacked, defended, and hanging or not.",
+        "Position: {fen}\nCheck whether the {piece_description} is en prise.",
+        "Board:\n{board}\nFor the {piece_description}, report attacked, defended, and hanging status.",
+    ],
+    "3.7_hanging_piece_filter": [
+        "FEN: {fen}\nAudit attacked pieces, mark defended decoys, then list hanging pieces.",
+        "Given FEN: {fen}\nFor each attacked non-king piece, say whether it is defended, then give the hanging list.",
+        "FEN: {fen}\nFilter attacked pieces into defended and hanging pieces.",
+        "Position: {fen}\nWhich attacked pieces are defended, and which are truly hanging?",
+        "FEN: {fen}\nCheck attacked pieces first; then identify pieces that are attacked and undefended.",
+        "Board:\n{board}\nAudit attacked pieces, then list only attacked undefended pieces.",
+    ],
+    "3.8_hanging_piece_claim_verification": [
+        "FEN: {fen}\nClaim to verify: {verification_claim}",
+        "Given FEN: {fen}\nCheck this hanging-piece claim: {verification_claim}",
+        "Position: {fen}\nVerify whether this statement is correct: {verification_claim}",
+        "FEN: {fen}\nIs this claim right? {verification_claim}",
+        "Board:\n{board}\nClaim to verify: {verification_claim}",
     ],
 
     # ---- Tier 4: Evaluation ----

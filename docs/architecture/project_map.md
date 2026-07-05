@@ -2,52 +2,82 @@
 
 ## Direction
 
-The project is moving from an SFT-only repository toward a chess model
-improvement system. SFT remains the bootstrapping layer, but the long-term
-center of gravity is the self-guided loop: collect model rollouts, judge
-failures, synthesize targeted data, and train the next checkpoint.
+The project is now package-first. SFT remains the bootstrapping layer, but the
+long-term center of gravity is a self-guided improvement loop:
+
+```text
+generate data -> train -> evaluate -> collect failures -> synthesize refresh data
+```
+
+Current code changes should land in `src/chess_llm/` or `src/chess_llm_ui/`.
+Path-based compatibility modules under the old `sft/` trees have been retired.
 
 ## Package Boundaries
 
-`src/chess_llm/` is the package namespace for shared and future-facing code.
+`src/chess_llm/` is the installable package namespace.
 
-- `core`: stable chess/project primitives shared across subsystems.
-- `artifacts`: versioned schemas and JSONL utilities for persisted records.
-- `formats`: model input/output parsing and normalization.
-- `sft`: package-owned SFT row contracts, prompt templates, task generators,
-  validation, source helpers, output auditing, and the main data-generation
-  pipeline. Some ops scripts still live under `sft/make_data` behind
-  compatibility imports while migration continues.
-- `evals`: static benchmark and future arena evaluation interfaces.
-- `autodata`: challenger, solver, judge, and recipe-optimization interfaces.
-- `external`: shared wrappers for external engines and tools such as Stockfish.
-- `preference`: chosen/rejected pair construction and preference datasets.
-- `sdpo`: feedback-distillation and on-policy training artifacts.
-- `inference`: fast move, reasoning move, and tutor-facing interfaces.
+- `core`: stable chess primitives, FEN identity helpers, legal move helpers,
+  rays, and opening-book utilities.
+- `artifacts`: versioned persisted-record schemas and JSONL helpers.
+- `formats`: prompt text, board rendering, answer parsing, and strict
+  `<think>...</think><move>...</move>` protocol helpers.
+- `sft`: SFT row contracts, settings, source loaders, generators,
+  source-readiness checks, eval split construction, validation, output writing,
+  upload helpers, and the main data-generation CLI.
+- `evals`: eval split harnesses, frozen benchmark schema, benchmark scoring,
+  prediction analysis, and batch judge artifact export.
+- `training`: phase definitions, data loading/mixing, model loading, SFT
+  trainer wiring, benchmark generation, curriculum execution, W&B helpers, and
+  vLLM export.
+- `autodata`: rollout artifacts, legality/Stockfish judgment, failure buckets,
+  self-play scaffolding, and SFT refresh row generation.
+- `external`: shared wrappers for external tools such as Stockfish and MultiPV.
+- `preference`: preference-data interfaces.
+- `sdpo`: feedback-distillation and on-policy training artifact namespace.
+- `inference`: inference-facing package namespace.
 
-## Legacy Compatibility
+`src/chess_llm_ui/` owns the FastAPI workbench backend. `ui/` owns the React
+frontend.
 
-The active SFT and training implementations now live under `src/chess_llm`.
-The old trees remain as compatibility surfaces while the package interfaces
-settle:
+## Operational Surfaces
 
-- `sft/make_data/` keeps legacy imports, docs, tests, and ops scripts that
-  forward into package-owned SFT data, eval split, benchmark, validation, and
-  source helper modules.
-- `sft/training/` keeps legacy imports, docs, tests, and wrappers that forward
-  into package-owned phase data loading, training, evaluation, and curriculum
-  modules.
+`sft/training/` remains as launcher/runtime scaffolding only:
 
-Future migrations should remove compatibility code only after its package
-entry point, tests, and docs are stable. Avoid moving or deleting old files just
-to make the tree look cleaner.
+- `Dockerfile`, `Dockerfile.eval`, and `compose.yaml`
+- `run-wsl.ps1`, `run-docker.ps1`, `run-eval-docker.ps1`
+- `posthoc_eval_then_phase.ps1`
+- `requirements.txt`, `requirements.eval.txt`, `.env.example`
+- `build-causal-conv1d-wsl.sh`
 
-## Migration Path
+These files launch package CLIs. They should not grow new Python application
+logic.
 
-1. Use `chess_llm.artifacts` for any new persisted JSONL records.
-2. Use `chess_llm.formats.answers.parse_answer` before judging model outputs.
-3. Add Autodata and preference builders against the artifact schemas.
-4. Introduce adapters from the existing benchmark/eval code to artifact
-   records.
-5. Keep source-readiness, package CLI, and wheel-install checks green before
-   deleting legacy wrappers.
+Local generated or bulky assets use package-default roots:
+
+- `polyglot_opening_books/` for tracked source archives and ignored extracted
+  `.bin` books.
+- `data/syzygy/` for ignored Syzygy tablebase files.
+- `chess_sft_data/` for generated data and benchmark artifacts.
+- `chess_sft_checkpoints/` for model checkpoints.
+
+## Current Documentation
+
+- `docs/index.md`: docs entry point.
+- `docs/reference/package_layout.md`: package ownership details.
+- `docs/reference/cli.md`: supported command surface.
+- `docs/runbooks/phase_a_real_run.md`: current Phase A launch procedure.
+- `docs/schemas/artifact_v1.md`: artifact schema reference.
+- `docs/experiments/experiment_log.md`: dated run journal.
+
+Historical plans, generated agent plans, and dated code reviews live under
+`docs/archive/` and are not source-of-truth operational docs.
+
+## Migration Rules
+
+1. Use `chess_llm.*` imports for all Python code.
+2. Use `chess-llm-*` console scripts for documented workflows.
+3. Keep launcher scripts thin; they should invoke package CLIs.
+4. Update `src/chess_llm/sft/settings.py` when task targets or default asset
+   roots change, then update current docs that quote those values.
+5. Keep root tests focused on package behavior. Do not reintroduce tests whose
+   only purpose is proving retired shim imports.

@@ -59,8 +59,7 @@ from chess_llm.sft.sources.lichess_games import game_phase, material_balance
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 DEFAULT_SELF_PLAY_OUTPUT_DIR = SftDataSettings.from_env(_SETTINGS_ROOT).self_play_dir
 
 BEST_MOVE_PROMPT_TEMPLATE = CANONICAL_PROMPTS["best_move"]

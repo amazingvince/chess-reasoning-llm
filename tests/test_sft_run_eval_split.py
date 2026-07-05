@@ -420,14 +420,3 @@ def test_run_eval_split_module_help_runs_as_python_m():
     assert result.returncode == 0
     assert "Generate eval splits" in result.stdout
     assert "--eval-splits-dir" in result.stdout
-
-
-def test_legacy_run_eval_split_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.run_eval_split")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    sys.modules.pop("scripts.run_eval_split", None)
-
-    legacy_module = importlib.import_module("scripts.run_eval_split")
-
-    assert legacy_module is package_module

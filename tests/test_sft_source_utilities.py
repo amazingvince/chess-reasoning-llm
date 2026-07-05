@@ -207,21 +207,3 @@ def test_package_syzygy_prefers_blessed_loss_over_unconditional_loss(monkeypatch
     )
 
     assert syzygy_probing.best_dtz_move(None, board) == moves[1].uci()
-
-
-def test_legacy_utility_imports_alias_package_modules(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_utility_modules()
-
-    package_annotator = importlib.import_module("chess_llm.sft.annotation")
-    package_polyglot = importlib.import_module("chess_llm.sft.sources.polyglot_books")
-    package_syzygy = importlib.import_module("chess_llm.sft.sources.syzygy_probing")
-
-    legacy_annotator = importlib.import_module("pool.annotator")
-    legacy_polyglot = importlib.import_module("sources.polyglot_books")
-    legacy_syzygy = importlib.import_module("sources.syzygy_probing")
-
-    assert legacy_annotator is package_annotator
-    assert legacy_polyglot is package_polyglot
-    assert legacy_syzygy is package_syzygy

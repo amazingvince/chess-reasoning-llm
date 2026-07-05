@@ -415,14 +415,3 @@ def test_package_validate_outputs_main_prints_legacy_summary(
     assert "Validation Summary" in out
     assert "Total files:" in out
     assert "Total examples:" in out
-
-
-def test_legacy_validate_outputs_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.validate_outputs")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_validate_outputs_modules()
-
-    legacy_module = importlib.import_module("scripts.validate_outputs")
-
-    assert legacy_module is package_module

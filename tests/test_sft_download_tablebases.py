@@ -220,14 +220,3 @@ def test_main_returns_failure_for_empty_piece_list():
     from chess_llm.sft import download_tablebases
 
     assert download_tablebases.main(["--pieces", ""]) == 1
-
-
-def test_legacy_download_tablebases_import_aliases_package_module(monkeypatch):
-    package_module = importlib.import_module("chess_llm.sft.download_tablebases")
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    monkeypatch.syspath_prepend(str(make_data_root))
-    _clear_legacy_download_modules()
-
-    legacy_module = importlib.import_module("scripts.download_tablebases")
-
-    assert legacy_module is package_module

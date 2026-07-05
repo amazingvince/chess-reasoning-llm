@@ -125,12 +125,3 @@ def test_pipeline_stats_report_and_chess960_mix_use_injected_settings():
     assert stats.verify_chess960_mix() == {
         "tier_2": {"target": 0.25, "actual": 0.3333, "delta": 0.0833}
     }
-
-
-def test_legacy_output_modules_reexport_package_classes():
-    legacy_writer = importlib.import_module("sft.make_data.output.writer")
-    legacy_stats = importlib.import_module("sft.make_data.output.stats")
-    package = importlib.import_module("chess_llm.sft.output")
-
-    assert legacy_writer.JSONLWriter is package.JSONLWriter
-    assert legacy_stats.PipelineStats is package.PipelineStats

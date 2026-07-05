@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -65,8 +66,7 @@ logging.basicConfig(
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_LEGACY_MAKE_DATA_ROOT = _REPO_ROOT / "sft" / "make_data"
-_SETTINGS_ROOT = _LEGACY_MAKE_DATA_ROOT if _LEGACY_MAKE_DATA_ROOT.exists() else Path.cwd()
+_SETTINGS_ROOT = _REPO_ROOT
 
 SETTINGS = SftDataSettings.from_env(_SETTINGS_ROOT)
 
@@ -90,6 +90,20 @@ SELF_PLAY_RATIO = SETTINGS.self_play_ratio
 VOLUME_LICHESS_GAME_DATA_FILES = tuple(SETTINGS.volume_lichess_game_data_files)
 EVAL_SPLIT_MANIFEST_NAME = "manifest.json"
 EVAL_SPLIT_FINGERPRINT_CACHE_NAME = "source_fingerprints.cache.json"
+DEFAULT_SYZYGY_SOURCE_SAMPLES = 3_000
+SYZYGY_SOURCE_SAMPLE_CAP = 5_000
+EXTENSION_CANDIDATE_MULTIPLIER = 4
+
+
+@dataclass(frozen=True)
+class TaskExtensionResult:
+    """Counters from appending unseen rows to an existing task output."""
+
+    final_count: int
+    appended_count: int
+    skipped_duplicate_count: int
+    extension_candidate_count: int
+    extension_candidate_budget: int
 
 
 def _load_generator_registry() -> dict[int, list[type]]:
@@ -106,6 +120,42 @@ def _pipeline_stats_for_volume_override(volume_override: int | None) -> Pipeline
     return PipelineStats(
         volumes={task_id: volume_override for task_id in DEFAULT_VOLUMES}
     )
+
+
+def _opening_prefix_book_moves(
+    openings: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float]]:
+    """Derive weighted continuation moves from longer Lichess opening rows."""
+    import chess
+
+    book_moves: dict[str, dict[str, float]] = {}
+    for opening in openings:
+        uci_moves = opening.get("uci_moves")
+        if not isinstance(uci_moves, (list, tuple)):
+            continue
+
+        board = chess.Board()
+        for raw_uci in uci_moves:
+            try:
+                move = chess.Move.from_uci(str(raw_uci))
+            except (ValueError, chess.InvalidMoveError):
+                break
+            if move not in board.legal_moves:
+                break
+
+            fen = board.fen()
+            move_weights = book_moves.setdefault(fen, {})
+            uci = move.uci()
+            move_weights[uci] = move_weights.get(uci, 0.0) + 1.0
+            board.push(move)
+    return book_moves
+
+
+def syzygy_source_sample_count(volume_override: int | None) -> int:
+    """Return per-material Syzygy source rows to sample for this run."""
+    if volume_override is None:
+        return DEFAULT_SYZYGY_SOURCE_SAMPLES
+    return min(volume_override, SYZYGY_SOURCE_SAMPLE_CAP)
 
 
 def chess960_source_target_count(
@@ -331,6 +381,14 @@ def load_sources(volume_override: int | None = None) -> dict:
             except Exception as exc:  # pragma: no cover - depends on local book files
                 logger.warning("Polyglot book %s failed: %s", bin_file, exc)
 
+    if not book_moves:
+        book_moves = _opening_prefix_book_moves(openings)
+        if book_moves:
+            logger.info(
+                "Derived %d opening-prefix book positions from Lichess openings",
+                len(book_moves),
+            )
+
     sorted_book_moves: dict[str, list[tuple[str, float]]] = {}
     for fen, move_weights in book_moves.items():
         sorted_book_moves[fen] = sorted(
@@ -352,8 +410,15 @@ def load_sources(volume_override: int | None = None) -> dict:
 
         try:
             with open_tablebase(str(syzygy_path)) as tb:
+                n = syzygy_source_sample_count(volume_override)
+                if volume_override is not None and n < volume_override:
+                    logger.info(
+                        "Capping Syzygy per-material source samples at %d "
+                        "(volume override: %d)",
+                        n,
+                        volume_override,
+                    )
                 for mat in MATERIAL_CONFIGS:
-                    n = volume_override or 3000
                     for pos in sample_endgame_positions(tb, mat, n, rng):
                         board = chess.Board(pos["fen"])
                         pos["best_move"] = best_dtz_move(tb, board) or ""
@@ -444,6 +509,7 @@ def run_eval_splits(
     tiers: Sequence[int] | None = None,
     eval_split_volume: int | None = None,
     refresh_eval_splits: bool = False,
+    reuse_eval_splits: bool = False,
 ) -> frozenset[str]:
     """Generate eval splits, freeze benchmark, and return the blocklist."""
     selected_splits = set(eval_splits_for_tiers(list(tiers or [])))
@@ -500,6 +566,13 @@ def run_eval_splits(
         return blocklist
     existing_blocklist: frozenset[str] = frozenset()
     if blocklist_path.exists():
+        if reuse_eval_splits:
+            logger.warning(
+                "Existing eval blocklist does not match current generation settings; "
+                "reusing it because reuse_eval_splits=True. Frozen benchmark and "
+                "eval-split manifest will not be changed."
+            )
+            return load_blocklist(blocklist_path)
         if _has_existing_tier_outputs(tiers) and not refresh_eval_splits:
             raise RuntimeError(
                 "eval split manifest changed while tier outputs already exist; "
@@ -845,22 +918,40 @@ def _write_task_generation_manifest(
     appended_count: int,
     skipped_duplicate_count: int,
     source_fingerprint: str,
+    generation_mode: str,
+    freshness_policy: str,
+    extension_candidate_count: int = 0,
+    extension_candidate_budget: int = 0,
 ) -> None:
     payload = {
         "artifact_type": "sft_task_generation_manifest",
         "schema_version": "1.0",
         "task_id": task_id,
+        "generation_mode": generation_mode,
+        "freshness_policy": freshness_policy,
         "target_count": target_count,
         "previous_count": previous_count,
         "final_count": final_count,
         "appended_count": appended_count,
         "skipped_duplicate_count": skipped_duplicate_count,
+        "extension_candidate_count": extension_candidate_count,
+        "extension_candidate_budget": extension_candidate_budget,
         "source_fingerprint": source_fingerprint,
     }
     manifest_path = _task_manifest_path(output_path)
     with manifest_path.open("w", encoding="utf-8", newline="\n") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
         fh.write("\n")
+
+
+def _extension_candidate_budget(target: int, existing_count: int) -> int:
+    """Return candidate rows to ask a generator for while extending output."""
+    deficit = max(0, target - existing_count)
+    if deficit <= 0:
+        return target
+    current_prefix_budget = target + existing_count
+    duplicate_tolerant_budget = existing_count + deficit * EXTENSION_CANDIDATE_MULTIPLIER
+    return max(current_prefix_budget, duplicate_tolerant_budget)
 
 
 def _extend_task_output(
@@ -873,15 +964,17 @@ def _extend_task_output(
     target: int,
     existing_count: int,
     existing_identities: set[str],
-) -> tuple[int, int, int]:
+) -> TaskExtensionResult:
     """Append unseen generated rows to an existing valid task file."""
     candidate_config = dict(gen_config)
+    candidate_budget = _extension_candidate_budget(target, existing_count)
     if candidate_config.get("volume_override") is not None:
-        candidate_config["volume_override"] = target + existing_count
+        candidate_config["volume_override"] = candidate_budget
     gen = gen_cls(config=candidate_config, blocklist=blocklist, rng=_task_rng(task_id))
     tmp_path = output_path.with_name(output_path.name + ".tmp")
     appended = 0
     skipped_duplicate = 0
+    candidate_count = 0
     errors = 0
     identities = set(existing_identities)
 
@@ -895,6 +988,7 @@ def _extend_task_output(
                 dst.write(line)
             final_count = existing_count
             for example in gen.generate():
+                candidate_count += 1
                 identity = _example_identity(example)
                 if identity is None:
                     errors += 1
@@ -919,9 +1013,20 @@ def _extend_task_output(
         if errors:
             raise RuntimeError(f"{task_id} has {errors} validation error(s) while extending")
         if final_count < target:
-            raise RuntimeError(f"{task_id} underfilled: wrote {final_count} / {target}")
+            raise RuntimeError(
+                f"{task_id} underfilled while extending: wrote {final_count} / {target}; "
+                f"appended {appended}; generated {candidate_count} candidate(s), "
+                f"skipped {skipped_duplicate} duplicate candidate(s). "
+                "Increase source volume or add fresh source rows."
+            )
         tmp_path.replace(output_path)
-        return final_count, appended, skipped_duplicate
+        return TaskExtensionResult(
+            final_count=final_count,
+            appended_count=appended,
+            skipped_duplicate_count=skipped_duplicate,
+            extension_candidate_count=candidate_count,
+            extension_candidate_budget=candidate_budget,
+        )
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -969,6 +1074,8 @@ def run_tier(
         gen = gen_cls(config=gen_config, blocklist=blocklist, rng=_task_rng(task_id))
         target = gen.target_volume()
         output_path = tier_dir / f"{task_id}.jsonl"
+        generation_mode = "generated_fresh"
+        freshness_policy = "fresh_file"
 
         if output_path.exists() and output_path.stat().st_size > 0:
             existing, existing_errors, existing_identities, missing_identity = (
@@ -989,6 +1096,8 @@ def run_tier(
                     appended_count=0,
                     skipped_duplicate_count=0,
                     source_fingerprint=source_fingerprint,
+                    generation_mode="skipped_existing",
+                    freshness_policy="reuse_complete_existing",
                 )
                 logger.info(
                     "Skipping %s - output exists at %s (%d examples)",
@@ -1004,7 +1113,7 @@ def run_tier(
                     existing,
                     target,
                 )
-                final_count, appended_count, skipped_duplicate_count = _extend_task_output(
+                extension = _extend_task_output(
                     output_path,
                     gen_cls,
                     gen_config,
@@ -1020,17 +1129,21 @@ def run_tier(
                     task_id=task_id,
                     target_count=target,
                     previous_count=existing,
-                    final_count=final_count,
-                    appended_count=appended_count,
-                    skipped_duplicate_count=skipped_duplicate_count,
+                    final_count=extension.final_count,
+                    appended_count=extension.appended_count,
+                    skipped_duplicate_count=extension.skipped_duplicate_count,
                     source_fingerprint=source_fingerprint,
+                    generation_mode="extended_existing",
+                    freshness_policy="append_unseen_examples",
+                    extension_candidate_count=extension.extension_candidate_count,
+                    extension_candidate_budget=extension.extension_candidate_budget,
                 )
                 logger.info(
                     "  %s: %d final, %d appended, %d duplicate candidate(s) skipped",
                     task_id,
-                    final_count,
-                    appended_count,
-                    skipped_duplicate_count,
+                    extension.final_count,
+                    extension.appended_count,
+                    extension.skipped_duplicate_count,
                 )
                 continue
             existing_count, existing_errors = _scan_task_output(
@@ -1038,6 +1151,8 @@ def run_tier(
                 task_id,
                 blocklist=blocklist,
             )
+            generation_mode = "regenerated_existing"
+            freshness_policy = "replace_invalid_or_untracked_existing"
             logger.info(
                 "Regenerating %s - existing output incomplete or invalid "
                 "(%d / %d examples, %d error(s))",
@@ -1071,6 +1186,8 @@ def run_tier(
                 appended_count=writer.count,
                 skipped_duplicate_count=0,
                 source_fingerprint=source_fingerprint,
+                generation_mode=generation_mode,
+                freshness_policy=freshness_policy,
             )
 
         logger.info(
@@ -1175,6 +1292,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow rebuilding eval splits even when tier outputs already exist.",
     )
+    parser.add_argument(
+        "--reuse-eval-splits",
+        action="store_true",
+        help=(
+            "Reuse the existing eval blocklist/benchmark even when the current "
+            "source volume would produce a different eval-split manifest. Use "
+            "for augmenting selected training tiers against a frozen eval set."
+        ),
+    )
     parser.add_argument("--validate-only", action="store_true", help="Re-validate existing outputs")
     parser.add_argument(
         "--allow-source-gaps",
@@ -1209,6 +1335,9 @@ def _has_existing_tier_outputs(tiers: Sequence[int] | None = None) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.refresh_eval_splits and args.reuse_eval_splits:
+        parser.error("--refresh-eval-splits and --reuse-eval-splits are mutually exclusive")
 
     if not (args.validate_only or args.eval_only or args.all or args.tier):
         parser.print_help()
@@ -1263,6 +1392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         eval_split_kwargs["eval_split_volume"] = args.eval_split_volume
     if args.refresh_eval_splits:
         eval_split_kwargs["refresh_eval_splits"] = args.refresh_eval_splits
+    if args.reuse_eval_splits:
+        eval_split_kwargs["reuse_eval_splits"] = args.reuse_eval_splits
     blocklist = run_eval_splits(config, **eval_split_kwargs)
     logger.info("Eval blocklist: %d FENs", len(blocklist))
 

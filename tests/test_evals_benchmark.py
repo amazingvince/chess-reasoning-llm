@@ -88,6 +88,26 @@ def test_package_freeze_rejects_illegal_best_move_gold():
     assert examples == []
 
 
+def test_package_freeze_planning_prompts_require_think_move_contract():
+    examples = packaged.freeze_split(
+        "planning",
+        [
+            {"fen": STARTING_FEN, "best_move": "e2e4"},
+            {
+                "fen": STARTING_FEN,
+                "puzzle_id": "puzzle-1",
+                "solution_first_move": "d2d4",
+            },
+        ],
+        seed=42,
+    )
+
+    assert [example.task_type for example in examples] == ["best_move", "puzzle_solve"]
+    for example in examples:
+        assert 'Answer format: return exactly "<think>...</think><move><uci></move>"' in example.prompt
+        assert "final lowercase UCI move" in example.prompt
+
+
 def test_package_freeze_rejects_invalid_binary_choice_gold():
     examples = packaged.freeze_split(
         "mate",
@@ -848,6 +868,81 @@ def test_package_uci_set_jaccard_rejects_blank_no_move_prediction():
     scores = packaged.score_prediction(example, "")
 
     assert scores["primary"] == 0.0
+
+
+def test_package_opening_name_scores_family_match_with_exact_telemetry():
+    example = _example(
+        task_type="opening_name",
+        gold_answer="English Opening: Symmetrical Variation, Botvinnik System Reversed (ECO: A37)",
+        metric_type="exact_match",
+    )
+    example.split = "openings"
+
+    scores = packaged.score_prediction(
+        example,
+        "English Opening: Symmetrical Variation, Full Symmetry Line (ECO: A38)",
+    )
+
+    assert scores["primary"] == 1.0
+    assert scores["exact_match"] == 0.0
+    assert scores["eco_exact"] == 0.0
+    assert scores["eco_decade"] == 1.0
+    assert scores["name_family"] == 1.0
+
+
+def test_package_opening_name_rejects_unrelated_family_and_eco():
+    example = _example(
+        task_type="opening_name",
+        gold_answer="French Defense: Winawer Variation, Advance Variation (ECO: C17)",
+        metric_type="exact_match",
+    )
+    example.split = "openings"
+
+    scores = packaged.score_prediction(
+        example,
+        "Queen's Gambit Declined: Albin Countergambit, Modern Line (ECO: D08)",
+    )
+
+    assert scores["primary"] == 0.0
+    assert scores["exact_match"] == 0.0
+    assert scores["eco_decade"] == 0.0
+    assert scores["name_family"] == 0.0
+
+
+def test_package_tactical_patterns_scores_best_move_with_exact_telemetry():
+    example = _example(
+        task_type="tactical_patterns",
+        gold_answer="The tactic is mate in 2. Best move: f7e7",
+        metric_type="exact_match",
+    )
+    example.split = "tactics"
+
+    scores = packaged.score_prediction(
+        example,
+        "The tactic is tactical. Best move: f7e7",
+    )
+
+    assert scores["primary"] == 1.0
+    assert scores["best_move_match"] == 1.0
+    assert scores["exact_match"] == 0.0
+
+
+def test_package_tactical_patterns_rejects_wrong_best_move():
+    example = _example(
+        task_type="tactical_patterns",
+        gold_answer="The tactic is pin. Best move: c4d5",
+        metric_type="exact_match",
+    )
+    example.split = "tactics"
+
+    scores = packaged.score_prediction(
+        example,
+        "The tactic is pin. Best move: c4f7",
+    )
+
+    assert scores["primary"] == 0.0
+    assert scores["best_move_match"] == 0.0
+    assert scores["exact_match"] == 0.0
 
 
 def test_package_check_state_metric_accepts_semantic_labels():
@@ -1677,6 +1772,89 @@ def test_package_legal_moves_by_piece_reports_set_f1_secondary():
     assert packaged.score_prediction(example, gold)["set_f1"] == 1.0
 
 
+def test_package_hanging_pieces_reports_set_f1_secondary():
+    gold = "Hanging pieces: white pawn on d4, black queen on f3."
+    example = _example(
+        task_type="hanging_pieces",
+        gold_answer=gold,
+        metric_type="exact_match",
+    )
+
+    scores = packaged.score_prediction(
+        example,
+        "Hanging pieces: white pawn on d4, black pawn on c6.",
+    )
+
+    assert scores["primary"] == 0.0
+    assert round(scores["set_f1"], 3) == 0.5
+    assert packaged.score_prediction(example, gold) == {"primary": 1.0, "set_f1": 1.0}
+    assert (
+        packaged.score_prediction(
+            example,
+            "No hanging pieces — all attacked pieces are defended.",
+        )["set_f1"]
+        == 0.0
+    )
+
+
+def test_package_hanging_piece_claim_verification_scores_fixed_fields():
+    gold = (
+        "Verdict: incorrect\n"
+        "Attacked: yes\n"
+        "Defended: yes\n"
+        "Hanging: no\n"
+        "Correction: white queen on e2 is not hanging."
+    )
+    example = _example(
+        task_type="hanging_piece_claim_verification",
+        gold_answer=gold,
+        metric_type="hanging_piece_claim_verification",
+    )
+
+    scores = packaged.score_prediction(
+        example,
+        (
+            "Verdict: incorrect\n"
+            "Attacked: yes\n"
+            "Defended: no\n"
+            "Hanging: yes\n"
+            "Correction: white queen on e2 is hanging."
+        ),
+    )
+
+    assert scores["primary"] == 0.4
+    assert scores["verdict_accuracy"] == 1.0
+    assert scores["attacked_accuracy"] == 1.0
+    assert scores["defended_accuracy"] == 0.0
+    assert scores["hanging_accuracy"] == 0.0
+    assert scores["correction_match"] == 0.0
+    assert packaged.score_prediction(example, gold)["primary"] == 1.0
+
+
+def test_package_hanging_piece_claim_verification_freezes_as_diagnostic():
+    rows = [
+        {"fen": "4k3/8/8/8/4r3/8/4Q3/K7 w - - 0 1"}
+        for _ in range(5)
+    ]
+
+    examples = packaged.freeze_split("tactics", rows, seed=42)
+    verifier = [
+        example
+        for example in examples
+        if example.task_type == "hanging_piece_claim_verification"
+    ]
+
+    assert verifier
+    example = verifier[0]
+    assert example.metadata["diagnostic"] is True
+    assert example.metadata["hard_gate"] is False
+    assert "Claim to verify:" in example.prompt
+    assert "Answer format: return exactly five lines" in example.prompt
+    assert '"Verdict: correct|incorrect"' in example.prompt
+    assert "verification_claim" in example.metadata
+    assert packaged.score_prediction(example, example.gold_answer)["primary"] == 1.0
+
+
 def test_package_score_split_reports_new_composite_secondary_names():
     trace_gold = packaged.derive_gold_answer(
         "legal_filter_trace",
@@ -1701,135 +1879,44 @@ def test_package_score_split_reports_new_composite_secondary_names():
             gold_answer=trace_gold,
             metric_type="text_exact_match",
         ),
+        _example(
+            example_id="tactics_00000",
+            task_type="hanging_pieces",
+            gold_answer="Hanging pieces: white pawn on d4.",
+            metric_type="exact_match",
+        ),
+        _example(
+            example_id="tactics_00001",
+            task_type="hanging_piece_claim_verification",
+            gold_answer=(
+                "Verdict: correct\n"
+                "Attacked: yes\n"
+                "Defended: no\n"
+                "Hanging: yes\n"
+                "Correction: none"
+            ),
+            metric_type="hanging_piece_claim_verification",
+        ),
     ]
 
     metrics = packaged.score_split(
         examples,
-        {"rules_00000": filter_gold, "rules_00001": trace_gold},
+        {
+            "rules_00000": filter_gold,
+            "rules_00001": trace_gold,
+            "tactics_00000": "Hanging pieces: white pawn on d4.",
+            "tactics_00001": (
+                "Verdict: correct\n"
+                "Attacked: yes\n"
+                "Defended: no\n"
+                "Hanging: yes\n"
+                "Correction: none"
+            ),
+        },
     )
 
     assert metrics["piece_legal_filter_set_f1"] == 1.0
     assert metrics["legal_filter_trace_final_jaccard"] == 1.0
-
-
-def test_package_and_legacy_score_prediction_parity():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-    from validation import benchmark as legacy
-
-    assert legacy is packaged
-    assert sys.modules["validation.benchmark"] is packaged
-    assert legacy.BenchmarkExample is packaged.BenchmarkExample
-    assert legacy.score_prediction is packaged.score_prediction
-    assert legacy.score_split is packaged.score_split
-    assert legacy.load_benchmark is packaged.load_benchmark
-    assert legacy._extract_move is packaged._extract_move
-
-    assert legacy.derive_gold_answer is packaged.derive_gold_answer
-    assert legacy.freeze_split is packaged.freeze_split
-    assert legacy.freeze_and_save is packaged.freeze_and_save
-
-    examples = [
-        _example(),
-        _example(
-            example_id="mate_00000",
-            task_type="binary_choice",
-            gold_answer="d2d4",
-            metric_type="move_choice",
-            metadata={"move_a": "e2e4", "move_b": "d2d4"},
-        ),
-        _example(
-            example_id="evaluation_00000",
-            task_type="eval_bucket",
-            gold_answer="White has a slight edge.",
-            metric_type="eval_bucket",
-        ),
-    ]
-    predictions = {
-        "planning_00000": "<think>center</think><move>e2e4</move>",
-        "mate_00000": "e2e4 is not best; d2d4 is better.",
-        "evaluation_00000": "White has a slight edge.",
-    }
-
-    for example in examples:
-        legacy_example = legacy.BenchmarkExample.from_dict(example.to_dict())
-        assert packaged.score_prediction(example, predictions[example.example_id]) == legacy.score_prediction(
-            legacy_example,
-            predictions[example.example_id],
-        )
-
-
-def test_legacy_benchmark_required_exports_are_package_objects():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-    legacy = importlib.import_module("validation.benchmark")
-    required_names = [
-        "BenchmarkExample",
-        "_render_prompt",
-        "derive_gold_answer",
-        "freeze_split",
-        "freeze_and_save",
-        "validate_oracle",
-        "save_benchmark",
-        "load_benchmark",
-        "score_prediction",
-        "score_split",
-        "exact_match",
-        "jaccard_similarity",
-        "eval_bucket_accuracy",
-        "format_compliance",
-        "legal_move_rate",
-        "move_extraction_match",
-        "move_choice_match",
-        "pass_at_k",
-        "threat_f1",
-        "continuation_rank",
-        "centipawn_loss",
-        "_extract_move",
-        "extract_move",
-        "normalize_prediction",
-        "validate_think_move_format",
-        "SPLIT_TASK_TYPES",
-        "CANONICAL_PROMPTS",
-        "TASK_METRIC_TYPE",
-        "_eval_bucket_key",
-        "_is_negated",
-    ]
-
-    for name in required_names:
-        assert getattr(legacy, name) is getattr(packaged, name)
-
-
-def test_legacy_benchmark_import_spellings_share_package_module():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    short_legacy = importlib.import_module("validation.benchmark")
-    package_legacy = importlib.import_module("sft.make_data.validation.benchmark")
-
-    assert short_legacy is packaged
-    assert package_legacy is packaged
-    assert sys.modules["validation.benchmark"] is packaged
-    assert sys.modules["sft.make_data.validation.benchmark"] is packaged
-
-
-def test_legacy_benchmark_alias_monkeypatches_package_globals(monkeypatch):
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-    legacy = importlib.import_module("validation.benchmark")
-    calls: list[tuple[str, str]] = []
-
-    def fake_derive_gold_answer(task_type, raw, rng):
-        calls.append((task_type, raw["fen"]))
-        return "patched-gold"
-
-    monkeypatch.setattr(legacy, "derive_gold_answer", fake_derive_gold_answer)
-
-    examples = legacy.freeze_split(
-        "planning",
-        [{"fen": STARTING_FEN, "best_move": "e2e4"}],
-        seed=42,
-    )
-
-    assert examples[0].gold_answer == "patched-gold"
-    assert calls == [("best_move", STARTING_FEN)]
+    assert metrics["hanging_pieces_set_f1"] == 1.0
+    assert metrics["hanging_piece_claim_verification_verdict_accuracy"] == 1.0
+    assert metrics["hanging_piece_claim_verification_correction_match"] == 1.0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import types
 from argparse import Namespace
 from pathlib import Path
 
@@ -184,12 +185,36 @@ def test_qwen_eval_prompt_uses_template_thinking_flag_without_text_directive():
             captured["kwargs"] = kwargs
             return "formatted prompt"
 
-    prompt = evaluate.format_prompt(_benchmark_example(), FakeQwenTokenizer())
+    prompt = evaluate.format_prompt(_split_example("rules"), FakeQwenTokenizer())
 
     assert prompt == "formatted prompt"
     assert captured["kwargs"]["enable_thinking"] is False
-    assert captured["messages"][1]["content"] == _benchmark_example().prompt
+    assert captured["messages"][1]["content"] == _split_example("rules").prompt
     assert "/no_think" not in captured["messages"][1]["content"]
+
+
+def test_trace_protocol_eval_prompt_enables_thinking_prefill():
+    from chess_llm.training import evaluate
+
+    captured = {}
+
+    class FakeQwenTokenizer:
+        name_or_path = "Qwen/Qwen3.5-0.8B"
+
+        def apply_chat_template(self, messages, **kwargs):
+            captured["messages"] = messages
+            captured["kwargs"] = kwargs
+            return "formatted prompt<think>\n"
+
+    prompt, prefill = evaluate.format_prompt_with_assistant_prefill(
+        _benchmark_example(),
+        FakeQwenTokenizer(),
+    )
+
+    assert prompt == "formatted prompt<think>\n"
+    assert prefill == "<think>\n"
+    assert captured["kwargs"]["enable_thinking"] is True
+    assert captured["messages"][1]["content"] == _benchmark_example().prompt
 
 
 def test_eval_prompt_disables_thinking_for_local_checkpoint_tokenizer():
@@ -206,11 +231,24 @@ def test_eval_prompt_disables_thinking_for_local_checkpoint_tokenizer():
             return "formatted prompt"
 
     prompt = evaluate.format_prompt(
-        _benchmark_example(), FakeLocalCheckpointTokenizer()
+        _split_example("rules"), FakeLocalCheckpointTokenizer()
     )
 
     assert prompt == "formatted prompt"
     assert captured["kwargs"]["enable_thinking"] is False
+
+
+def test_stitch_assistant_prefill_preserves_explicit_think():
+    from chess_llm.training import evaluate
+
+    assert (
+        evaluate._stitch_assistant_prefill("<think>\n", "reason</think><move>e2e4</move>")
+        == "<think>\nreason</think><move>e2e4</move>"
+    )
+    assert (
+        evaluate._stitch_assistant_prefill("<think>\n", "<think>x</think><move>e2e4</move>")
+        == "<think>x</think><move>e2e4</move>"
+    )
 
 
 def test_eval_prompt_falls_back_when_template_rejects_thinking_flag():
@@ -1217,6 +1255,52 @@ def test_eval_output_budget_defaults_to_512_tokens(monkeypatch):
         output=Path("predictions.jsonl"),
     )
     assert config.max_new_tokens == 512
+
+
+def test_flash_attention_eval_loads_bfloat16_weights(monkeypatch):
+    from chess_llm.training import evaluate
+
+    captured: dict[str, object] = {}
+    fake_model = types.SimpleNamespace(eval=lambda: None, to=lambda _device: fake_model)
+
+    fake_torch = types.SimpleNamespace(
+        bfloat16=object(),
+        cuda=types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 1,
+        ),
+    )
+
+    monkeypatch.setattr(evaluate, "_get_torch", lambda: fake_torch)
+    monkeypatch.setattr(evaluate, "load_prompt_tokenizer", lambda _model: "tokenizer")
+
+    def fake_load_causal_lm_with_attention(
+        _model_cls,
+        _model_path,
+        model_kwargs,
+        *,
+        requested_attn,
+        logger,
+    ):
+        captured["model_kwargs"] = model_kwargs
+        captured["requested_attn"] = requested_attn
+        return fake_model, requested_attn
+
+    monkeypatch.setattr(
+        evaluate,
+        "load_causal_lm_with_attention",
+        fake_load_causal_lm_with_attention,
+    )
+
+    model, tokenizer = evaluate.load_model_and_tokenizer(
+        "checkpoint",
+        attn_implementation="flash_attention_3",
+    )
+
+    assert model is fake_model
+    assert tokenizer == "tokenizer"
+    assert captured["requested_attn"] == "flash_attention_3"
+    assert captured["model_kwargs"]["torch_dtype"] is fake_torch.bfloat16
 
 
 def test_phase_a_evaluation_loads_only_foundation_splits_by_default(

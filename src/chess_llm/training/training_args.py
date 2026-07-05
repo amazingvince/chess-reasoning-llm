@@ -118,6 +118,7 @@ def build_sft_config(
     logging_steps: int | None = None,
     trainer_eval: bool = True,
     attn_implementation: str | None = None,
+    learning_rate: float | None = None,
     liger_fused_linear_cross_entropy: bool = False,
     gradient_checkpointing: bool = False,
     packing: str = "auto",
@@ -202,7 +203,7 @@ def build_sft_config(
         assistant_only_loss=True,
         # Training
         num_train_epochs=effective_num_train_epochs,
-        learning_rate=phase.learning_rate,
+        learning_rate=phase.learning_rate if learning_rate is None else learning_rate,
         # Warmup is a ratio of the Trainer's actual optimizer steps, so it
         # stays correct for packed runs where per-example step estimates
         # overcount the schedule length.

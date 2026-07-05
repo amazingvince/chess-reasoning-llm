@@ -71,17 +71,3 @@ def test_package_eval_harness_uses_chess960_id_metadata():
     assert result.total == 1
     assert result.passed == 1
     assert result.failed == 0
-
-
-def test_legacy_eval_harness_delegates_to_package():
-    make_data_root = Path(__file__).resolve().parents[1] / "sft" / "make_data"
-    sys.path.insert(0, str(make_data_root))
-
-    from chess_llm.evals import eval_harness as packaged
-    from validation import eval_harness as legacy
-
-    assert legacy.EvalResult is packaged.EvalResult
-    assert legacy.SPLIT_CHECKS is packaged.SPLIT_CHECKS
-    assert legacy.answer_legal_moves is packaged.answer_legal_moves
-    assert legacy.answer_captures is packaged.answer_captures
-    assert legacy.evaluate_split is packaged.evaluate_split
